@@ -1,0 +1,224 @@
+# Offerbook Lending Allocation Config
+# =====================================
+# Maps each collateral token (by mint address) to a fraction of your total
+# available USDC balance that you are willing to offer in that market.
+#
+#   1.0  = up to 100% of your balance  (e.g. 300 USDC if you have 300)
+#   0.5  = up to 50%  (150 USDC)
+#   0.0  = skip this market entirely
+#
+# HOW IT WORKS WITH THE LTV FILTER
+# ----------------------------------
+# The bot always filters out markets where the collateral is worth less than
+# 40% of the loan in USD terms.  Tokens listed HERE bypass that filter —
+# you are explicitly trusting them regardless.  Tokens NOT listed fall back
+# to the LTV filter and then use the 'default' allocation below if they pass.
+#
+# WHY STALE LTV CAUSES FALSE BLOCKS
+# ------------------------------------
+# SOL loans created 4 weeks ago when SOL=$80 show as 80% LTV even though
+# SOL is now $160 (real LTV = 40%).  Listing SOL here bypasses the stale
+# calculation and trusts your explicit allocation instead.
+#
+# ADD ANY TOKEN
+# ---------------
+# You can add any collateral mint to this file at any time.  Just paste the
+# mint address as a new key under 'allocations' with your desired fraction.
+# The bot picks it up on the next run — no code change needed.
+
+allocations:
+
+  # ===========================================================================
+  # TIER 1 — Blue-chip / highest trust  (100% allocation)
+  # ===========================================================================
+
+  # SOL (Wrapped SOL)
+  So11111111111111111111111111111111111111112: 1.0
+
+  # cbBTC (Coinbase Wrapped BTC on Solana)
+  cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij: 1.0
+
+  # ===========================================================================
+  # TIER 2 — Liquid staking tokens  (70% allocation)
+  # These are SOL derivatives — slightly less liquid than native SOL but
+  # very well-collateralised once stale LTV prices are accounted for.
+  # ===========================================================================
+
+  # mSOL (Marinade Finance staked SOL)
+  mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So: 0.7
+
+  # bSOL (BlazeStake staked SOL)
+  bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1: 0.7
+
+  # JupSOL (Jupiter staked SOL)
+  jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v: 0.7
+
+  # jitoSOL (Jito staked SOL)
+  J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn: 0.7
+
+  # bbSOL (Bybit staked SOL)
+  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 0.7
+
+  # bnSOL (Binance staked SOL)
+  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 0.7
+
+  # ===========================================================================
+  # TIER 3 — Major DeFi / well-known tokens  (50% allocation)
+  # ===========================================================================
+
+  # JUP (Jupiter governance token)
+  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 0.5
+
+  # JLP (Jupiter Liquidity Pool token)
+  4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R: 0.5
+
+  # BONK
+  DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: 0.5
+
+  # HNT (Helium Network Token)
+  hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux: 0.5
+
+  # NOS (Nosana)
+  nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7: 0.3
+
+  # WEN
+  WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst: 0.3
+
+  # ===========================================================================
+  # TIER 4 — Smaller / less-known tokens active on Offerbook  (20-30%)
+  # LTV shown is approximate from loan creation time — actual current LTV
+  # may differ. Set to 0.0 to skip any you don't recognise.
+  # ===========================================================================
+
+  # (ltv ~15%)  — unknown pump.fun token
+  HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump: 0.0
+
+  # (ltv ~16%)  — unknown token
+  HNg5PYJmtqcmzXrv6S9zP1CDKk5BgDuyFBxbvNaDvCN: 0.0
+
+  # (ltv ~17%)  — unknown meta token (BANK?)
+  BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta: 0.0
+
+  # (ltv ~17%)  — unknown pump.fun token
+  eL5fUxj2J4CiQsmW85k5FG9DvuQjjUoBHoQBi2Kpump: 0.0
+
+  # (ltv ~18%)  — unknown token
+  FUAfBo2jgks6gB4Z4LfZkqSZgzNucisEHqnNebaRxM1P: 0.0
+
+  # (ltv ~20%)  — unknown pump.fun token
+  74SBV4zDXxTRgv1pEMoECskKBkZHc2yGPnc7GYVepump: 0.0
+
+  # (ltv ~21%)  — unknown meta token (PRVT?)
+  PRVT6TB7uss3FrUd2D9xs2zqDBsa3GbMJMwCQsgmeta: 0.0
+
+  # (ltv ~23%)  — unknown pump.fun token
+  CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump: 0.0
+
+  # (ltv ~25%)  — unknown pump.fun token
+  2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump: 0.0
+
+  # (ltv ~27%)  — unknown pump.fun token
+  Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump: 0.0
+
+  # (ltv ~27%)  — unknown token
+  DvjbEsdca43oQcw2h3HW1CT7N3x5vRcr3QrvTUHnXvgV: 0.0
+
+  # (ltv ~28%)  — unknown token
+  J6pQQ3FAcJQeWPPGppWRb4nM8jU3wLyYbRrLh7feMfvd: 0.0
+
+  # (ltv ~31%)  — unknown token
+  J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr: 0.0
+
+  # (ltv ~33%)  — unknown pump.fun token
+  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 0.0
+
+  # (ltv ~35%)  — unknown token
+  8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn: 0.0
+
+  # (ltv ~35%)  — unknown token (KMNO?)
+  KMNo3nJsBXfcpJTVhZcXLW7RmTwTt4GVFE7suUBo9sS: 0.0
+
+  # (ltv ~35%)  — unknown token
+  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 0.0
+
+  # (ltv ~36%)  — unknown token
+  DtR4D9FtVoTX2569gaL837ZgrB6wNjj6tkmnX9Rdk9B2: 0.0
+
+  # (ltv ~36%)  — unknown token (TUNA?)
+  TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx: 0.0
+
+  # (ltv ~36%)  — unknown pump.fun token
+  FeR8VBqNRSUD5NtXAj2n3j1dAHkZHfyDktKuLXD4pump: 0.0
+
+  # (ltv ~37%)  — unknown pump.fun token
+  6AJcP7wuLwmRYLBNbi825wgguaPsWzPBEHcHndpRpump: 0.0
+
+  # (ltv ~39%)  — unknown token
+  Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk: 0.0
+
+  # (ltv ~40%)  — unknown pump.fun token
+  61V8vBaqAGMpgDQi4JcAwo1dmBGHsyhzodcPqnEVpump: 0.0
+
+  # (ltv ~40%)  — unknown token
+  5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2: 0.0
+
+  # (ltv ~40%)  — unknown pump.fun token
+  Dfh5DzRgSvvCFDoYc2ciTkMrbDfRKybA4SoFbPmApump: 0.0
+
+  # (ltv ~41%)  — unknown pump.fun token
+  33eum82LaAhtv5YkUq1BdwEviSErH5CnFxqVNLT5pump: 0.0
+
+  # (ltv ~41%)  — unknown token
+  2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv: 0.0
+
+  # (ltv ~43%)  — unknown token (PYUSD? UXD?)
+  ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82: 0.0
+
+  # (ltv ~43%)  — pump.fun utility token
+  pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn: 0.0
+
+  # (ltv ~45%)  — unknown token
+  SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3: 0.0
+
+  # (ltv ~46%)  — unknown token
+  7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr: 0.0
+
+  # (ltv ~50%)  — unknown token
+  5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC: 0.0
+
+  # (ltv ~50%)  — unknown token
+  9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump: 0.0
+
+  # (ltv ~51%)  — staked token (stKE?)
+  stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh: 0.0
+
+  # (ltv ~53%)  — unknown token (pSOL?)
+  pSo1f9nQXWgXibFtKf7NWYxb5enAM4qfP6UJSiXRQfL: 0.0
+
+  # (ltv ~53%)  — unknown token
+  5oVNBeEEQvYi1cX3ir8Dx5n1P7pdxydbGF2X4TxVusJm: 0.0
+
+  # (ltv ~54%)  — unknown token
+  2uQsyo1fXXQkDtcpXnLofWy88PxcvnfH2L8FPSE62FVU: 0.0
+
+  # (ltv ~65%)  — unknown token
+  GhLqUPca1N64YmksYkXgNRSZvsTA4rbYGRpU66vyDMAL: 0.0
+
+  # (ltv ~68%)  — unknown token
+  A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS: 0.0
+
+  # (ltv ~68%)  — unknown token
+  E65CoK961Rs5LzKhGZxbKsB7xpFhYhXogH8nhr8zamTK: 0.0
+
+  # (ltv ~71%)  — unknown token (JUPS?)
+  BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups: 0.0
+
+  # (ltv ~72%)  — kyKYROS
+  kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk: 0.0
+
+# ===========================================================================
+# Default allocation for any collateral token NOT listed above.
+# These tokens still pass through the 40% USD LTV filter first.
+# Set to 0.0 to ONLY lend to tokens you have explicitly listed above.
+# ===========================================================================
+default: 0.0

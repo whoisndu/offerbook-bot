@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+import yaml  # pip install pyyaml
 
 # ---------------------------------------------------------------------------
 # Configuration – edit here or override via environment variables
@@ -74,6 +75,36 @@ USDC_DECIMALS = 6
 # Optional hard cap per individual offer, in whole USDC (0 = use market median)
 _cap_env = os.getenv("MAX_OFFER_PRINCIPAL_USDC", "0")
 MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in ("", "0") else None
+
+# ---------------------------------------------------------------------------
+# Allocation config  (allocation_config.yaml)
+# ---------------------------------------------------------------------------
+
+def _load_allocation_config(path: str) -> dict[str, float]:
+    """
+    Load per-collateral allocation fractions from YAML.
+    Returns a dict keyed by collateral mint address, plus a 'default' key.
+    Tokens listed here bypass the USD LTV filter; unlisted tokens still go
+    through the LTV filter and then use 'default' if they pass.
+    """
+    try:
+        with open(path) as fh:
+            raw = yaml.safe_load(fh)
+        result: dict[str, float] = {}
+        for mint, fraction in (raw.get("allocations") or {}).items():
+            result[str(mint)] = float(fraction)
+        result["default"] = float(raw.get("default", 0.0))
+        return result
+    except FileNotFoundError:
+        return {"default": 0.0}
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load allocation_config.yaml: {exc}") from exc
+
+_CONFIG_PATH = os.getenv(
+    "ALLOCATION_CONFIG",
+    os.path.join(os.path.dirname(__file__), "allocation_config.yaml"),
+)
+ALLOCATION_CONFIG: dict[str, float] = _load_allocation_config(_CONFIG_PATH)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -450,25 +481,35 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
         log.debug("Skipping %s/%s – no amount data", ps.principal_mint[:8], ps.collateral_mint[:8])
         return None
 
-    # Enforce max 40% LTV using USD values from the market data.
-    # The API enriches each offer with principalAmountUsd / collateralAmountUsd so
-    # we can compare across tokens with different decimals and prices.
-    # We check the market's median USD LTV — if existing offers on this pair already
-    # require lending more than 40% of collateral value, skip entirely rather than
-    # copy a bad deal.
-    median_ltv = ps.median_ltv_usd
-    if median_ltv is not None:
-        if median_ltv > MAX_LTV:
-            log.info(
-                "  Skipping %s/%s — market USD LTV %.1f%% > max %.0f%%  "
-                "(collateral undervalued relative to loan)",
-                ps.principal_mint[:8], ps.collateral_mint[:8],
-                median_ltv * 100, MAX_LTV * 100,
-            )
+    # Allocation config lookup.
+    # If the collateral mint is explicitly listed in allocation_config.yaml it
+    # bypasses the USD LTV filter (the user trusts it); otherwise the LTV filter
+    # runs first and the 'default' fraction is used if the pair passes.
+    collateral_in_config = ps.collateral_mint in ALLOCATION_CONFIG
+    allocation_fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+
+    if collateral_in_config:
+        if allocation_fraction == 0.0:
+            log.info("  Skipping %s/%s — allocation set to 0 in config",
+                     ps.principal_mint[:8], ps.collateral_mint[:8])
             return None
+        # Trusted token: skip the stale-LTV filter
     else:
-        log.debug("  No USD LTV data for %s/%s (loan-only pair) — skipping LTV validation",
-                  ps.principal_mint[:8], ps.collateral_mint[:8])
+        # Not in config: enforce max 40% USD LTV using loan/offer creation prices.
+        median_ltv = ps.median_ltv_usd
+        if median_ltv is not None:
+            if median_ltv > MAX_LTV:
+                log.info(
+                    "  Skipping %s/%s — market USD LTV %.1f%% > max %.0f%%  "
+                    "(not in allocation config and collateral appears undervalued)",
+                    ps.principal_mint[:8], ps.collateral_mint[:8],
+                    median_ltv * 100, MAX_LTV * 100,
+                )
+                return None
+        if allocation_fraction == 0.0:
+            log.debug("  Skipping %s/%s — passes LTV filter but default allocation is 0",
+                      ps.principal_mint[:8], ps.collateral_mint[:8])
+            return None
 
     # Apply per-offer cap for USDC principal offers
     if MAX_OFFER_PRINCIPAL_USDC and ps.principal_mint == USDC_MINT:
@@ -478,6 +519,7 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
                       principal_amount, cap_raw, MAX_OFFER_PRINCIPAL_USDC)
             principal_amount = cap_raw
 
+    median_ltv = ps.median_ltv_usd
     if median_ltv is not None:
         log.debug("  USD LTV = %.1f%% (market median, max allowed = %.0f%%)",
                   median_ltv * 100, MAX_LTV * 100)
@@ -650,27 +692,29 @@ def main() -> None:
     }
     log.info("Pairs with market activity: %d", len(relevant_pairs))
 
-    # 5. Compute all offer params first so we can divide the budget evenly.
-    #    This prevents the first large pair from consuming the entire balance.
-    pair_offer_params = {}
+    # 5. Compute all offer params.  Per-market budget is driven by allocation_config.yaml:
+    #    each pair gets  total_balance × allocation_fraction  as its offer size cap.
+    pair_offer_params: dict = {}
+    pair_budgets_raw: dict = {}   # collateral_mint -> raw USDC budget for that pair
+
     for pair, ps in relevant_pairs.items():
         params = compute_offer_params(ps)
-        if params is not None:
-            pair_offer_params[pair] = params
+        if params is None:
+            continue
+        pair_offer_params[pair] = params
 
-    usdc_pairs_count = sum(
-        1 for p in pair_offer_params.values() if p["principalMint"] == USDC_MINT
-    )
-    if usdc_available_raw is not None and usdc_pairs_count > 0:
-        per_pair_budget_raw = usdc_available_raw // usdc_pairs_count
-        log.info(
-            "Budget split: %.2f USDC ÷ %d pairs = %.2f USDC per pair",
-            usdc_available_raw / 10**USDC_DECIMALS,
-            usdc_pairs_count,
-            per_pair_budget_raw / 10**USDC_DECIMALS,
-        )
-    else:
-        per_pair_budget_raw = None
+        if usdc_available_raw is not None and params["principalMint"] == USDC_MINT:
+            fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+            pair_budgets_raw[pair] = int(usdc_available_raw * fraction)
+
+    log.info("=" * 60)
+    log.info("Allocation config: %s", _CONFIG_PATH)
+    for pair, budget_raw in pair_budgets_raw.items():
+        ps = relevant_pairs[pair]
+        fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+        log.info("  %s…  →  %.0f%%  =  %.2f USDC",
+                 ps.collateral_mint[:8], fraction * 100, budget_raw / 10**USDC_DECIMALS)
+    log.info("=" * 60)
 
     # 6. Build and submit offers
     successes = 0
@@ -693,45 +737,30 @@ def main() -> None:
             skipped += 1
             continue
 
-        # Balance guard: cap each USDC offer to its per-pair budget share, then
-        # scale down further if the remaining total balance is tighter.
-        # Since allowPartialFill=True, a smaller offer at the same LTV is still
-        # attractive to borrowers.
+        # Balance guard: cap this offer to its configured allocation fraction,
+        # then scale down further if the remaining total balance is tighter.
+        # allowPartialFill=True means a smaller offer at the same LTV is still
+        # fully attractive to borrowers.
         if (
             usdc_available_raw is not None
             and offer_params["principalMint"] == USDC_MINT
         ):
             needed = offer_params["principalAmount"]
+            pair_budget_raw = pair_budgets_raw.get(pair)
 
-            # Apply the per-pair budget cap first
-            if per_pair_budget_raw is not None and needed > per_pair_budget_raw:
-                scale = per_pair_budget_raw / needed
-                offer_params["principalAmount"] = int(per_pair_budget_raw)
+            # Cap to allocation budget for this collateral
+            if pair_budget_raw is not None and needed > pair_budget_raw:
+                scale = pair_budget_raw / needed
+                offer_params["principalAmount"] = int(pair_budget_raw)
                 offer_params["collateralAmount"] = int(offer_params["collateralAmount"] * scale)
                 offer_params["minFillAmount"] = max(1001, offer_params["principalAmount"] // 100)
                 needed = offer_params["principalAmount"]
 
-            available = usdc_available_raw - usdc_committed_raw
-            if available <= 0:
-                log.warning("  Skipping – no USDC remaining (committed=%.2f of %.2f)",
-                            usdc_committed_raw / 10**USDC_DECIMALS,
-                            usdc_available_raw / 10**USDC_DECIMALS)
+            if needed <= 1000:
+                log.info("  Skipping – allocation too small (%.2f USDC) to place a valid offer",
+                         needed / 10**USDC_DECIMALS)
                 skipped += 1
                 continue
-            if needed > available:
-                # Scale principal down to available; scale collateral proportionally
-                # to preserve the LTV ratio so the offer stays attractive.
-                scale = available / needed
-                orig_principal = needed
-                offer_params["principalAmount"] = int(available)
-                offer_params["collateralAmount"] = int(offer_params["collateralAmount"] * scale)
-                log.info(
-                    "  Scaling offer to fit balance: principal %.2f → %.2f USDC "
-                    "(collateral scaled by %.1f%%)",
-                    orig_principal / 10**USDC_DECIMALS,
-                    available / 10**USDC_DECIMALS,
-                    scale * 100,
-                )
 
         ok = create_offer(offer_params)
         if ok:

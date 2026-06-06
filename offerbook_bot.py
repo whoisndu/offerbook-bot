@@ -47,7 +47,7 @@ import requests
 # ---------------------------------------------------------------------------
 
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
-TX_API_BASE = os.getenv("OFFERBOOK_TX_API_BASE", "https://api.offerbook.jup.ag/api/v1")
+TX_API_BASE = os.getenv("OFFERBOOK_TX_API_BASE", "https://builder.offerbook.jup.ag/api/v1")
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 
 WALLET_PUBKEY: str = os.getenv("OFFERBOOK_WALLET", "")
@@ -440,6 +440,10 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
                       principal_amount, cap_raw, MAX_OFFER_PRINCIPAL_USDC)
             principal_amount = cap_raw
 
+    # minFillAmount: minimum a borrower must take in a partial fill.
+    # API requires this to be > 1000 raw units. Use 1% of principal, floored at 1001.
+    min_fill = max(1001, principal_amount // 100)
+
     return {
         "signer": WALLET_PUBKEY,
         "principalMint": ps.principal_mint,
@@ -450,6 +454,7 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
         "duration": MAX_DURATION_SECS,
         "expiry": OFFER_EXPIRY_SECS,
         "allowPartialFill": ALLOW_PARTIAL_FILL,
+        "minFillAmount": min_fill,
         "topup": "full",
     }
 

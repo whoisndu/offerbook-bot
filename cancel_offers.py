@@ -161,13 +161,23 @@ def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
         return
 
     data = _post_tx("/cancel-offer", payload)
-    tx_b64 = data.get("transaction") or data.get("tx") or data.get("data", {}).get("transaction")
-    if not tx_b64:
+
+    # API may return a single "transaction" or an array "transactions" (one per offer)
+    txs: list[str] = []
+    if data.get("transactions"):
+        txs = data["transactions"]
+    elif data.get("transaction"):
+        txs = [data["transaction"]]
+    elif data.get("tx"):
+        txs = [data["tx"]]
+    else:
         raise ValueError(f"Unexpected cancel-offer response: {data}")
 
-    sig = _sign_and_send(tx_b64)
-    log.info("Cancelled %d offer(s) — sig: %s", len(pubkeys), sig)
-    time.sleep(0.5)  # brief pause between batch submissions
+    for tx_b64 in txs:
+        sig = _sign_and_send(tx_b64)
+        log.info("Cancel tx submitted — sig: %s", sig)
+        time.sleep(0.3)
+    log.info("Cancelled batch of %d offer(s)", len(pubkeys))
 
 # ---------------------------------------------------------------------------
 # Main

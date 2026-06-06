@@ -47,7 +47,7 @@ import requests
 # ---------------------------------------------------------------------------
 
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
-TX_API_BASE = os.getenv("OFFERBOOK_TX_API_BASE", "https://tx.offerbook.jup.ag/api/v1")
+TX_API_BASE = os.getenv("OFFERBOOK_TX_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 
 WALLET_PUBKEY: str = os.getenv("OFFERBOOK_WALLET", "")
@@ -66,6 +66,14 @@ ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
 PAGE_SIZE = 100              # items per API page
+
+# USDC mint (principal token for most pairs)
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDC_DECIMALS = 6
+
+# Optional hard cap per individual offer, in whole USDC (0 = use market median)
+_cap_env = os.getenv("MAX_OFFER_PRINCIPAL_USDC", "0")
+MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in ("", "0") else None
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -134,17 +142,28 @@ class PairStats:
     principal_mint: str
     collateral_mint: str
     lending_apys: list[int] = field(default_factory=list)   # active lending offers
+    loan_apys: list[int] = field(default_factory=list)      # fallback: existing loans
     active_loan_count: int = 0
 
     # Amounts from existing offers – we'll size our offer similarly
     offer_principal_amounts: list[int] = field(default_factory=list)
     offer_collateral_amounts: list[int] = field(default_factory=list)
 
+    # Fallback amounts from existing loans when no offers exist
+    loan_principal_amounts: list[int] = field(default_factory=list)
+    loan_collateral_amounts: list[int] = field(default_factory=list)
+
     @property
     def mean_apy_bps(self) -> float | None:
-        if not self.lending_apys:
+        # Prefer lending-offer APYs; fall back to existing loan APYs
+        source = self.lending_apys if self.lending_apys else self.loan_apys
+        if not source:
             return None
-        return sum(self.lending_apys) / len(self.lending_apys)
+        return sum(source) / len(source)
+
+    @property
+    def apy_source(self) -> str:
+        return "offers" if self.lending_apys else "loans"
 
     @property
     def target_apy_bps(self) -> int | None:
@@ -156,19 +175,20 @@ class PairStats:
 
     @property
     def median_principal_amount(self) -> int | None:
-        if not self.offer_principal_amounts:
+        source = self.offer_principal_amounts if self.offer_principal_amounts else self.loan_principal_amounts
+        if not source:
             return None
-        s = sorted(self.offer_principal_amounts)
-        mid = len(s) // 2
-        return s[mid]
+        s = sorted(source)
+        return s[len(s) // 2]
 
     @property
     def median_collateral_amount(self) -> int | None:
-        if not self.offer_collateral_amounts:
+        source = self.offer_collateral_amounts if self.offer_collateral_amounts else self.loan_collateral_amounts
+        if not source:
             return None
-        s = sorted(self.offer_collateral_amounts)
-        mid = len(s) // 2
-        return s[mid]
+        s = sorted(source)
+        return s[len(s) // 2]
+
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +197,63 @@ class PairStats:
 
 SESSION = requests.Session()
 SESSION.headers.update({"Content-Type": "application/json"})
+
+
+def fetch_wallet_token_balance(mint: str) -> int:
+    """Return the raw token balance for `mint` in our on-chain wallet."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            WALLET_PUBKEY,
+            {"mint": mint},
+            {"encoding": "jsonParsed"},
+        ],
+    }
+    resp = requests.post(SOLANA_RPC, json=payload, timeout=30)
+    resp.raise_for_status()
+    accounts = resp.json().get("result", {}).get("value", [])
+    total = 0
+    for acct in accounts:
+        amount_str = (
+            acct.get("account", {})
+                .get("data", {})
+                .get("parsed", {})
+                .get("info", {})
+                .get("tokenAmount", {})
+                .get("amount", "0")
+        )
+        total += int(amount_str)
+    return total
+
+
+def fetch_escrow_balance(mint: str) -> int:
+    """Return the raw token balance for `mint` held in our Offerbook escrow."""
+    holdings = _get(f"/escrows/holdings/{WALLET_PUBKEY}")
+    for entry in holdings:
+        if entry.get("asset", {}).get("mint") == mint:
+            return int(entry.get("amount", 0))
+    return 0
+
+
+def fetch_available_balance(mint: str, decimals: int) -> tuple[int, int, int]:
+    """
+    Return (wallet_raw, escrow_raw, total_raw) for `mint`.
+    Logs the breakdown so it's always visible.
+    """
+    wallet_raw = fetch_wallet_token_balance(mint)
+    escrow_raw = fetch_escrow_balance(mint)
+    total_raw = wallet_raw + escrow_raw
+    scale = 10 ** decimals
+    log.info(
+        "%-22s wallet=%10.2f  escrow=%10.2f  total=%10.2f",
+        mint[:8] + "… balance:",
+        wallet_raw / scale,
+        escrow_raw / scale,
+        total_raw / scale,
+    )
+    return wallet_raw, escrow_raw, total_raw
 
 
 def _get(endpoint: str, params: dict | None = None) -> dict:
@@ -308,6 +385,12 @@ def build_pair_stats(
     for loan in active_loans:
         ps = get_or_create(loan.pair)
         ps.active_loan_count += 1
+        if loan.apy > 0:
+            ps.loan_apys.append(loan.apy)
+        if loan.principal_amount > 0:
+            ps.loan_principal_amounts.append(loan.principal_amount)
+        if loan.collateral_amount > 0:
+            ps.loan_collateral_amounts.append(loan.collateral_amount)
 
     return stats
 
@@ -348,6 +431,14 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
             principal_amount, adjusted_principal, MAX_LTV * 100,
         )
         principal_amount = adjusted_principal
+
+    # Apply per-offer cap for USDC principal offers
+    if MAX_OFFER_PRINCIPAL_USDC and ps.principal_mint == USDC_MINT:
+        cap_raw = MAX_OFFER_PRINCIPAL_USDC * (10 ** USDC_DECIMALS)
+        if principal_amount > cap_raw:
+            log.debug("  Capping principal %d → %d (MAX_OFFER_PRINCIPAL_USDC=%d)",
+                      principal_amount, cap_raw, MAX_OFFER_PRINCIPAL_USDC)
+            principal_amount = cap_raw
 
     return {
         "signer": WALLET_PUBKEY,
@@ -480,15 +571,26 @@ def main() -> None:
              (1 - APY_DISCOUNT) * 100, MAX_LTV * 100, MAX_DURATION_DAYS)
     log.info("=" * 60)
 
-    # 1. Fetch market data
+    # 1. Fetch USDC balance (wallet + escrow) before doing anything
+    try:
+        _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
+    except Exception as exc:
+        log.warning("Could not fetch USDC balance: %s  (proceeding anyway)", exc)
+        usdc_available_raw = None
+
+    if MAX_OFFER_PRINCIPAL_USDC:
+        log.info("Per-offer USDC cap  : %d USDC  (MAX_OFFER_PRINCIPAL_USDC)", MAX_OFFER_PRINCIPAL_USDC)
+    log.info("=" * 60)
+
+    # 2. Fetch market data
     lending_offers = fetch_active_lending_offers()
     active_loans = fetch_active_loans()
 
-    # 2. Aggregate pair statistics
+    # 3. Aggregate pair statistics
     pair_stats = build_pair_stats(lending_offers, active_loans)
     log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
 
-    # 3. Filter pairs where there's actually demand (active loans) or supply
+    # 4. Filter pairs where there's actually demand (active loans) or supply
     relevant_pairs = {
         pair: ps
         for pair, ps in pair_stats.items()
@@ -496,17 +598,19 @@ def main() -> None:
     }
     log.info("Pairs with market activity: %d", len(relevant_pairs))
 
-    # 4. Build and submit offers
+    # 5. Build and submit offers
     successes = 0
     skipped = 0
     errors = 0
+    usdc_committed_raw = 0  # running total of USDC earmarked this session
 
     for pair, ps in relevant_pairs.items():
         log.info(
-            "\nPair %s…/%s…  | loans=%d  mean_apy=%.0f bps  target_apy=%s bps",
+            "\nPair %s…/%s…  | loans=%d  mean_apy=%.0f bps [from %s]  target_apy=%s bps",
             ps.principal_mint[:8], ps.collateral_mint[:8],
             ps.active_loan_count,
             ps.mean_apy_bps or 0,
+            ps.apy_source,
             ps.target_apy_bps or "N/A",
         )
 
@@ -515,9 +619,41 @@ def main() -> None:
             skipped += 1
             continue
 
+        # Balance guard: scale down USDC offers that exceed remaining balance.
+        # Since allowPartialFill=True, posting a smaller offer at the same LTV
+        # is still attractive to borrowers — they can fill any fraction of it.
+        if (
+            usdc_available_raw is not None
+            and offer_params["principalMint"] == USDC_MINT
+        ):
+            needed = offer_params["principalAmount"]
+            available = usdc_available_raw - usdc_committed_raw
+            if available <= 0:
+                log.warning("  Skipping – no USDC remaining (committed=%.2f of %.2f)",
+                            usdc_committed_raw / 10**USDC_DECIMALS,
+                            usdc_available_raw / 10**USDC_DECIMALS)
+                skipped += 1
+                continue
+            if needed > available:
+                # Scale principal down to available; scale collateral proportionally
+                # to preserve the LTV ratio so the offer stays attractive.
+                scale = available / needed
+                orig_principal = needed
+                offer_params["principalAmount"] = int(available)
+                offer_params["collateralAmount"] = int(offer_params["collateralAmount"] * scale)
+                log.info(
+                    "  Scaling offer to fit balance: principal %.2f → %.2f USDC "
+                    "(collateral scaled by %.1f%%)",
+                    orig_principal / 10**USDC_DECIMALS,
+                    available / 10**USDC_DECIMALS,
+                    scale * 100,
+                )
+
         ok = create_offer(offer_params)
         if ok:
             successes += 1
+            if offer_params["principalMint"] == USDC_MINT:
+                usdc_committed_raw += offer_params["principalAmount"]
         else:
             errors += 1
 
@@ -525,6 +661,8 @@ def main() -> None:
 
     log.info("\n" + "=" * 60)
     log.info("Done.  Created=%d  Skipped=%d  Errors=%d", successes, skipped, errors)
+    if usdc_committed_raw:
+        log.info("USDC committed this run: %.6f USDC", usdc_committed_raw / 10**USDC_DECIMALS)
     log.info("=" * 60)
 
 

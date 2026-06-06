@@ -58,7 +58,7 @@ WALLET_PUBKEY: str = os.getenv("OFFERBOOK_WALLET", "")
 PRIVATE_KEY_B58: str = os.getenv("OFFERBOOK_PRIVATE_KEY", "")  # base58 private key
 
 # Strategy parameters
-APY_DISCOUNT = 0.10          # undercut market mean by 10%
+APY_DISCOUNT = 0.12          # 12% below market mean
 MAX_DURATION_DAYS = 15
 MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 1 296 000
 MAX_LTV = 0.25               # 25%  =>  collateral must be >= 4x principal

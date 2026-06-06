@@ -130,6 +130,15 @@ class Loan:
     collateral_amount: int
     apy: int
     duration: int
+    principal_usd: float | None = None   # USD value at loan creation
+    collateral_usd: float | None = None  # USD value at loan creation
+
+    @property
+    def ltv(self) -> float | None:
+        """Loan-to-value at creation: principalUsd / collateralUsd."""
+        if self.principal_usd and self.collateral_usd and self.collateral_usd > 0:
+            return self.principal_usd / self.collateral_usd
+        return None
 
     @property
     def pair(self) -> tuple[str, str]:
@@ -148,6 +157,9 @@ class PairStats:
     # Amounts from existing offers – we'll size our offer similarly
     offer_principal_amounts: list[int] = field(default_factory=list)
     offer_collateral_amounts: list[int] = field(default_factory=list)
+
+    # USD LTV values (principal_usd / collateral_usd) from market offers
+    offer_ltv_usds: list[float] = field(default_factory=list)
 
     # Fallback amounts from existing loans when no offers exist
     loan_principal_amounts: list[int] = field(default_factory=list)
@@ -187,6 +199,13 @@ class PairStats:
         if not source:
             return None
         s = sorted(source)
+        return s[len(s) // 2]
+
+    @property
+    def median_ltv_usd(self) -> float | None:
+        if not self.offer_ltv_usds:
+            return None
+        s = sorted(self.offer_ltv_usds)
         return s[len(s) // 2]
 
 
@@ -324,6 +343,7 @@ def _parse_offer(raw: dict) -> Offer:
 
 
 def _parse_loan(raw: dict) -> Loan:
+    meta = raw.get("metadata") or {}
     return Loan(
         pubkey=raw["pubkey"],
         lender=raw.get("lender", ""),
@@ -335,6 +355,8 @@ def _parse_loan(raw: dict) -> Loan:
         collateral_amount=raw.get("collateralAmount", 0),
         apy=raw.get("apy", 0),
         duration=raw.get("duration", 0),
+        principal_usd=meta.get("startPrincipalAmountUsd"),
+        collateral_usd=meta.get("startCollateralAmountUsd"),
     )
 
 
@@ -388,6 +410,8 @@ def build_pair_stats(
             ps.offer_principal_amounts.append(offer.principal_amount)
         if offer.collateral_amount > 0:
             ps.offer_collateral_amounts.append(offer.collateral_amount)
+        if offer.ltv is not None:
+            ps.offer_ltv_usds.append(offer.ltv)
 
     for loan in active_loans:
         ps = get_or_create(loan.pair)
@@ -398,6 +422,8 @@ def build_pair_stats(
             ps.loan_principal_amounts.append(loan.principal_amount)
         if loan.collateral_amount > 0:
             ps.loan_collateral_amounts.append(loan.collateral_amount)
+        if loan.ltv is not None:
+            ps.offer_ltv_usds.append(loan.ltv)
 
     return stats
 
@@ -424,24 +450,25 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
         log.debug("Skipping %s/%s – no amount data", ps.principal_mint[:8], ps.collateral_mint[:8])
         return None
 
-    # Enforce max 40% LTV:
-    # LTV = principal / collateral_value_in_same_units
-    # For token-to-token with possibly different prices we use USD metadata when
-    # available; otherwise assume same-price-unit (conservative fallback).
-    # The collateral_amount here is what the BORROWER puts up.
-    # Our max LTV = 40% means: principalUsd <= 0.40 * collateralUsd
-    # => principalAmount <= 0.40 * collateralAmount  (when same price unit)
-    if principal_amount > MAX_LTV * collateral_amount:
-        # Adjust principal down to satisfy LTV, keeping collateral fixed
-        adjusted_principal = int(MAX_LTV * collateral_amount)
-        if adjusted_principal <= 0:
-            log.debug("Skipping %s/%s – LTV adjustment yields 0", ps.principal_mint[:8], ps.collateral_mint[:8])
+    # Enforce max 40% LTV using USD values from the market data.
+    # The API enriches each offer with principalAmountUsd / collateralAmountUsd so
+    # we can compare across tokens with different decimals and prices.
+    # We check the market's median USD LTV — if existing offers on this pair already
+    # require lending more than 40% of collateral value, skip entirely rather than
+    # copy a bad deal.
+    median_ltv = ps.median_ltv_usd
+    if median_ltv is not None:
+        if median_ltv > MAX_LTV:
+            log.info(
+                "  Skipping %s/%s — market USD LTV %.1f%% > max %.0f%%  "
+                "(collateral undervalued relative to loan)",
+                ps.principal_mint[:8], ps.collateral_mint[:8],
+                median_ltv * 100, MAX_LTV * 100,
+            )
             return None
-        log.debug(
-            "  Adjusting principal %d → %d to respect %.0f%% max LTV",
-            principal_amount, adjusted_principal, MAX_LTV * 100,
-        )
-        principal_amount = adjusted_principal
+    else:
+        log.debug("  No USD LTV data for %s/%s (loan-only pair) — skipping LTV validation",
+                  ps.principal_mint[:8], ps.collateral_mint[:8])
 
     # Apply per-offer cap for USDC principal offers
     if MAX_OFFER_PRINCIPAL_USDC and ps.principal_mint == USDC_MINT:
@@ -450,6 +477,10 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
             log.debug("  Capping principal %d → %d (MAX_OFFER_PRINCIPAL_USDC=%d)",
                       principal_amount, cap_raw, MAX_OFFER_PRINCIPAL_USDC)
             principal_amount = cap_raw
+
+    if median_ltv is not None:
+        log.debug("  USD LTV = %.1f%% (market median, max allowed = %.0f%%)",
+                  median_ltv * 100, MAX_LTV * 100)
 
     # minFillAmount: minimum a borrower must take in a partial fill.
     # API requires this to be > 1000 raw units. Use 1% of principal, floored at 1001.
@@ -527,13 +558,12 @@ def create_offer(params: dict[str, Any]) -> bool:
     """
     log.info(
         "  Creating lending offer: principal=%s…  collateral=%s…  "
-        "apy=%d bps (%.2f%%)  duration=%dd  LTV=%.1f%%",
+        "apy=%d bps (%.2f%%)  duration=%dd",
         params["principalMint"][:8],
         params["collateralMint"][:8],
         params["apy"],
         params["apy"] / 100,
         params["duration"] // 86400,
-        (params["principalAmount"] / params["collateralAmount"] * 100),
     )
 
     if DRY_RUN:

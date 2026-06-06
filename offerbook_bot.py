@@ -266,7 +266,14 @@ def _get(endpoint: str, params: dict | None = None) -> dict:
 def _post_tx(endpoint: str, payload: dict) -> dict:
     url = f"{TX_API_BASE}{endpoint}"
     resp = SESSION.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
+    if not resp.ok:
+        # Read body before raise_for_status consumes it
+        try:
+            detail = resp.json().get("message", resp.text)
+        except Exception:
+            detail = resp.text or "(empty)"
+        resp.reason = detail  # attach to the exception message
+        resp.raise_for_status()
     return resp.json()
 
 
@@ -400,6 +407,10 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
     Compute the parameters for a new lending offer on a given pair.
     Returns None if we cannot or should not create an offer.
     """
+    if not ps.principal_mint or not ps.collateral_mint:
+        log.debug("Skipping pair with empty mint address")
+        return None
+
     target_apy = ps.target_apy_bps
     if target_apy is None:
         log.debug("Skipping %s/%s – no market APY reference", ps.principal_mint[:8], ps.collateral_mint[:8])
@@ -488,9 +499,9 @@ def sign_and_send_transaction(tx_b64: str) -> str:
     # Deserialise and sign
     raw_tx = base64.b64decode(tx_b64)
     tx = VersionedTransaction.from_bytes(raw_tx)
-    tx.sign([keypair])
+    signed_tx = VersionedTransaction(tx.message, [keypair])
 
-    signed_b64 = base64.b64encode(bytes(tx)).decode()
+    signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
 
     # Send via JSON-RPC
     payload = {
@@ -532,7 +543,11 @@ def create_offer(params: dict[str, Any]) -> bool:
     try:
         tx_data = _post_tx("/create-principal-offer", params)
     except requests.HTTPError as exc:
-        log.error("  TX builder error: %s  body=%s", exc, exc.response.text if exc.response else "")
+        body = exc.response.text if exc.response else ""
+        log.error("  TX builder error: %s\n  body: %s", exc, body or "(empty)")
+        return False
+    except requests.ConnectionError as exc:
+        log.error("  TX builder connection error: %s", exc)
         return False
 
     transactions: list[str] = tx_data.get("transactions", [])
@@ -576,9 +591,12 @@ def main() -> None:
              (1 - APY_DISCOUNT) * 100, MAX_LTV * 100, MAX_DURATION_DAYS)
     log.info("=" * 60)
 
-    # 1. Fetch USDC balance (wallet + escrow) before doing anything
+    # 1. Fetch USDC balance (wallet + escrow) before doing anything.
+    # topup:"full" pulls principalAmount from the WALLET, so the budget is
+    # wallet-only. Escrow is shown for info but not included in the cap.
     try:
-        _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
+        usdc_wallet_raw, _, _ = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
+        usdc_available_raw = usdc_wallet_raw
     except Exception as exc:
         log.warning("Could not fetch USDC balance: %s  (proceeding anyway)", exc)
         usdc_available_raw = None

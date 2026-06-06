@@ -1,14 +1,15 @@
 """
-Offerbook Kill Switch — Cancel All Open Offers
-===============================================
-Fetches all active and partially-filled lending offers created by your wallet,
-then cancels them in batches.  Funds remain in escrow by default; pass
---withdraw to pull them back to your wallet after cancellation.
+Offerbook Kill Switch — Cancel Open Offers
+==========================================
+Asks which strategy to cancel (3-day, 7-day, 15-day, or all), then fetches
+and cancels matching offers in batches.
 
 Usage:
-  python cancel_offers.py            # cancel only, leave funds in escrow
-  python cancel_offers.py --withdraw # cancel and withdraw funds to wallet
-  DRY_RUN=true python cancel_offers.py  # preview without submitting
+  python cancel_offers.py                   # interactive strategy prompt
+  python cancel_offers.py --days 7          # skip prompt, cancel 7-day offers
+  python cancel_offers.py --days all        # skip prompt, cancel everything
+  python cancel_offers.py --withdraw        # also pull funds back to wallet
+  DRY_RUN=true python cancel_offers.py      # preview without submitting
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any
 
 import requests
 
@@ -28,15 +30,30 @@ import requests
 # Configuration
 # ---------------------------------------------------------------------------
 
-API_BASE    = os.getenv("OFFERBOOK_API_BASE",    "https://api.offerbook.jup.ag/api/v1")
-TX_API_BASE = os.getenv("OFFERBOOK_TX_API_BASE", "https://builder.offerbook.jup.ag/api/v1")
-SOLANA_RPC  = os.getenv("SOLANA_RPC",            "https://api.mainnet-beta.solana.com")
-WALLET_PUBKEY = os.getenv("OFFERBOOK_WALLET",    "")
+API_BASE      = os.getenv("OFFERBOOK_API_BASE",    "https://api.offerbook.jup.ag/api/v1")
+TX_API_BASE   = os.getenv("OFFERBOOK_TX_API_BASE", "https://builder.offerbook.jup.ag/api/v1")
+SOLANA_RPC    = os.getenv("SOLANA_RPC",            "https://api.mainnet-beta.solana.com")
+WALLET_PUBKEY = os.getenv("OFFERBOOK_WALLET",      "")
 PRIVATE_KEY_B58 = os.getenv("OFFERBOOK_PRIVATE_KEY", "")
-DRY_RUN     = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+DRY_RUN       = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
-BATCH_SIZE  = 5   # max offers per cancel transaction (conservative; adjust if API allows more)
-PAGE_SIZE   = 100
+BATCH_SIZE = 5    # offers per cancel tx (keep conservative)
+PAGE_SIZE  = 100
+
+# Duration in seconds for each strategy — used to filter offers by type.
+STRATEGIES: dict[str, int | None] = {
+    "3":   3  * 24 * 60 * 60,   # 259 200
+    "7":   7  * 24 * 60 * 60,   # 604 800
+    "15":  15 * 24 * 60 * 60,   # 1 296 000
+    "all": None,                 # no filter — cancel everything
+}
+
+STRATEGY_LABELS = {
+    "3":   "3-day  strategy  (65% max LTV, 259 200 s duration)",
+    "7":   "7-day  strategy  (45% max LTV, 604 800 s duration)",
+    "15":  "15-day strategy  (25% max LTV, 1 296 000 s duration)",
+    "all": "ALL open offers  (every strategy)",
+}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -56,10 +73,12 @@ log = logging.getLogger(__name__)
 SESSION = requests.Session()
 SESSION.headers["Content-Type"] = "application/json"
 
+
 def _get(path: str, **params) -> Any:
     resp = SESSION.get(f"{API_BASE}{path}", params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
 
 def _post_tx(endpoint: str, payload: dict) -> dict:
     url = f"{TX_API_BASE}{endpoint}"
@@ -74,10 +93,11 @@ def _post_tx(endpoint: str, payload: dict) -> dict:
     return resp.json()
 
 # ---------------------------------------------------------------------------
-# Keypair (lazy init — only needed when DRY_RUN=false)
+# Keypair (lazy — only needed when DRY_RUN=false)
 # ---------------------------------------------------------------------------
 
 _keypair = None
+
 
 def _get_keypair():
     global _keypair
@@ -89,16 +109,40 @@ def _get_keypair():
     except ImportError:
         log.error("Missing dependencies: pip install solders base58")
         sys.exit(1)
-    raw = base58.b58decode(PRIVATE_KEY_B58)
-    _keypair = Keypair.from_bytes(raw)
+    _keypair = Keypair.from_bytes(base58.b58decode(PRIVATE_KEY_B58))
     return _keypair
 
 # ---------------------------------------------------------------------------
-# Fetch my open offers
+# Strategy selection prompt
 # ---------------------------------------------------------------------------
 
-def fetch_my_offers() -> list[dict]:
-    """Return all active + partiallyFilled lending offers for WALLET_PUBKEY."""
+def prompt_strategy() -> str:
+    """
+    Interactively ask which strategy to cancel.
+    Returns one of: '3', '7', '15', 'all'.
+    """
+    print()
+    print("Which offers do you want to cancel?")
+    print()
+    for key, label in STRATEGY_LABELS.items():
+        print(f"  [{key:3s}]  {label}")
+    print()
+    while True:
+        choice = input("Choice: ").strip().lower()
+        if choice in STRATEGIES:
+            return choice
+        print("  Please enter 3, 7, 15, or all")
+
+# ---------------------------------------------------------------------------
+# Fetch offers
+# ---------------------------------------------------------------------------
+
+def fetch_my_offers(duration_filter: int | None) -> list[dict]:
+    """
+    Return active + partiallyFilled lending offers for WALLET_PUBKEY.
+    If duration_filter is set, only return offers whose duration matches
+    that strategy's loan term (in seconds).
+    """
     offers: list[dict] = []
     offset = 0
     while True:
@@ -117,10 +161,18 @@ def fetch_my_offers() -> list[dict]:
         if len(items) < PAGE_SIZE:
             break
         offset += PAGE_SIZE
+
+    if duration_filter is not None:
+        before = len(offers)
+        offers = [o for o in offers if o.get("duration") == duration_filter]
+        log.info(
+            "Filtered to %d offer(s) with duration=%d s  (%d total fetched)",
+            len(offers), duration_filter, before,
+        )
     return offers
 
 # ---------------------------------------------------------------------------
-# Sign + submit transaction
+# Sign + submit
 # ---------------------------------------------------------------------------
 
 def _sign_and_send(tx_b64: str) -> str:
@@ -145,11 +197,10 @@ def _sign_and_send(tx_b64: str) -> str:
     return result["result"]
 
 # ---------------------------------------------------------------------------
-# Cancel a batch of offers
+# Cancel batch
 # ---------------------------------------------------------------------------
 
 def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
-    """Build, sign, and submit a cancel transaction for up to BATCH_SIZE offers."""
     payload: dict = {"signer": WALLET_PUBKEY, "withdraw": withdraw_mode}
     if len(pubkeys) == 1:
         payload["offer"] = pubkeys[0]
@@ -162,7 +213,6 @@ def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
 
     data = _post_tx("/cancel-offer", payload)
 
-    # API may return a single "transaction" or an array "transactions" (one per offer)
     txs: list[str] = []
     if data.get("transactions"):
         txs = data["transactions"]
@@ -184,14 +234,19 @@ def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cancel all open Offerbook lending offers")
+    parser = argparse.ArgumentParser(description="Cancel Offerbook lending offers by strategy")
+    parser.add_argument(
+        "--days",
+        choices=["3", "7", "15", "all"],
+        default=None,
+        help="Strategy to cancel (3, 7, 15, or all). Omit to be prompted interactively.",
+    )
     parser.add_argument(
         "--withdraw",
         action="store_true",
         help="Withdraw funds back to wallet after cancellation (default: leave in escrow)",
     )
     args = parser.parse_args()
-    withdraw_mode = "offerAmount" if args.withdraw else "none"
 
     if not WALLET_PUBKEY:
         log.error("OFFERBOOK_WALLET is not set")
@@ -200,16 +255,24 @@ def main() -> None:
         log.error("OFFERBOOK_PRIVATE_KEY is not set (required for live mode)")
         sys.exit(1)
 
+    # Determine strategy
+    strategy_key = args.days if args.days else prompt_strategy()
+    duration_filter = STRATEGIES[strategy_key]
+    withdraw_mode   = "offerAmount" if args.withdraw else "none"
+
+    log.info("Strategy : %s", STRATEGY_LABELS[strategy_key])
+    log.info("Withdraw : %s", withdraw_mode)
+    log.info("Dry run  : %s", DRY_RUN)
     log.info("Fetching open offers for %s …", WALLET_PUBKEY)
-    offers = fetch_my_offers()
+
+    offers = fetch_my_offers(duration_filter)
 
     if not offers:
-        log.info("No open offers found — nothing to cancel.")
+        log.info("No matching offers found — nothing to cancel.")
         return
 
     pubkeys = [o["pubkey"] for o in offers if o.get("pubkey")]
-    log.info("Found %d open offer(s) to cancel (withdraw=%s, dry_run=%s)",
-             len(pubkeys), withdraw_mode, DRY_RUN)
+    log.info("Found %d offer(s) to cancel", len(pubkeys))
 
     cancelled = 0
     errors    = 0
@@ -223,6 +286,7 @@ def main() -> None:
             errors += len(batch)
 
     log.info("Done.  Cancelled=%d  Errors=%d", cancelled, errors)
+
 
 if __name__ == "__main__":
     main()

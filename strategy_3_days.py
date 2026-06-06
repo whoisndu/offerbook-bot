@@ -1,6 +1,10 @@
 """
-Offerbook Competitive Lending Bot
-==================================
+Offerbook Competitive Lending Bot — 3-Day Strategy
+====================================================
+Loan term : 3 days   |   Max LTV : 65%   |   Offer listing expires : 24 h
+Collateral must be worth ≥ 1.54× the loan at current prices.
+Higher LTV is acceptable for shorter exposure windows.
+
 Strategy:
   1. Fetch all active lending offers (from all pools/pairs).
   2. Fetch all active loans.
@@ -8,15 +12,14 @@ Strategy:
      open lending offers, compute the mean APY of existing active lending offers.
   4. Post a new lending offer at mean_apy * 0.90 (10% below mean) to be competitive.
   5. Enforce:
-       - duration  <= 7 days (604,800 seconds)
-       - LTV       <= 40%  (collateralAmount / principalAmount >= 2.5x,
-                            i.e. we lend 40% of the collateral value)
+       - duration  <= 3 days (259,200 seconds)
+       - LTV       <= 65%  (collateral must be ≥ 1.54× loan value at current prices)
 
 Usage:
   pip install requests solders base58
   export OFFERBOOK_WALLET=<your-base58-wallet-pubkey>
   export OFFERBOOK_PRIVATE_KEY=<your-base58-private-key>   # for signing txns
-  python offerbook_bot.py
+  python strategy_3_days.py
 
 Notes:
   - The Offerbook transaction API returns a base64-encoded Solana transaction.
@@ -56,10 +59,10 @@ PRIVATE_KEY_B58: str = os.getenv("OFFERBOOK_PRIVATE_KEY", "")  # base58 private 
 
 # Strategy parameters
 APY_DISCOUNT = 0.10          # undercut market mean by 10%
-MAX_DURATION_DAYS = 7
-MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 604 800
-MAX_LTV = 0.40               # 40%  =>  collateral must be >= 2.5x principal
-OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term is still 7 days
+MAX_DURATION_DAYS = 3
+MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 259 200
+MAX_LTV = 0.65               # 65%  =>  collateral must be >= 1.54x principal
+OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term is still 3 days
 
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer

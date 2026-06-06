@@ -59,7 +59,7 @@ APY_DISCOUNT = 0.10          # undercut market mean by 10%
 MAX_DURATION_DAYS = 7
 MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 604 800
 MAX_LTV = 0.40               # 40%  =>  collateral must be >= 2.5x principal
-OFFER_EXPIRY_SECS = 7 * 24 * 60 * 60  # offer itself expires in 7 days
+OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term is still 7 days
 
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
@@ -75,6 +75,37 @@ USDC_DECIMALS = 6
 # Optional hard cap per individual offer, in whole USDC (0 = use market median)
 _cap_env = os.getenv("MAX_OFFER_PRINCIPAL_USDC", "0")
 MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in ("", "0") else None
+
+# Jupiter Price API — used to get real-time collateral token prices so that
+# collateralAmount is always sized to enforce MAX_LTV at current market prices,
+# not at whatever stale price the market's existing offers were created with.
+JUPITER_PRICE_API = "https://price.jup.ag/v6/price"
+
+# Decimals for collateral tokens.  Needed to convert Jupiter's per-whole-token
+# price into a per-raw-unit price that the Offerbook API uses.
+# Add any token you trade here.  Unknown tokens fall back to a stale implied
+# price inferred from offer metadata (less accurate, but better than nothing).
+KNOWN_DECIMALS: dict[str, int] = {
+    "So11111111111111111111111111111111111111112":   9,  # wSOL
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": 9,  # mSOL
+    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": 9,  # bSOL
+    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": 9,  # JupSOL
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn":9,  # jitoSOL
+    "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B":9,  # bbSOL
+    "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85": 9,  # bnSOL
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": 6,  # JUP
+    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R":6,  # JLP
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263":5,  # BONK
+    "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux": 8,  # HNT
+    "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7": 6,  # NOS
+    "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst":  5,  # WEN
+    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij":  8,  # cbBTC
+    "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk": 6,  # kyKYROS
+    "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh": 9,  # stKE
+    "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn":  6,  # PUMP
+    "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC": 9,  # SMRT
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,  # USDC
+}
 
 # ---------------------------------------------------------------------------
 # Allocation config  (allocation_config.yaml)
@@ -192,6 +223,10 @@ class PairStats:
     # USD LTV values (principal_usd / collateral_usd) from market offers
     offer_ltv_usds: list[float] = field(default_factory=list)
 
+    # Implied collateral price per raw unit from offer/loan USD metadata.
+    # Used as fallback when Jupiter price is unavailable (stale but self-consistent).
+    offer_collateral_prices_per_raw: list[float] = field(default_factory=list)
+
     # Fallback amounts from existing loans when no offers exist
     loan_principal_amounts: list[int] = field(default_factory=list)
     loan_collateral_amounts: list[int] = field(default_factory=list)
@@ -237,6 +272,14 @@ class PairStats:
         if not self.offer_ltv_usds:
             return None
         s = sorted(self.offer_ltv_usds)
+        return s[len(s) // 2]
+
+    @property
+    def median_collateral_price_per_raw(self) -> float | None:
+        """Stale USD price per raw collateral unit, inferred from offer/loan metadata."""
+        if not self.offer_collateral_prices_per_raw:
+            return None
+        s = sorted(self.offer_collateral_prices_per_raw)
         return s[len(s) // 2]
 
 
@@ -416,6 +459,69 @@ def fetch_active_loans() -> list[Loan]:
 
 
 # ---------------------------------------------------------------------------
+# Price helpers
+# ---------------------------------------------------------------------------
+
+def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
+    """
+    Return {mint: price_in_usdc} for each collateral mint using the Jupiter
+    Price API.  Missing mints are silently omitted — callers must handle None.
+    """
+    if not collateral_mints:
+        return {}
+    try:
+        resp = SESSION.get(
+            JUPITER_PRICE_API,
+            params={"ids": ",".join(collateral_mints)},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        prices = {mint: float(info["price"]) for mint, info in data.items() if info.get("price")}
+        log.info("Jupiter prices fetched for %d/%d collateral mints", len(prices), len(collateral_mints))
+        return prices
+    except Exception as exc:
+        log.warning("Could not fetch Jupiter prices: %s  (will use stale implied prices)", exc)
+        return {}
+
+
+def safe_collateral_amount(
+    principal_raw: int,
+    collateral_mint: str,
+    current_prices: dict[str, float],
+    fallback_price_per_raw: float | None,
+) -> int | None:
+    """
+    Compute the raw collateral amount needed so that
+        LTV = principal_usdc / collateral_usdc = MAX_LTV (40%)
+    i.e. collateral must be worth 2.5× the loan at current prices.
+
+    Uses Jupiter price + known decimals first; falls back to stale implied
+    price from market metadata.  Returns None if no price data is available.
+    """
+    principal_usdc = principal_raw / 10 ** USDC_DECIMALS
+    required_collateral_usdc = principal_usdc / MAX_LTV   # e.g. 300 / 0.4 = 750 USD
+
+    # Primary: Jupiter real-time price
+    price_per_token = current_prices.get(collateral_mint)
+    decimals = KNOWN_DECIMALS.get(collateral_mint)
+    if price_per_token and price_per_token > 0 and decimals is not None:
+        price_per_raw = price_per_token / (10 ** decimals)
+        return int(required_collateral_usdc / price_per_raw)
+
+    # Fallback: stale implied price from offer/loan metadata
+    if fallback_price_per_raw and fallback_price_per_raw > 0:
+        log.warning(
+            "  %s: no real-time price — using stale implied price (LTV may drift); "
+            "add this token to KNOWN_DECIMALS for accurate sizing",
+            collateral_mint[:8],
+        )
+        return int(required_collateral_usdc / fallback_price_per_raw)
+
+    return None   # cannot determine safe collateral amount
+
+
+# ---------------------------------------------------------------------------
 # Strategy logic
 # ---------------------------------------------------------------------------
 
@@ -443,6 +549,8 @@ def build_pair_stats(
             ps.offer_collateral_amounts.append(offer.collateral_amount)
         if offer.ltv is not None:
             ps.offer_ltv_usds.append(offer.ltv)
+        if offer.collateral_usd and offer.collateral_amount > 0:
+            ps.offer_collateral_prices_per_raw.append(offer.collateral_usd / offer.collateral_amount)
 
     for loan in active_loans:
         ps = get_or_create(loan.pair)
@@ -455,6 +563,8 @@ def build_pair_stats(
             ps.loan_collateral_amounts.append(loan.collateral_amount)
         if loan.ltv is not None:
             ps.offer_ltv_usds.append(loan.ltv)
+        if loan.collateral_usd and loan.collateral_amount > 0:
+            ps.offer_collateral_prices_per_raw.append(loan.collateral_usd / loan.collateral_amount)
 
     return stats
 
@@ -692,10 +802,9 @@ def main() -> None:
     }
     log.info("Pairs with market activity: %d", len(relevant_pairs))
 
-    # 5. Compute all offer params.  Per-market budget is driven by allocation_config.yaml:
-    #    each pair gets  total_balance × allocation_fraction  as its offer size cap.
+    # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
     pair_offer_params: dict = {}
-    pair_budgets_raw: dict = {}   # collateral_mint -> raw USDC budget for that pair
+    pair_budgets_raw: dict = {}
 
     for pair, ps in relevant_pairs.items():
         params = compute_offer_params(ps)
@@ -716,11 +825,17 @@ def main() -> None:
                  ps.collateral_mint[:8], fraction * 100, budget_raw / 10**USDC_DECIMALS)
     log.info("=" * 60)
 
+    # 5b. Fetch real-time prices for every collateral mint we're going to offer on.
+    #     These are used to compute collateralAmount so that LTV ≤ MAX_LTV at current
+    #     market prices — NOT at whatever stale price market offers were created with.
+    collateral_mints = list({relevant_pairs[p].collateral_mint for p in pair_offer_params})
+    current_prices = fetch_current_prices(collateral_mints)
+
     # 6. Build and submit offers
     successes = 0
     skipped = 0
     errors = 0
-    usdc_committed_raw = 0  # running total of USDC earmarked this session
+    usdc_committed_raw = 0
 
     for pair, ps in relevant_pairs.items():
         log.info(
@@ -737,30 +852,54 @@ def main() -> None:
             skipped += 1
             continue
 
-        # Balance guard: cap this offer to its configured allocation fraction,
-        # then scale down further if the remaining total balance is tighter.
-        # allowPartialFill=True means a smaller offer at the same LTV is still
-        # fully attractive to borrowers.
-        if (
-            usdc_available_raw is not None
-            and offer_params["principalMint"] == USDC_MINT
-        ):
-            needed = offer_params["principalAmount"]
-            pair_budget_raw = pair_budgets_raw.get(pair)
+        if usdc_available_raw is not None and offer_params["principalMint"] == USDC_MINT:
+            pair_budget_raw = pair_budgets_raw.get(pair, 0)
 
-            # Cap to allocation budget for this collateral
-            if pair_budget_raw is not None and needed > pair_budget_raw:
-                scale = pair_budget_raw / needed
-                offer_params["principalAmount"] = int(pair_budget_raw)
-                offer_params["collateralAmount"] = int(offer_params["collateralAmount"] * scale)
-                offer_params["minFillAmount"] = max(1001, offer_params["principalAmount"] // 100)
-                needed = offer_params["principalAmount"]
-
-            if needed <= 1000:
-                log.info("  Skipping – allocation too small (%.2f USDC) to place a valid offer",
-                         needed / 10**USDC_DECIMALS)
+            if pair_budget_raw <= 1000:
+                log.info("  Skipping – allocation too small (%.2f USDC)",
+                         pair_budget_raw / 10**USDC_DECIMALS)
                 skipped += 1
                 continue
+
+            # Always offer the full allocation budget (not the market median).
+            # allowPartialFill=True means borrowers can take any fraction of it.
+            offer_params["principalAmount"] = pair_budget_raw
+
+            # Compute collateral required so that LTV = MAX_LTV at current prices.
+            # This is the critical fix: we do NOT copy collateralAmount from other
+            # lenders' offers because those offers may have been created when token
+            # prices were very different.
+            collateral_raw = safe_collateral_amount(
+                principal_raw=pair_budget_raw,
+                collateral_mint=ps.collateral_mint,
+                current_prices=current_prices,
+                fallback_price_per_raw=ps.median_collateral_price_per_raw,
+            )
+
+            if collateral_raw is None:
+                log.warning(
+                    "  %s: cannot determine collateral price — skipping to avoid bad LTV",
+                    ps.collateral_mint[:8],
+                )
+                skipped += 1
+                continue
+
+            offer_params["collateralAmount"] = collateral_raw
+            offer_params["minFillAmount"] = max(1001, pair_budget_raw // 100)
+
+            principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
+            collateral_price = current_prices.get(ps.collateral_mint)
+            decimals = KNOWN_DECIMALS.get(ps.collateral_mint)
+            if collateral_price and decimals is not None:
+                collateral_usdc = collateral_raw / (10 ** decimals) * collateral_price
+                actual_ltv = principal_usdc / collateral_usdc if collateral_usdc else 0
+                log.info(
+                    "  Sizing: %.2f USDC / %.4g tokens (collateral ~$%.2f)  →  LTV %.1f%%",
+                    principal_usdc,
+                    collateral_raw / (10 ** decimals),
+                    collateral_usdc,
+                    actual_ltv * 100,
+                )
 
         ok = create_offer(offer_params)
         if ok:
@@ -770,7 +909,7 @@ def main() -> None:
         else:
             errors += 1
 
-        time.sleep(0.5)  # pace ourselves
+        time.sleep(0.5)
 
     log.info("\n" + "=" * 60)
     log.info("Done.  Created=%d  Skipped=%d  Errors=%d", successes, skipped, errors)

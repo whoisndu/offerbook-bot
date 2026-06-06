@@ -466,7 +466,7 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
         "expiry": OFFER_EXPIRY_SECS,
         "allowPartialFill": ALLOW_PARTIAL_FILL,
         "minFillAmount": min_fill,
-        "topup": "full",
+        "topup": "minimum",  # pull only the shortfall from wallet; use escrow first
     }
 
 
@@ -592,11 +592,10 @@ def main() -> None:
     log.info("=" * 60)
 
     # 1. Fetch USDC balance (wallet + escrow) before doing anything.
-    # topup:"full" pulls principalAmount from the WALLET, so the budget is
-    # wallet-only. Escrow is shown for info but not included in the cap.
+    # topup:"minimum" draws only the shortfall from wallet, so the full
+    # combined balance (wallet + escrow) is available as budget.
     try:
-        usdc_wallet_raw, _, _ = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
-        usdc_available_raw = usdc_wallet_raw
+        _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
     except Exception as exc:
         log.warning("Could not fetch USDC balance: %s  (proceeding anyway)", exc)
         usdc_available_raw = None
@@ -621,7 +620,29 @@ def main() -> None:
     }
     log.info("Pairs with market activity: %d", len(relevant_pairs))
 
-    # 5. Build and submit offers
+    # 5. Compute all offer params first so we can divide the budget evenly.
+    #    This prevents the first large pair from consuming the entire balance.
+    pair_offer_params = {}
+    for pair, ps in relevant_pairs.items():
+        params = compute_offer_params(ps)
+        if params is not None:
+            pair_offer_params[pair] = params
+
+    usdc_pairs_count = sum(
+        1 for p in pair_offer_params.values() if p["principalMint"] == USDC_MINT
+    )
+    if usdc_available_raw is not None and usdc_pairs_count > 0:
+        per_pair_budget_raw = usdc_available_raw // usdc_pairs_count
+        log.info(
+            "Budget split: %.2f USDC ÷ %d pairs = %.2f USDC per pair",
+            usdc_available_raw / 10**USDC_DECIMALS,
+            usdc_pairs_count,
+            per_pair_budget_raw / 10**USDC_DECIMALS,
+        )
+    else:
+        per_pair_budget_raw = None
+
+    # 6. Build and submit offers
     successes = 0
     skipped = 0
     errors = 0
@@ -637,19 +658,29 @@ def main() -> None:
             ps.target_apy_bps or "N/A",
         )
 
-        offer_params = compute_offer_params(ps)
+        offer_params = pair_offer_params.get(pair)
         if offer_params is None:
             skipped += 1
             continue
 
-        # Balance guard: scale down USDC offers that exceed remaining balance.
-        # Since allowPartialFill=True, posting a smaller offer at the same LTV
-        # is still attractive to borrowers — they can fill any fraction of it.
+        # Balance guard: cap each USDC offer to its per-pair budget share, then
+        # scale down further if the remaining total balance is tighter.
+        # Since allowPartialFill=True, a smaller offer at the same LTV is still
+        # attractive to borrowers.
         if (
             usdc_available_raw is not None
             and offer_params["principalMint"] == USDC_MINT
         ):
             needed = offer_params["principalAmount"]
+
+            # Apply the per-pair budget cap first
+            if per_pair_budget_raw is not None and needed > per_pair_budget_raw:
+                scale = per_pair_budget_raw / needed
+                offer_params["principalAmount"] = int(per_pair_budget_raw)
+                offer_params["collateralAmount"] = int(offer_params["collateralAmount"] * scale)
+                offer_params["minFillAmount"] = max(1001, offer_params["principalAmount"] // 100)
+                needed = offer_params["principalAmount"]
+
             available = usdc_available_raw - usdc_committed_raw
             if available <= 0:
                 log.warning("  Skipping – no USDC remaining (committed=%.2f of %.2f)",

@@ -532,6 +532,32 @@ def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
 # Strategy logic
 # ---------------------------------------------------------------------------
 
+def safe_collateral_amount(
+    principal_raw: int,
+    collateral_mint: str,
+    current_prices: dict[str, float],
+    fallback_price_per_raw: float | None,
+) -> int | None:
+    """
+    Return the collateral raw amount required so that LTV == MAX_LTV at current prices.
+    Returns None if no price is available (caller should skip the offer).
+    """
+    principal_usdc = principal_raw / 10 ** USDC_DECIMALS
+    required_collateral_usdc = principal_usdc / MAX_LTV
+    price_per_token = current_prices.get(collateral_mint)
+    decimals = KNOWN_DECIMALS.get(collateral_mint)
+    if price_per_token and price_per_token > 0 and decimals is not None:
+        price_per_raw = price_per_token / (10 ** decimals)
+        return int(required_collateral_usdc / price_per_raw)
+    if fallback_price_per_raw and fallback_price_per_raw > 0:
+        log.warning(
+            "  %s: using stale implied price %.6g per raw unit (Jupiter + DexScreener unavailable)",
+            collateral_mint[:8], fallback_price_per_raw,
+        )
+        return int(required_collateral_usdc / fallback_price_per_raw)
+    return None
+
+
 def build_pair_stats(
     lending_offers: list[Offer],
     active_loans: list[Loan],

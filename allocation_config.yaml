@@ -38,6 +38,9 @@ allocations:
   # cbBTC (Coinbase Wrapped BTC on Solana)
   cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij: 1.0
 
+ #HYPE on Solana
+  98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g: 1.0
+
   # ===========================================================================
   # TIER 2 — Liquid staking tokens  (70% allocation)
   # These are SOL derivatives — slightly less liquid than native SOL but
@@ -129,8 +132,8 @@ allocations:
   # (ltv ~31%)  — unknown token
   J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr: 0.0
 
-  # (ltv ~33%)  — unknown pump.fun token
-  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 0.0
+  # (ltv ~33%)  — NEET
+  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 0.7
 
   # (ltv ~35%)  — unknown token
   8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn: 0.0
@@ -153,8 +156,8 @@ allocations:
   # (ltv ~37%)  — unknown pump.fun token
   6AJcP7wuLwmRYLBNbi825wgguaPsWzPBEHcHndpRpump: 0.0
 
-  # (ltv ~39%)  — unknown token
-  Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk: 0.0
+  # (ltv ~39%)  — USELESS
+  Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk: 0.7
 
   # (ltv ~40%)  — unknown pump.fun token
   61V8vBaqAGMpgDQi4JcAwo1dmBGHsyhzodcPqnEVpump: 0.0
@@ -204,8 +207,8 @@ allocations:
   # (ltv ~65%)  — unknown token
   GhLqUPca1N64YmksYkXgNRSZvsTA4rbYGRpU66vyDMAL: 0.0
 
-  # (ltv ~68%)  — unknown token
-  A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS: 0.0
+  # (ltv ~68%)  — ZEC
+  A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS: 1.0
 
   # (ltv ~68%)  — unknown token
   E65CoK961Rs5LzKhGZxbKsB7xpFhYhXogH8nhr8zamTK: 0.0

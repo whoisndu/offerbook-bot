@@ -83,6 +83,7 @@ MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in 
 # collateralAmount is always sized to enforce MAX_LTV at current market prices,
 # not at whatever stale price the market's existing offers were created with.
 JUPITER_PRICE_API = "https://price.jup.ag/v6/price"
+DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
 # Decimals for collateral tokens.  Needed to convert Jupiter's per-whole-token
 # price into a per-raw-unit price that the Offerbook API uses.
@@ -469,13 +470,37 @@ def fetch_active_loans() -> list[Loan]:
 # Price helpers
 # ---------------------------------------------------------------------------
 
+def _fetch_dexscreener_price(mint: str) -> float | None:
+    """Per-token price fallback for mints not listed on Jupiter."""
+    try:
+        resp = SESSION.get(f"{DEXSCREENER_API}/{mint}", timeout=10)
+        if not resp.ok:
+            return None
+        pairs = resp.json().get("pairs") or []
+        sol_pairs = [p for p in pairs if p.get("chainId") == "solana" and p.get("priceUsd")]
+        if not sol_pairs:
+            return None
+        sol_pairs.sort(
+            key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0),
+            reverse=True,
+        )
+        return float(sol_pairs[0]["priceUsd"])
+    except Exception:
+        return None
+
+
 def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
     """
-    Return {mint: price_in_usdc} for each collateral mint using the Jupiter
-    Price API.  Missing mints are silently omitted — callers must handle None.
+    Return {mint: usd_price_per_whole_token} for each collateral mint.
+    Tries Jupiter first (batch); falls back to DexScreener per-token for any
+    mint Jupiter doesn't cover (e.g. niche Bonk-ecosystem tokens).
     """
     if not collateral_mints:
         return {}
+
+    prices: dict[str, float] = {}
+
+    # 1. Jupiter — batch lookup, covers most major tokens
     try:
         resp = SESSION.get(
             JUPITER_PRICE_API,
@@ -486,46 +511,22 @@ def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
         data = resp.json().get("data", {})
         prices = {mint: float(info["price"]) for mint, info in data.items() if info.get("price")}
         log.info("Jupiter prices fetched for %d/%d collateral mints", len(prices), len(collateral_mints))
-        return prices
     except Exception as exc:
-        log.warning("Could not fetch Jupiter prices: %s  (will use stale implied prices)", exc)
-        return {}
+        log.warning("Could not fetch Jupiter prices: %s", exc)
 
+    # 2. DexScreener — individual lookup for any mint Jupiter didn't return
+    missing = [m for m in collateral_mints if m not in prices]
+    if missing:
+        log.info("Trying DexScreener for %d mint(s) not on Jupiter …", len(missing))
+        for mint in missing:
+            price = _fetch_dexscreener_price(mint)
+            if price:
+                prices[mint] = price
+                log.info("  DexScreener  %s…  $%.6g", mint[:8], price)
+            else:
+                log.warning("  No live price for %s… (Jupiter + DexScreener both failed)", mint[:8])
 
-def safe_collateral_amount(
-    principal_raw: int,
-    collateral_mint: str,
-    current_prices: dict[str, float],
-    fallback_price_per_raw: float | None,
-) -> int | None:
-    """
-    Compute the raw collateral amount needed so that
-        LTV = principal_usdc / collateral_usdc = MAX_LTV (40%)
-    i.e. collateral must be worth 2.5× the loan at current prices.
-
-    Uses Jupiter price + known decimals first; falls back to stale implied
-    price from market metadata.  Returns None if no price data is available.
-    """
-    principal_usdc = principal_raw / 10 ** USDC_DECIMALS
-    required_collateral_usdc = principal_usdc / MAX_LTV   # e.g. 300 / 0.4 = 750 USD
-
-    # Primary: Jupiter real-time price
-    price_per_token = current_prices.get(collateral_mint)
-    decimals = KNOWN_DECIMALS.get(collateral_mint)
-    if price_per_token and price_per_token > 0 and decimals is not None:
-        price_per_raw = price_per_token / (10 ** decimals)
-        return int(required_collateral_usdc / price_per_raw)
-
-    # Fallback: stale implied price from offer/loan metadata
-    if fallback_price_per_raw and fallback_price_per_raw > 0:
-        log.warning(
-            "  %s: no real-time price — using stale implied price (LTV may drift); "
-            "add this token to KNOWN_DECIMALS for accurate sizing",
-            collateral_mint[:8],
-        )
-        return int(required_collateral_usdc / fallback_price_per_raw)
-
-    return None   # cannot determine safe collateral amount
+    return prices
 
 
 # ---------------------------------------------------------------------------

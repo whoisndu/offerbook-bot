@@ -219,8 +219,9 @@ class PairStats:
     """Aggregated stats for a (principalMint, collateralMint) pair."""
     principal_mint: str
     collateral_mint: str
-    lending_apys: list[int] = field(default_factory=list)   # active lending offers
-    loan_apys: list[int] = field(default_factory=list)      # fallback: existing loans
+    lending_apys: list[int] = field(default_factory=list)         # active lending offers
+    lending_offer_amounts: list[int] = field(default_factory=list) # principal amount per offer (paired with lending_apys)
+    loan_apys: list[int] = field(default_factory=list)             # fallback: existing loans
     active_loan_count: int = 0
 
     # Amounts from existing offers – we'll size our offer similarly
@@ -240,15 +241,19 @@ class PairStats:
 
     @property
     def mean_apy_bps(self) -> float | None:
-        # Prefer lending-offer APYs; fall back to existing loan APYs
-        source = self.lending_apys if self.lending_apys else self.loan_apys
-        if not source:
+        # Volume-weighted mean: large offers carry more weight than small outliers.
+        # Prevents tiny lenders posting 86%/100% APY from inflating the benchmark.
+        if not self.lending_apys:
             return None
-        return sum(source) / len(source)
+        if self.lending_offer_amounts:
+            total = sum(self.lending_offer_amounts)
+            if total > 0:
+                return sum(apy * amt for apy, amt in zip(self.lending_apys, self.lending_offer_amounts)) / total
+        return sum(self.lending_apys) / len(self.lending_apys)
 
     @property
     def apy_source(self) -> str:
-        return "offers" if self.lending_apys else "loans"
+        return "live offers"
 
     @property
     def target_apy_bps(self) -> int | None:
@@ -400,9 +405,8 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _mint_from_asset(asset: dict) -> str:
-    """Extract mint address from an OfferAsset tagged-union."""
-    data = asset.get("data", {})
-    return data.get("mint") or data.get("asset") or ""
+    """Extract mint address from an OfferAsset (direct mint field or legacy nested data field)."""
+    return asset.get("mint") or asset.get("data", {}).get("mint") or asset.get("data", {}).get("asset") or ""
 
 
 def _parse_offer(raw: dict) -> Offer:
@@ -412,8 +416,8 @@ def _parse_offer(raw: dict) -> Offer:
         creator=raw["creator"],
         offer_type=raw["offerType"],
         status=raw["status"],
-        principal_mint=_mint_from_asset(raw.get("principal", {})),
-        collateral_mint=_mint_from_asset(raw.get("collateral", {})),
+        principal_mint=raw.get("principalMint") or _mint_from_asset(raw.get("principal", {})),
+        collateral_mint=raw.get("collateralMint") or _mint_from_asset(raw.get("collateral", {})),
         principal_amount=raw.get("remainingPrincipal", raw.get("principalAmount", 0)),
         collateral_amount=raw.get("remainingCollateral", raw.get("collateralAmount", 0)),
         apy=raw.get("apy", 0),
@@ -576,6 +580,7 @@ def build_pair_stats(
     for offer in lending_offers:
         ps = get_or_create(offer.pair)
         ps.lending_apys.append(offer.apy)
+        ps.lending_offer_amounts.append(offer.principal_amount)  # always paired with lending_apys
         if offer.principal_amount > 0:
             ps.offer_principal_amounts.append(offer.principal_amount)
         if offer.collateral_amount > 0:
@@ -827,13 +832,13 @@ def main() -> None:
     pair_stats = build_pair_stats(lending_offers, active_loans)
     log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
 
-    # 4. Filter pairs where there's actually demand (active loans) or supply
+    # 4. Only include pairs that have at least one live lending offer to benchmark APY against
     relevant_pairs = {
         pair: ps
         for pair, ps in pair_stats.items()
-        if ps.active_loan_count > 0 or len(ps.lending_apys) >= 2
+        if len(ps.lending_apys) >= 1
     }
-    log.info("Pairs with market activity: %d", len(relevant_pairs))
+    log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
 
     # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
     pair_offer_params: dict = {}

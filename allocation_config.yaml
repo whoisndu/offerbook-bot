@@ -60,10 +60,10 @@ allocations:
   J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn: 0.7
 
   # bbSOL (Bybit staked SOL)
-  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 0.7
+  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 0.3
 
   # bnSOL (Binance staked SOL)
-  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 0.7
+  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 0.3
 
   # ===========================================================================
   # TIER 3 — Major DeFi / well-known tokens  (50% allocation)
@@ -82,10 +82,10 @@ allocations:
   hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux: 0.5
 
   # NOS (Nosana)
-  nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7: 0.3
+  nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7: 0.1
 
   # WEN
-  WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst: 0.3
+  WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst: 0.1
 
   # ===========================================================================
   # TIER 4 — Smaller / less-known tokens active on Offerbook  (20-30%)

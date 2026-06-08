@@ -219,9 +219,11 @@ class PairStats:
     """Aggregated stats for a (principalMint, collateralMint) pair."""
     principal_mint: str
     collateral_mint: str
-    lending_apys: list[int] = field(default_factory=list)         # active lending offers
-    lending_offer_amounts: list[int] = field(default_factory=list) # principal amount per offer (paired with lending_apys)
-    loan_apys: list[int] = field(default_factory=list)             # fallback: existing loans
+    lending_apys: list[int] = field(default_factory=list)               # same-duration offers
+    lending_offer_amounts: list[int] = field(default_factory=list)      # principal per same-duration offer
+    global_lending_apys: list[int] = field(default_factory=list)        # all-duration offers (fallback)
+    global_lending_offer_amounts: list[int] = field(default_factory=list)
+    loan_apys: list[int] = field(default_factory=list)                  # existing loans
     active_loan_count: int = 0
 
     # Amounts from existing offers – we'll size our offer similarly
@@ -241,19 +243,25 @@ class PairStats:
 
     @property
     def mean_apy_bps(self) -> float | None:
-        # Volume-weighted mean: large offers carry more weight than small outliers.
-        # Prevents tiny lenders posting 86%/100% APY from inflating the benchmark.
-        if not self.lending_apys:
+        # Prefer same-duration offers; fall back to global cross-duration mean.
+        # Volume-weighted so large offers dominate over small high-APY outliers.
+        apys = self.lending_apys if self.lending_apys else self.global_lending_apys
+        amounts = self.lending_offer_amounts if self.lending_apys else self.global_lending_offer_amounts
+        if not apys:
             return None
-        if self.lending_offer_amounts:
-            total = sum(self.lending_offer_amounts)
+        if amounts:
+            total = sum(amounts)
             if total > 0:
-                return sum(apy * amt for apy, amt in zip(self.lending_apys, self.lending_offer_amounts)) / total
-        return sum(self.lending_apys) / len(self.lending_apys)
+                return sum(apy * amt for apy, amt in zip(apys, amounts)) / total
+        return sum(apys) / len(apys)
 
     @property
     def apy_source(self) -> str:
-        return "live offers"
+        if self.lending_apys:
+            return "live offers (same duration)"
+        if self.global_lending_apys:
+            return "live offers (global)"
+        return "none"
 
     @property
     def target_apy_bps(self) -> int | None:
@@ -565,6 +573,7 @@ def safe_collateral_amount(
 def build_pair_stats(
     lending_offers: list[Offer],
     active_loans: list[Loan],
+    duration_secs: int,
 ) -> dict[tuple[str, str], PairStats]:
     """Aggregate per-pair statistics from offers and loans."""
     stats: dict[tuple[str, str], PairStats] = {}
@@ -579,8 +588,11 @@ def build_pair_stats(
 
     for offer in lending_offers:
         ps = get_or_create(offer.pair)
-        ps.lending_apys.append(offer.apy)
-        ps.lending_offer_amounts.append(offer.principal_amount)  # always paired with lending_apys
+        ps.global_lending_apys.append(offer.apy)
+        ps.global_lending_offer_amounts.append(offer.principal_amount)
+        if offer.duration == duration_secs:
+            ps.lending_apys.append(offer.apy)
+            ps.lending_offer_amounts.append(offer.principal_amount)
         if offer.principal_amount > 0:
             ps.offer_principal_amounts.append(offer.principal_amount)
         if offer.collateral_amount > 0:
@@ -829,14 +841,14 @@ def main() -> None:
     active_loans = fetch_active_loans()
 
     # 3. Aggregate pair statistics
-    pair_stats = build_pair_stats(lending_offers, active_loans)
+    pair_stats = build_pair_stats(lending_offers, active_loans, MAX_DURATION_SECS)
     log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
 
     # 4. Only include pairs that have at least one live lending offer to benchmark APY against
     relevant_pairs = {
         pair: ps
         for pair, ps in pair_stats.items()
-        if len(ps.lending_apys) >= 1
+        if ps.lending_apys or ps.global_lending_apys
     }
     log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
 

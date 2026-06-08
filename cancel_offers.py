@@ -4,6 +4,9 @@ Offerbook Kill Switch — Cancel Open Offers
 Asks which strategy to cancel (3-day, 7-day, 15-day, or all), then fetches
 and cancels matching offers in batches.
 
+Handles "underfunded" offers (orphaned on-chain PDAs that the API won't list)
+by scanning on-chain accounts directly via getProgramAccounts.
+
 Usage:
   python cancel_offers.py                   # interactive strategy prompt
   python cancel_offers.py --days 7          # skip prompt, cancel 7-day offers
@@ -137,6 +140,9 @@ def prompt_strategy() -> str:
 # Fetch offers
 # ---------------------------------------------------------------------------
 
+OFFERBOOK_PROGRAM_ID = "offerbkFMvVfpQhL8ZQ5iromnjct5rz3r52B9ewu3ie"
+
+
 def fetch_my_offers(duration_filter: int | None) -> list[dict]:
     """
     Return active + partiallyFilled lending offers for WALLET_PUBKEY.
@@ -170,6 +176,46 @@ def fetch_my_offers(duration_filter: int | None) -> list[dict]:
             len(offers), duration_filter, before,
         )
     return offers
+
+
+def fetch_onchain_orphans(api_pubkeys: set[str]) -> list[str]:
+    """
+    Use getProgramAccounts to find offer PDAs on-chain that the API doesn't
+    list (underfunded / orphaned accounts). Returns pubkeys not in api_pubkeys.
+    """
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getProgramAccounts",
+        "params": [
+            OFFERBOOK_PROGRAM_ID,
+            {
+                "encoding": "base64",
+                "filters": [
+                    # Offerbook offer accounts store the creator pubkey at offset 8
+                    # (after the 8-byte Anchor discriminator).
+                    {"memcmp": {"offset": 8, "bytes": WALLET_PUBKEY}},
+                ],
+            },
+        ],
+    }
+    try:
+        resp = requests.post(SOLANA_RPC, json=payload, timeout=30)
+        resp.raise_for_status()
+        accounts = resp.json().get("result", [])
+    except Exception as exc:
+        log.warning("On-chain scan failed: %s", exc)
+        return []
+
+    orphans = [
+        acct["pubkey"]
+        for acct in accounts
+        if acct["pubkey"] not in api_pubkeys
+    ]
+    if orphans:
+        log.info("Found %d on-chain orphan offer(s) not in API:", len(orphans))
+        for pk in orphans:
+            log.info("  %s", pk)
+    return orphans
 
 # ---------------------------------------------------------------------------
 # Sign + submit
@@ -266,12 +312,32 @@ def main() -> None:
     log.info("Fetching open offers for %s …", WALLET_PUBKEY)
 
     offers = fetch_my_offers(duration_filter)
+    pubkeys = [o["pubkey"] for o in offers if o.get("pubkey")]
 
-    if not offers:
+    # Also scan on-chain for underfunded/orphaned PDAs that the API won't list.
+    # These arise when a strategy run crashes or when USDC balance drops below
+    # the offer's minimum — the account stays on-chain but the API hides it.
+    # When cancelling all strategies we always scan; for a specific strategy we
+    # still scan (the orphan count is small and cancelling extras is harmless).
+    api_pubkey_set = set(pubkeys)
+    orphans = fetch_onchain_orphans(api_pubkey_set)
+    # For orphans we can't filter by duration (account data not decoded), so we
+    # include them when --days all is selected or when there are no API offers
+    # (meaning everything is orphaned and belongs to us).
+    if orphans:
+        if duration_filter is None or not pubkeys:
+            pubkeys.extend(orphans)
+            log.info("Added %d orphan(s) to cancel list", len(orphans))
+        else:
+            log.info(
+                "Skipping %d orphan(s) — run with --days all to cancel them too",
+                len(orphans),
+            )
+
+    if not pubkeys:
         log.info("No matching offers found — nothing to cancel.")
         return
 
-    pubkeys = [o["pubkey"] for o in offers if o.get("pubkey")]
     log.info("Found %d offer(s) to cancel", len(pubkeys))
 
     cancelled = 0

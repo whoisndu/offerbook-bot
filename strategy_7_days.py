@@ -934,10 +934,28 @@ def main() -> None:
                 skipped += 1
                 continue
 
+            principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
+
+            # Cross-validate the live price against the pool-implied price from existing
+            # loans/offers. If the price feed is wrong (e.g. DexScreener returning 5000×
+            # the real price), collateral_raw will be far too low and our offer's true LTV
+            # will exceed MAX_LTV — skip rather than create an undercollateralised offer.
+            pool_price = ps.median_collateral_price_per_raw
+            if pool_price and pool_price > 0 and collateral_raw > 0:
+                ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)
+                if ltv_at_pool_price > MAX_LTV:
+                    log.warning(
+                        "  %s: skipping — live price requires %.4g tokens but pool-implied "
+                        "price gives LTV %.0f%% (limit %.0f%%) — likely bad price feed",
+                        ps.collateral_mint[:8], collateral_raw,
+                        ltv_at_pool_price * 100, MAX_LTV * 100,
+                    )
+                    skipped += 1
+                    continue
+
             offer_params["collateralAmount"] = collateral_raw
             offer_params["minFillAmount"] = max(1001, pair_budget_raw // 100)
 
-            principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
             collateral_price = current_prices.get(ps.collateral_mint)
             decimals = KNOWN_DECIMALS.get(ps.collateral_mint)
             if collateral_price and decimals is not None:

@@ -1,6 +1,6 @@
 # Offerbook Competitive Lending Bot
 
-An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol on Solana. It scans active lending offers and loans, posts competitive lending offers sized to your per-collateral allocation, and enforces LTV limits using real-time prices from the Jupiter Price API.
+An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol on Solana. It scans active lending offers, posts competitive lending offers sized to your per-collateral allocation, and enforces LTV limits using real-time prices from Jupiter and DexScreener.
 
 ## Strategies
 
@@ -15,11 +15,17 @@ Three independent scripts — run whichever suits your risk appetite. Each offer
 ### How it works
 
 1. Fetch all active lending offers and loans from the Offerbook API
-2. Group by `(principalMint, collateralMint)` pair and compute the mean APY
-3. Fetch real-time collateral token prices from the **Jupiter Price API**
-4. For each pair, compute `collateralAmount` to enforce the strategy's max LTV at **current prices** — not stale prices from other lenders' old offers
-5. Set `principalAmount` to your configured allocation fraction of your total USDC balance (wallet + escrow)
-6. Post the offer with `allowPartialFill = true` so borrowers can take any amount up to the full offer
+2. Group by `(principalMint, collateralMint)` pair
+3. Compute the **volume-weighted mean APY** from live offers of the same duration — large offers carry more weight than small high-APY outliers. If no same-duration offers exist for a pair, fall back to the global mean across all durations. The log shows which source was used: `[from live offers (same duration)]` or `[from live offers (global)]`
+4. Fetch real-time collateral prices from **Jupiter Price API** (primary) with **DexScreener** as fallback
+5. For each pair, compute `collateralAmount` to enforce the strategy's max LTV at **current prices** — not stale prices from other lenders' old offers
+6. **Cross-validate the live price** against the pool-implied price from existing loans. If the two differ enough that the offer's true LTV would exceed `MAX_LTV`, skip the pair and log a warning (guards against bad price feeds)
+7. Set `principalAmount` to your configured allocation fraction of your total USDC balance (wallet + escrow)
+8. Post the offer with `allowPartialFill = true` so borrowers can take any amount up to the full offer
+
+### Price feed safety
+
+Prices are fetched from Jupiter first, DexScreener second. After computing the required collateral amount, the bot cross-checks it against the **pool-implied price** — the price inferred from existing loans and offers for the same collateral. If the live price is stale or wrong (e.g. a DexScreener pool with low liquidity returning an anomalous price), the collateral requirement will be far too low at real market prices. The bot detects this and skips rather than posting an undercollateralised offer.
 
 ## Allocation config (`allocation_config.yaml`)
 
@@ -35,7 +41,7 @@ allocations:
 default: 0.0   # skip any token not explicitly listed
 ```
 
-Since Offerbook uses a **shared escrow model** (first borrower to fill wins, others auto-close), you can safely set multiple tokens to 1.0 — only one loan can fill at a time.
+Set a token to `0.0` to skip it entirely. Since Offerbook uses a **shared escrow model** (first borrower to fill wins), you can safely set multiple tokens to `1.0` — only one loan fills at a time.
 
 ### Syncing the config
 
@@ -53,7 +59,7 @@ python update_config.py
 
 ## Kill switch (`cancel_offers.py`)
 
-Cancels open offers for a specific strategy or all at once.
+Cancels open offers for a specific strategy or all at once. Always cancel before re-running strategies to avoid duplicate PDA conflicts.
 
 ```bash
 # Interactive prompt — asks which strategy to cancel
@@ -110,8 +116,9 @@ ALLOCATION_CONFIG=path/to/allocation_config.yaml
 # Safe preview — no transactions submitted
 DRY_RUN=true python strategy_7_days.py
 
-# Live mode
-DRY_RUN=false python strategy_7_days.py
+# Live — cancel first, then run all three strategies
+python cancel_offers.py --days all
+python strategy_3_days.py && python strategy_7_days.py && python strategy_15_days.py
 ```
 
 ## Environment variables

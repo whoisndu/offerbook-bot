@@ -162,6 +162,37 @@ python update_config.py
 - Appends new tokens (allocation defaults to `0.0` — opt-in to enable)
 - Updates comments for previously-unknown tokens where the symbol is now resolved
 
+## Post-placement sanity check (`verify_offers.py`)
+
+Run this immediately after placing orders to confirm every live offer has correct LTV, APY, duration, and principal volume.
+
+```bash
+# Check all three strategies
+python verify_offers.py
+
+# Check a specific strategy only
+python verify_offers.py --days 3
+python verify_offers.py --days 7
+python verify_offers.py --days 15
+```
+
+For each offer the script prints a table row:
+
+| Column | What is checked |
+|---|---|
+| `APY bps` / `APY %` | Must be ≥ 10 bps (the floor) |
+| `LTV %` | Recomputed from fresh Jupiter/DexScreener prices; must be ≤ the strategy's `MaxLTV` |
+| `Vol USDC` | Principal amount; flagged if dust (< 1 000 raw units) |
+| `status` | `PASS` / `WARN` (non-critical) / `FAIL` (LTV violation) |
+
+Exit code is `1` if any LTV violations are found, `0` otherwise — safe to use in shell pipelines:
+
+```bash
+python cancel_offers.py --days all
+python strategy_3_days.py && python strategy_7_days.py && python strategy_15_days.py
+python verify_offers.py   # non-zero exit = something is wrong
+```
+
 ## Kill switch (`cancel_offers.py`)
 
 Cancels open offers for a specific strategy or all at once. Always cancel before re-running strategies to avoid duplicate PDA conflicts.

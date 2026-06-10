@@ -27,6 +27,111 @@ Three independent scripts — run whichever suits your risk appetite. Each offer
 
 Prices are fetched from Jupiter first, DexScreener second. After computing the required collateral amount, the bot cross-checks it against the **pool-implied price** — the price inferred from existing loans and offers for the same collateral. If the live price is stale or wrong (e.g. a DexScreener pool with low liquidity returning an anomalous price), the collateral requirement will be far too low at real market prices. The bot detects this and skips rather than posting an undercollateralised offer.
 
+## Mathematical Formulation
+
+This section formalises the pricing, risk, and allocation decisions made by the bot.
+
+### Notation
+
+| Symbol | Meaning |
+|---|---|
+| $\mathcal{O}$ | Set of all active lending offers fetched from Offerbook |
+| $\mathcal{O}_d \subseteq \mathcal{O}$ | Subset of offers whose duration matches strategy duration $d$ |
+| $r_i \in \mathbb{R}_{>0}$ | Annualised percentage yield (APY) of offer $i$ |
+| $p_i \in \mathbb{R}_{>0}$ | Principal amount (in USDC) of offer $i$ |
+| $\delta \in \mathbb{R}$ | Strategy-specific APY adjustment factor |
+| $P$ | Principal amount posted by the bot for a given offer |
+| $C$ | Collateral amount required for that offer |
+| $\pi_c$ | Live USD price of the collateral token (from Jupiter / DexScreener) |
+| $\pi_p$ | Live USD price of the principal token (USDC, $\pi_p \approx 1$) |
+| $L_{\max}$ | Maximum loan-to-value ratio permitted by the strategy |
+| $\alpha_k \in [0,1]$ | Allocation fraction for collateral token $k$ |
+| $B$ | Combined lender budget: $B = B_{\text{wallet}} + B_{\text{escrow}}$ |
+
+---
+
+### 1. Volume-Weighted Mean APY
+
+A naïve arithmetic mean over APYs is distorted by small, high-yield fringe offers. The bot instead computes a **volume-weighted mean** so that larger, more liquid offers dominate the benchmark:
+
+$$\bar{r}_{vw}(\mathcal{S}) = \frac{\displaystyle\sum_{i \in \mathcal{S}} r_i \cdot p_i}{\displaystyle\sum_{i \in \mathcal{S}} p_i}, \qquad \mathcal{S} \neq \emptyset$$
+
+---
+
+### 2. Duration-Stratified Benchmarking with Fallback
+
+Offers of different durations reflect different risk premia and should not be pooled blindly. The benchmark APY for strategy $d$ is:
+
+$$\bar{r}^{(d)} = \begin{cases} \bar{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\[6pt] \bar{r}_{vw}(\mathcal{O}) & \text{otherwise} \end{cases}$$
+
+The log records which branch was taken (`[from live offers (same duration)]` vs `[from live offers (global)]`).
+
+---
+
+### 3. APY Target
+
+Each strategy positions itself relative to the benchmark by applying a scalar adjustment $\delta$:
+
+$$r^* = \bar{r}^{(d)} \cdot (1 + \delta)$$
+
+| Strategy | $d$ | $\delta$ | Rationale |
+|---|---|---|---|
+| `strategy_3_days.py` | 3 days | $+0.10$ | Short duration; higher yield acceptable |
+| `strategy_7_days.py` | 7 days | $-0.10$ | Mid duration; slight undercut to attract flow |
+| `strategy_15_days.py` | 15 days | $-0.12$ | Long duration; deeper undercut offsets illiquidity |
+
+A hard floor $r^* \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
+
+---
+
+### 4. LTV Enforcement and Safe Collateral Sizing
+
+The **loan-to-value ratio** of a proposed offer is:
+
+$$\text{LTV} = \frac{P \cdot \pi_p}{C \cdot \pi_c}$$
+
+To guarantee $\text{LTV} \leq L_{\max}$, the minimum collateral the borrower must post is:
+
+$$C_{\min} = \frac{P \cdot \pi_p}{L_{\max} \cdot \pi_c}$$
+
+The bot sets $C = C_{\min}$, using prices fetched at offer-posting time (not prices embedded in stale third-party offers).
+
+| Strategy | $L_{\max}$ | Implied collateral ratio $C/P$ at $\pi_p = \pi_c = 1$ |
+|---|---|---|
+| 3 days | 0.65 | $\approx 1.54\times$ |
+| 7 days | 0.45 | $\approx 2.22\times$ |
+| 15 days | 0.25 | $4\times$ |
+
+---
+
+### 5. Price Cross-Validation
+
+Even after computing $C_{\min}$ from a live price feed, that price may itself be unreliable (stale oracle, thin pool). The bot cross-validates by computing the **pool-implied collateral price** from existing on-chain loans for the same pair:
+
+$$\hat{\pi}_c = \frac{P_{\text{ref}} \cdot \pi_p}{C_{\text{ref}}}$$
+
+where $(P_{\text{ref}}, C_{\text{ref}})$ are the principal and collateral from a reference loan. The implied LTV under the live price is then:
+
+$$\widehat{\text{LTV}}_{\text{live}} = \frac{P_{\text{ref}} \cdot \pi_p}{C_{\text{ref}} \cdot \pi_c}$$
+
+If $\widehat{\text{LTV}}_{\text{live}} > L_{\max}$, the live price is inconsistent with market-observed collateralisation — the bot skips the pair and logs a warning. This guards against posting an under-collateralised offer when a price feed returns an anomalously high $\pi_c$.
+
+---
+
+### 6. Budget Allocation
+
+Let $K$ be the set of eligible collateral tokens for a given strategy run. The principal for pair $k$ is:
+
+$$P_k = \alpha_k \cdot B, \qquad \alpha_k \in [0, 1]$$
+
+The bot uses a `topup: minimum` escrow strategy: it draws from on-chain escrow first and pulls from the wallet only the shortfall $\max(0,\ P_k - B_{\text{escrow},k})$. This minimises unnecessary wallet-to-escrow transfers.
+
+If `MAX_OFFER_PRINCIPAL_USDC` $= M > 0$, the effective principal is capped:
+
+$$P_k^{\text{eff}} = \min(P_k,\ M)$$
+
+---
+
 ## Allocation config (`allocation_config.yaml`)
 
 Controls what fraction of your total USDC balance you're willing to offer per collateral token. Tokens listed here also **bypass the LTV filter** (you're explicitly trusting them); unlisted tokens go through the LTV filter first.

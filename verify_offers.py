@@ -39,7 +39,8 @@ API_BASE        = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/
 SOLANA_RPC      = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 WALLET_PUBKEY   = os.getenv("OFFERBOOK_WALLET", "")
 
-JUPITER_PRICE_API = "https://price.jup.ag/v6/price"
+JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
+JUPITER_API_KEY   = os.getenv("JUPITER_API_KEY", "")
 DEXSCREENER_API   = "https://api.dexscreener.com/latest/dex/tokens"
 
 USDC_MINT     = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -148,10 +149,11 @@ def fetch_current_prices(mints: list[str]) -> dict[str, float]:
         return {}
     prices: dict[str, float] = {}
     try:
-        resp = SESSION.get(JUPITER_PRICE_API, params={"ids": ",".join(mints)}, timeout=15)
+        headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
+        resp = SESSION.get(JUPITER_PRICE_API, params={"ids": ",".join(mints)}, headers=headers, timeout=15)
         resp.raise_for_status()
-        data = resp.json().get("data", {})
-        prices = {m: float(info["price"]) for m, info in data.items() if info.get("price")}
+        data = resp.json()
+        prices = {m: float(info["usdPrice"]) for m, info in data.items() if info.get("usdPrice")}
     except Exception as exc:
         log.warning("Jupiter price fetch failed: %s", exc)
 

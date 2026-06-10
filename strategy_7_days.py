@@ -81,7 +81,8 @@ MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in 
 # Jupiter Price API — used to get real-time collateral token prices so that
 # collateralAmount is always sized to enforce MAX_LTV at current market prices,
 # not at whatever stale price the market's existing offers were created with.
-JUPITER_PRICE_API = "https://price.jup.ag/v6/price"
+JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
+JUPITER_API_KEY   = os.getenv("JUPITER_API_KEY", "")
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
 # Decimals for collateral tokens.  Needed to convert Jupiter's per-whole-token
@@ -513,14 +514,16 @@ def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
 
     # 1. Jupiter — batch lookup, covers most major tokens
     try:
+        headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
         resp = SESSION.get(
             JUPITER_PRICE_API,
             params={"ids": ",".join(collateral_mints)},
+            headers=headers,
             timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json().get("data", {})
-        prices = {mint: float(info["price"]) for mint, info in data.items() if info.get("price")}
+        data = resp.json()
+        prices = {mint: float(info["usdPrice"]) for mint, info in data.items() if info.get("usdPrice")}
         log.info("Jupiter prices fetched for %d/%d collateral mints", len(prices), len(collateral_mints))
     except Exception as exc:
         log.warning("Could not fetch Jupiter prices: %s", exc)

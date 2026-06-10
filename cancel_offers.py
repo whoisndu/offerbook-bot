@@ -348,8 +348,18 @@ def main() -> None:
             cancel_batch(batch, withdraw_mode)
             cancelled += len(batch)
         except Exception as exc:
-            log.error("Failed to cancel batch %s: %s", batch, exc)
-            errors += len(batch)
+            if len(batch) == 1:
+                log.warning("Skipping offer %s — no longer exists or already cancelled: %s", batch[0], exc)
+                errors += 1
+            else:
+                log.warning("Batch of %d failed (%s) — retrying individually …", len(batch), exc)
+                for pk in batch:
+                    try:
+                        cancel_batch([pk], withdraw_mode)
+                        cancelled += 1
+                    except Exception as inner:
+                        log.warning("Skipping %s — no longer exists or already cancelled: %s", pk, inner)
+                        errors += 1
 
     log.info("Done.  Cancelled=%d  Errors=%d", cancelled, errors)
 

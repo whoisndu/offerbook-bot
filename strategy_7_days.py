@@ -946,10 +946,10 @@ def main() -> None:
             pool_price = ps.median_collateral_price_per_raw
             if pool_price and pool_price > 0 and collateral_raw > 0:
                 ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)
-                if ltv_at_pool_price > MAX_LTV:
+                if ltv_at_pool_price > MAX_LTV * 2.0:
                     log.warning(
                         "  %s: skipping — live price requires %.4g tokens but pool-implied "
-                        "price gives LTV %.0f%% (limit %.0f%%) — likely bad price feed",
+                        "price gives LTV %.0f%% (2× limit %.0f%%) — likely bad price feed",
                         ps.collateral_mint[:8], collateral_raw,
                         ltv_at_pool_price * 100, MAX_LTV * 100,
                     )

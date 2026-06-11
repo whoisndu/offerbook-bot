@@ -114,7 +114,7 @@ where $(P_{\text{ref}}, C_{\text{ref}})$ are the principal and collateral from a
 
 $$\widehat{\text{LTV}}_{\text{live}} = \frac{P_{\text{ref}} \cdot \pi_p}{C_{\text{ref}} \cdot \pi_c}$$
 
-If $\widehat{\text{LTV}}_{\text{live}} > L_{\max}$, the live price is inconsistent with market-observed collateralisation — the bot skips the pair and logs a warning. This guards against posting an under-collateralised offer when a price feed returns an anomalously high $\pi_c$.
+If $\widehat{\text{LTV}}_{\text{live}} > 2 \cdot L_{\max}$, the live price is inconsistent with market-observed collateralisation — the bot skips the pair and logs a warning. This guards against posting an under-collateralised offer when a price feed returns an anomalously high $\pi_c$. The threshold is set at $2\times$ rather than $1\times$ to avoid false positives from minor price divergence between the live feed and pool-implied prices.
 
 ---
 

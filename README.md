@@ -275,7 +275,7 @@ python strategy_7_days.py --private-key
 | `SOLANA_RPC` | No | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
 | `MAX_OFFER_PRINCIPAL_USDC` | No | `0` | Per-offer USDC cap (0 = full allocation) |
 | `ALLOCATION_CONFIG` | No | `allocation_config.yaml` | Path to allocation config file |
-| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py` |
+| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py` and the strategy scripts |
 | `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing |
 
 ## Signing modes
@@ -300,6 +300,21 @@ python cancel_offers.py --private-key   # hot wallet signing
 python cancel_offers.py --ledger --days 7 --yes
 python strategy_7_days.py --private-key --yes
 ```
+
+## Testing against a single collateral
+
+`strategy_3_days.py` accepts `--collateral <SYMBOL|mint>` to scope a run to
+one collateral pair instead of every allocated market — useful for testing
+signing or sizing changes without touching the rest of your allocation.
+
+```bash
+python strategy_3_days.py --collateral HYPE --yes
+MAX_OFFER_PRINCIPAL_USDC=50 python strategy_3_days.py --collateral HYPE --yes
+```
+
+Note: with a single pair selected, the full per-pair allocation budget
+(`allocation_config.yaml`) goes to that one market — use
+`MAX_OFFER_PRINCIPAL_USDC` to size down a genuine test.
 
 ## Security
 

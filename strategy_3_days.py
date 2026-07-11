@@ -18,8 +18,10 @@ Strategy:
 Usage:
   pip install requests solders base58
   export OFFERBOOK_WALLET=<your-base58-wallet-pubkey>
-  export OFFERBOOK_PRIVATE_KEY=<your-base58-private-key>   # for signing txns
-  python strategy_3_days.py
+  export OFFERBOOK_PRIVATE_KEY=<your-base58-private-key>   # for --private-key signing
+  python strategy_3_days.py                    # Ledger signing (default)
+  python strategy_3_days.py --private-key       # sign with OFFERBOOK_PRIVATE_KEY instead
+  python strategy_3_days.py --collateral HYPE   # only create an offer for this collateral
 
 Notes:
   - The Offerbook transaction API returns a base64-encoded Solana transaction.

@@ -18,7 +18,7 @@ Three independent scripts — run whichever suits your risk appetite. Each offer
 2. Group by `(principalMint, collateralMint)` pair
 3. Compute the **volume-weighted mean APY** from live offers of the same duration — large offers carry more weight than small high-APY outliers. If no same-duration offers exist for a pair, fall back to the global mean across all durations. The log shows which source was used: `[from live offers (same duration)]` or `[from live offers (global)]`
 4. Fetch real-time collateral prices from **Jupiter Price API** (primary) with **DexScreener** as fallback
-5. For each pair, compute `collateralAmount` to enforce the strategy's max LTV at **current prices** — not stale prices from other lenders' old offers
+5. For each pair, compute `collateralAmount` to enforce the strategy's max LTV at **current prices** — not stale prices from other lenders' old offers. If no live price is available from either source, the pair is skipped entirely rather than sized off a stale pool-implied price (see below)
 6. **Cross-validate the live price** against the pool-implied price from existing loans. If the two differ enough that the offer's true LTV would exceed `MAX_LTV`, skip the pair and log a warning (guards against bad price feeds)
 7. Set `principalAmount` to your configured allocation fraction of your total USDC balance (wallet + escrow)
 8. Post the offer with `allowPartialFill = true` so borrowers can take any amount up to the full offer
@@ -26,6 +26,8 @@ Three independent scripts — run whichever suits your risk appetite. Each offer
 ### Price feed safety
 
 Prices are fetched from Jupiter first, DexScreener second. After computing the required collateral amount, the bot cross-checks it against the **pool-implied price** — the price inferred from existing loans and offers for the same collateral. If the live price is stale or wrong (e.g. a DexScreener pool with low liquidity returning an anomalous price), the collateral requirement will be far too low at real market prices. The bot detects this and skips rather than posting an undercollateralised offer.
+
+`safe_collateral_amount()` only ever sizes an offer off a genuine live price — if Jupiter and DexScreener both have nothing for a mint, the pair is skipped, full stop. It deliberately does **not** fall back to the pool-implied price in that case: doing so would size the offer using that same price and then "cross-validate" against it, which can never disagree with itself and provides no real protection. This is also why token decimals aren't limited to the small hardcoded `KNOWN_DECIMALS` table — Jupiter's price response includes each token's `decimals`, and that's merged in as a fallback, so any token Jupiter actually prices (which is nearly everything) is fully usable regardless of whether it's in that curated list.
 
 ## Mathematical Formulation
 
@@ -293,6 +295,14 @@ Every script (`cancel_offers.py`, `strategy_3_days.py`, `strategy_7_days.py`,
 Every run prints the resolved signing mode and wallet address and asks for
 confirmation before doing anything, so you always know which wallet/mode
 you're about to act with. Pass `--yes` to skip that prompt.
+
+**Review before you approve (Ledger mode):** since the Ledger's own screen
+can't render Offerbook's custom instructions (blind signing), and a signed +
+broadcast Ledger transaction can't be walked back the way a hot-wallet tx
+sometimes can, every transaction's full detail — fee payer, every account
+touched (with signer flags), and each instruction's program, accounts, and
+data — is printed to the console right before the on-device approval prompt.
+Read it before pressing the button.
 
 ```bash
 python cancel_offers.py                 # Ledger signing (default), interactive

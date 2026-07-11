@@ -532,16 +532,22 @@ def _fetch_dexscreener_price(mint: str) -> float | None:
         return None
 
 
-def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
+def fetch_current_prices(collateral_mints: list[str]) -> tuple[dict[str, float], dict[str, int]]:
     """
-    Return {mint: usd_price_per_whole_token} for each collateral mint.
+    Return ({mint: usd_price_per_whole_token}, {mint: decimals}) for each collateral mint.
     Tries Jupiter first (batch); falls back to DexScreener per-token for any
     mint Jupiter doesn't cover (e.g. niche Bonk-ecosystem tokens).
+
+    Jupiter's price response includes each token's `decimals` — we capture that
+    here so mints missing from the hardcoded KNOWN_DECIMALS table (anything not
+    in our curated top-20) still get a usable price instead of being silently
+    treated as priceless.
     """
     if not collateral_mints:
-        return {}
+        return {}, {}
 
     prices: dict[str, float] = {}
+    jupiter_decimals: dict[str, int] = {}
 
     # 1. Jupiter — batch lookup, covers most major tokens
     try:
@@ -555,6 +561,9 @@ def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
         resp.raise_for_status()
         data = resp.json()
         prices = {mint: float(info["usdPrice"]) for mint, info in data.items() if info.get("usdPrice")}
+        jupiter_decimals = {
+            mint: int(info["decimals"]) for mint, info in data.items() if info.get("decimals") is not None
+        }
         log.info("Jupiter prices fetched for %d/%d collateral mints", len(prices), len(collateral_mints))
     except Exception as exc:
         log.warning("Could not fetch Jupiter prices: %s", exc)
@@ -571,7 +580,7 @@ def fetch_current_prices(collateral_mints: list[str]) -> dict[str, float]:
             else:
                 log.warning("  No live price for %s… (Jupiter + DexScreener both failed)", mint[:8])
 
-    return prices
+    return prices, jupiter_decimals
 
 
 # ---------------------------------------------------------------------------
@@ -582,25 +591,29 @@ def safe_collateral_amount(
     principal_raw: int,
     collateral_mint: str,
     current_prices: dict[str, float],
-    fallback_price_per_raw: float | None,
+    decimals_map: dict[str, int],
 ) -> int | None:
     """
     Return the collateral raw amount required so that LTV == MAX_LTV at current prices.
-    Returns None if no price is available (caller should skip the offer).
+    Returns None if no live price is available (caller should skip the offer).
+
+    `decimals_map` should be KNOWN_DECIMALS merged with any decimals Jupiter's
+    price response supplied for mints outside that curated table — otherwise a
+    perfectly valid live price for an unlisted token gets discarded for lack of
+    a decimals figure to convert it with.
+
+    Deliberately does NOT fall back to the pool-implied/stale price when a live
+    price is missing: sizing off that price and then "cross-validating" against
+    the same price is a no-op (it can never disagree with itself), so a stale
+    price for an illiquid/moved token would silently produce a bad LTV.
     """
     principal_usdc = principal_raw / 10 ** USDC_DECIMALS
     required_collateral_usdc = principal_usdc / MAX_LTV
     price_per_token = current_prices.get(collateral_mint)
-    decimals = KNOWN_DECIMALS.get(collateral_mint)
+    decimals = decimals_map.get(collateral_mint)
     if price_per_token and price_per_token > 0 and decimals is not None:
         price_per_raw = price_per_token / (10 ** decimals)
         return int(required_collateral_usdc / price_per_raw)
-    if fallback_price_per_raw and fallback_price_per_raw > 0:
-        log.warning(
-            "  %s: using stale implied price %.6g per raw unit (Jupiter + DexScreener unavailable)",
-            collateral_mint[:8], fallback_price_per_raw,
-        )
-        return int(required_collateral_usdc / fallback_price_per_raw)
     return None
 
 
@@ -1035,7 +1048,8 @@ def main() -> None:
     #     These are used to compute collateralAmount so that LTV ≤ MAX_LTV at current
     #     market prices — NOT at whatever stale price market offers were created with.
     collateral_mints = list({relevant_pairs[p].collateral_mint for p in pair_offer_params})
-    current_prices = fetch_current_prices(collateral_mints)
+    current_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
+    decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
 
     # 6. Build and submit offers
     successes = 0
@@ -1079,12 +1093,13 @@ def main() -> None:
                 principal_raw=pair_budget_raw,
                 collateral_mint=ps.collateral_mint,
                 current_prices=current_prices,
-                fallback_price_per_raw=ps.median_collateral_price_per_raw,
+                decimals_map=decimals_map,
             )
 
             if collateral_raw is None:
                 log.warning(
-                    "  %s: cannot determine collateral price — skipping to avoid bad LTV",
+                    "  %s: no usable live price (Jupiter + DexScreener both failed, or "
+                    "decimals unknown) — skipping to avoid sizing off a stale price",
                     ps.collateral_mint[:8],
                 )
                 skipped += 1
@@ -1113,7 +1128,7 @@ def main() -> None:
             offer_params["minFillAmount"] = max(1001, pair_budget_raw // 100)
 
             collateral_price = current_prices.get(ps.collateral_mint)
-            decimals = KNOWN_DECIMALS.get(ps.collateral_mint)
+            decimals = decimals_map.get(ps.collateral_mint)
             if collateral_price and decimals is not None:
                 collateral_usdc = collateral_raw / (10 ** decimals) * collateral_price
                 actual_ltv = principal_usdc / collateral_usdc if collateral_usdc else 0

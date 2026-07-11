@@ -58,6 +58,41 @@ def _encode_path(path_str: str) -> bytes:
     return out
 
 
+def _describe_transaction(tx: VersionedTransaction) -> str:
+    """
+    Human-readable dump of a transaction's accounts and instructions, printed
+    right before it's sent to the Ledger for approval. The Ledger's own screen
+    can't show Offerbook's custom instructions (blind signing), so this is the
+    only real chance to visually catch a wrong account, amount, or program
+    before an approval — which, unlike a hot-wallet tx, can't be walked back
+    once it lands on-chain.
+    """
+    msg = tx.message
+    account_keys = [str(k) for k in msg.account_keys]
+
+    lines = []
+    lines.append("=" * 78)
+    lines.append("TRANSACTION TO SIGN — review before approving on the Ledger")
+    lines.append("=" * 78)
+    lines.append(f"Recent blockhash : {msg.recent_blockhash}")
+    lines.append(f"Fee payer        : {account_keys[0]}")
+    lines.append("")
+    lines.append(f"Accounts ({len(account_keys)}):")
+    for i, key in enumerate(account_keys):
+        tag = " (signer)" if msg.is_signer(i) else ""
+        lines.append(f"  [{i}] {key}{tag}")
+    lines.append("")
+    lines.append(f"Instructions ({len(msg.instructions)}):")
+    for i, ix in enumerate(msg.instructions):
+        program = account_keys[ix.program_id_index]
+        lines.append(f"  [{i}] program: {program}")
+        for acc_idx in bytes(ix.accounts):
+            lines.append(f"        account[{acc_idx}]: {account_keys[acc_idx]}")
+        lines.append(f"        data (hex): {bytes(ix.data).hex()}")
+    lines.append("=" * 78)
+    return "\n".join(lines)
+
+
 class LedgerSigner:
     def __init__(self, path: str = DEFAULT_PATH):
         self.path = path
@@ -138,6 +173,8 @@ class LedgerSigner:
             signer_index = account_keys.index(signer_pubkey)
         else:
             signer_index = 0
+
+        print(_describe_transaction(tx))
 
         # Hardware wallets sign only the message bytes, not the full wire-format
         # transaction (which includes empty signature placeholder slots).

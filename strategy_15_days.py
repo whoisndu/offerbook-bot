@@ -121,6 +121,32 @@ KNOWN_DECIMALS: dict[str, int] = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,  # USDC
 }
 
+# Symbol -> mint, for the --collateral CLI filter (accepts either).
+SYMBOL_TO_MINT: dict[str, str] = {
+    "SOL": "So11111111111111111111111111111111111111112",
+    "MSOL": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+    "BSOL": "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",
+    "JUPSOL": "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v",
+    "JITOSOL": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+    "BBSOL": "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B",
+    "BNSOL": "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85",
+    "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    "JLP": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+    "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "HNT": "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux",
+    "NOS": "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7",
+    "WEN": "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst",
+    "CBBTC": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+    "KYKYROS": "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk",
+    "STKE": "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh",
+    "PUMP": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+    "SMRT": "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC",
+    "USELESS": "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk",
+    "NEET": "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump",
+    "ZEC": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "HYPE": "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g",
+}
+
 # ---------------------------------------------------------------------------
 # Allocation config  (allocation_config.yaml)
 # ---------------------------------------------------------------------------
@@ -907,7 +933,16 @@ def main() -> None:
         "--yes", "-y", action="store_true",
         help="Skip the signing-mode confirmation prompt",
     )
+    parser.add_argument(
+        "--collateral", default=None,
+        help="Only create an offer for this collateral (symbol like HYPE, or a mint address). "
+             "Omit to run the full strategy across every allocated pair.",
+    )
     args = parser.parse_args()
+
+    collateral_filter = None
+    if args.collateral:
+        collateral_filter = SYMBOL_TO_MINT.get(args.collateral.upper(), args.collateral)
 
     if args.signing_mode:
         SIGNING_MODE = args.signing_mode
@@ -963,6 +998,16 @@ def main() -> None:
         if ps.lending_apys or ps.global_lending_apys
     }
     log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
+
+    if collateral_filter:
+        relevant_pairs = {
+            pair: ps for pair, ps in relevant_pairs.items() if pair[1] == collateral_filter
+        }
+        log.info("Filtered to collateral %s: %d pair(s)", args.collateral, len(relevant_pairs))
+        if not relevant_pairs:
+            log.error("No benchmarkable pair found for collateral %s (%s) — nothing to do.",
+                      args.collateral, collateral_filter)
+            return
 
     # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
     pair_offer_params: dict = {}

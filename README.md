@@ -303,12 +303,15 @@ python strategy_7_days.py --private-key --yes
 
 ## Testing against a single collateral
 
-`strategy_3_days.py` accepts `--collateral <SYMBOL|mint>` to scope a run to
-one collateral pair instead of every allocated market — useful for testing
-signing or sizing changes without touching the rest of your allocation.
+All three strategy scripts accept `--collateral <SYMBOL|mint>` to scope a run
+to one collateral pair instead of every allocated market — useful for testing
+signing or sizing changes without touching the rest of your allocation. Omit
+it and every pair in `allocation_config.yaml` is processed as usual.
 
 ```bash
 python strategy_3_days.py --collateral HYPE --yes
+python strategy_7_days.py --collateral HYPE --yes
+python strategy_15_days.py --collateral HYPE --yes
 MAX_OFFER_PRINCIPAL_USDC=50 python strategy_3_days.py --collateral HYPE --yes
 ```
 

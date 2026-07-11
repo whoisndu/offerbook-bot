@@ -186,7 +186,7 @@ allocations:
   # (ltv ~46%)  — unknown token
   7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr: 0.0
 
-  # (ltv ~50%)  — unknown token
+  # SMRT — Streamflow SMRT  (ltv ~44%)
   5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC: 0.0
 
   # (ltv ~50%)  — unknown token
@@ -224,4 +224,266 @@ allocations:
 # These tokens still pass through the 40% USD LTV filter first.
 # Set to 0.0 to ONLY lend to tokens you have explicitly listed above.
 # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Newly discovered tokens (allocation defaults to 0.0 — set your % to enable)
+  # ---------------------------------------------------------------------------
+
+  # (ltv unknown)  — unknown token
+  25wyr6L1aXx4XFGfYQmkWx99HrUkhLdhHz2mzPRsQ2d6: 0.0
+
+  # (ltv ~10%)  — unknown token
+  PresTj4Yc2bAR197Er7wz4UUKSfqt6FryBEdAriBoQB: 0.0
+
+  # (ltv ~17%)  — unknown token
+  1zJX5gRnjLgmTpq5sVwkq69mNDQkCemqoasyjaPW6jm: 0.0
+
+  # (ltv ~25%)  — unknown token
+  5U4By4BkSu2WVLYTqx7YsMTk5JTa7JBqrovpPeHaFoDM: 0.0
+
+  # (ltv ~29%)  — unknown token
+  68Nq68CrtLVpyvK5Un7UADiNczaGf39hBbj3diRsYj6D: 0.0
+
+  # (ltv ~36%)  — unknown token
+  Df6yfrKC8kZE3KNkrHERKzAetSxbrWeniQfyJY4Jpump: 0.0
+
+  # (ltv ~37%)  — unknown token
+  BCdwQBAn8dYB5YjTsoB6TdHAWokxv28k2oZUodERpump: 0.0
+
+  # (ltv ~37%)  — unknown token
+  6NwarBvDkXhByqVp2Qkq5i9XbtA2B3Bwe8SWGu9vpump: 0.0
+
+  # (ltv ~39%)  — unknown token
+  J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump: 0.0
+
+  # (ltv ~39%)  — unknown token
+  DriFtupJYLTosbwoN8koMbEYSx54aFAVLddWsbksjwg7: 0.0
+
+  # (ltv ~40%)  — unknown token
+  CrAr4RRJMBVwRsZtT62pEhfA9H5utymC2mVx8e7FreP2: 0.0
+
+  # (ltv ~40%)  — unknown token
+  3iQL8BFS2vE7mww4ehAqQHAsbmRNCrPxizWAT2Zfyr9y: 0.0
+
+  # (ltv ~41%)  — unknown token
+  DitHyRMQiSDhn5cnKMJV2CDDt6sVct96YrECiM49pump: 0.0
+
+  # ANSEM — The Black Bull  (ltv ~41%)
+  9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump: 0.8
+
+  # (ltv ~41%)  — unknown token
+  4Cnk9EPnW5ixfLZatCPJjDB1PUtcRpVVgTQukm9epump: 0.0
+
+  # (ltv ~41%)  — unknown token
+  BcHEaaTCvycPwwsJ9yQTXdHP9X2gCLkznDbZ8VySpump: 0.0
+
+  # (ltv ~44%)  — unknown token
+  METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m: 0.0
+
+  # (ltv ~45%)  — unknown token
+  3Lmhcfxnf8hiNPVjDh83wy68gFnQhLFjYL489a52v9bf: 0.0
+
+  # (ltv ~46%)  — unknown token
+  ALaBcBiKBxCmUP2hcvfWz4EmfVL9BuUqKh5FozaYr7Xd: 0.0
+
+  # (ltv ~46%)  — unknown token
+  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: 0.0
+
+  # (ltv ~47%)  — unknown token
+  ZEXy1pqteRu3n13kdyh4LwPQknkFk3GzmMYMuNadWPo: 0.0
+
+  # (ltv ~48%)  — unknown token
+  G58eZqDW5DddfzVgAFCx2MKywvZ9wP81a2EjEcfcCHN8: 0.0
+
+  # (ltv ~49%)  — unknown token
+  4EJ6xHjvfm4HsEe2Jfv3X1R1TMnFtkHGicmVcaNkDKXM: 0.0
+
+  # (ltv ~51%)  — unknown token
+  Tqj8yFmagrg7oorpQkVGYR52r96RFTamvWfth9bpump: 0.0
+
+  # (ltv ~52%)  — unknown token
+  METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL: 0.0
+
+  # (ltv ~52%)  — unknown token
+  XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg: 0.0
+
+  # (ltv ~52%)  — unknown token
+  XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN: 0.0
+
+  # (ltv ~52%)  — unknown token
+  FNokdAZDEKhqPR5YEG3qtv6DWBggndWv54XpHCbNFby6: 0.0
+
+  # (ltv ~53%)  — unknown token
+  ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY: 0.0
+
+  # (ltv ~53%)  — unknown token
+  BqcRxyw1TNZXNGW8qRgcms33FcXF5Fgpk6JDfnZYHHfr: 0.0
+
+  # (ltv ~53%)  — unknown token
+  A2icp9dcKGE9wRDzEfcLzUYQiuBJ7ndDivCEX5mmFenG: 0.0
+
+  # (ltv ~54%)  — unknown token
+  2hHmuubkN2se5yXC1GDDZnMshtfTiRshbjrQT42bCcoE: 0.0
+
+  # (ltv ~54%)  — unknown token
+  xjFgng8CCw8KuWzT7RUrz8aEYupXzSUroDEYqazZhiZ: 0.0
+
+  # (ltv ~55%)  — unknown token
+  4PX31xRA1BaAyb2Js45ZKYp92VGWGp47yWeVs5CGVKbf: 0.0
+
+  # (ltv ~55%)  — unknown token
+  MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5: 0.0
+
+  # (ltv ~56%)  — unknown token
+  XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1: 0.0
+
+  # (ltv ~57%)  — unknown token
+  BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy: 0.0
+
+  # (ltv ~57%)  — unknown token
+  BUhMX5fdBUUwbL1vwBrvxCMXay4U4RqPY38Eg5zwTiGw: 0.0
+
+  # (ltv ~57%)  — unknown token
+  MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1: 0.0
+
+  # (ltv ~57%)  — unknown token
+  965Ps1gg8cdQ6mknHFxfXjgVwWWEo7RMQi8j71vxLtiN: 0.0
+
+  # (ltv ~58%)  — unknown token
+  CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp: 0.0
+
+  # (ltv ~59%)  — unknown token
+  EjpvGuVDC1edKZZKSzZoubnZL6euguMYZmKP3xMLfckQ: 0.0
+
+  # (ltv ~59%)  — unknown token
+  86t5SPeTut93cP6yhfSQvinwaZ25tAifPhe2wCjZuZ5P: 0.0
+
+  # (ltv ~60%)  — unknown token
+  EoFxhFu8n33oC7auUzqgEjwa9ZqTGmRu7GCYMetucE7o: 0.0
+
+  # (ltv ~60%)  — unknown token
+  6K1Bsttm2fknG554v416qZMupMTkVjTfPkyXmNCAmfb5: 0.0
+
+  # (ltv ~60%)  — unknown token
+  SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb: 0.0
+
+  # (ltv ~60%)  — unknown token
+  63LfDmNb3MQ8mw9MtZ2To9bEA2M71kZUUGq5tiJxcqj9: 0.0
+
+  # (ltv ~62%)  — unknown token
+  XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ: 0.0
+
+  # (ltv ~62%)  — unknown token
+  AN1YtHV2fV9YfxHFeHRpBsjEgrHH92xWyEkbxGbA6pHd: 0.0
+
+  # (ltv ~64%)  — unknown token
+  EozVEAxxCsk3uXp5RLBarQ1wbnuow1VRRvkPmuCY4YuV: 0.0
+
+  # (ltv ~64%)  — unknown token
+  SV151D5pjygAKA8aJJcKzm4wFnRX5G92Fye94jQJk7g: 0.0
+
+  # (ltv ~66%)  — unknown token
+  A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump: 0.0
+
+  # (ltv ~67%)  — unknown token
+  CTHU9e1X9k2dLCQm6axswzpWwRVG8tKsGpbmdrGuvoN5: 0.0
+
+  # (ltv ~68%)  — unknown token
+  27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4: 0.0
+
+  # (ltv ~68%)  — unknown token
+  Fajqu1RDuzt5Rr7nEWDyyjXD6ErEy2oxmjTweAcAC5xb: 0.0
+
+  # (ltv ~70%)  — unknown token
+  NUZ3FDWTtN5SP72BsefbsqpnbAY5oe21LE8bCSkqsEK: 0.0
+
+  # (ltv ~70%)  — unknown token
+  FvgESXs5P5GByvYEmRtaBg81VXQPZAaT6Pj4AnJcCSS4: 0.0
+
+  # (ltv ~70%)  — unknown token
+  4cotUChekh34TYkWjvtXZFRcNSSTd232nNPwwqywevgf: 0.0
+
+  # (ltv ~71%)  — unknown token
+  oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp: 0.0
+
+  # (ltv ~72%)  — unknown token
+  hf34pZHnV4entu9bdp4pFEmeKpivEUeSUhASgWopump: 0.0
+
+  # (ltv ~73%)  — unknown token
+  FYjPX58goSwUqvkTVtrzKR7dk5P8fKcXeXWu5dwVpAug: 0.0
+
+  # (ltv ~74%)  — unknown token
+  C7heQqfNzdMbUFQwcHkL9FvdwsFsDRBnfwZDDyWYCLTZ: 0.0
+
+  # (ltv ~75%)  — unknown token
+  BXeosz6CCFZHVH1VPME2fZv9QKPDUtChysDpWGWsRYJG: 0.0
+
+  # (ltv ~76%)  — unknown token
+  taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY: 0.0
+
+  # (ltv ~76%)  — unknown token
+  Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh: 0.0
+
+  # (ltv ~77%)  — unknown token
+  3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh: 0.0
+
+  # (ltv ~77%)  — unknown token
+  XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB: 0.0
+
+  # (ltv ~80%)  — unknown token
+  Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ: 0.0
+
+  # (ltv ~80%)  — unknown token
+  XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W: 0.0
+
+  # (ltv ~80%)  — unknown token
+  DnDPkdfaQ2KKJrpsTqnhohHJmmSjGvatyL4euRsUKzs: 0.0
+
+  # (ltv ~81%)  — unknown token
+  3FNLgrNycj4H2h8S7mgF9dVq7JrArRymfCus12qXu5te: 0.0
+
+  # ETH — Ether (Portal)  (ltv ~84%)
+  7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs: 0.0
+
+  # (ltv ~85%)  — unknown token
+  5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5: 0.0
+
+  # (ltv ~90%)  — unknown token
+  7jFnFghorScJJGjPJGA77HjyNQ3yBrRmutP7qLz8ycFW: 0.0
+
+  # (ltv ~95%)  — unknown token
+  y4Db9QWXNFqTq1JZq6axx7PiLD25MjfDKLaDWQtzg3F: 0.0
+
+  # (ltv ~95%)  — unknown token
+  4XMzsnUAp2zTb4b6MgDkfxsFPjAAS93Hh1cbTWoS6MR9: 0.0
+
+  # (ltv ~95%)  — unknown token
+  Ej9nFZXzrbU9x9AeFz1geUajgVFbVdTwZ2TgKJZjhMsf: 0.0
+
+  # (ltv ~95%)  — unknown token
+  6dfa9631wH9Gzdszd7Yah6cSWgEt6tmNVHLz8JMXdPAb: 0.0
+
+  # (ltv ~95%)  — unknown token
+  3EghJNgsY7vMo4XB9FawWSv3DJJYnHpUz9ENCyCQbF9d: 0.0
+
+  # (ltv ~95%)  — unknown token
+  rmgMDf6xpWr7pGsKyqgo35ZrgYUz8VJnd8c9HxjepCo: 0.0
+
+  # (ltv ~108%)  — unknown token
+  9vFEZSnAbtLQNbDcucHBX1DvPxxogRxjpFaaDr1hxvkP: 0.0
+
+  # (ltv ~110%)  — unknown token
+  iy11ytbSGcUnrjE6Lfv78TFqxKyUESfku1FugS9ondo: 0.0
+
+  # (ltv ~130%)  — unknown token
+  D5tMhEKriHGA6YXeJkEVCnyXrkNta7cnaPcy14JHETTr: 0.0
+
+  # (ltv ~197%)  — unknown token
+  CyBXU34HsNfVDMMyHr9ubyv93q9ZjqwiwB4iLepCssQt: 0.0
+
+  # (ltv ~212%)  — unknown token
+  Eyy6izxG8KZ382Z4xYhGGEASYc4oj6fe2YjKC4nVNkfD: 0.0
+
+  # (ltv ~358%)  — unknown token
+  53iYogdYwjWYe9rj3CrpxAKjcdTH7nP1SmUti4EoYPTm: 0.0
 default: 0.0

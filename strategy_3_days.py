@@ -34,6 +34,7 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
+import argparse
 import base64
 import logging
 import os
@@ -56,6 +57,10 @@ SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 
 WALLET_PUBKEY: str = os.getenv("OFFERBOOK_WALLET", "")
 PRIVATE_KEY_B58: str = os.getenv("OFFERBOOK_PRIVATE_KEY", "")  # base58 private key
+
+# "ledger" or "private_key" — Ledger is the default signing mode.
+SIGNING_MODE: str = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
+LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
 # Strategy parameters
 APY_DISCOUNT = -0.10         # 10% ABOVE market mean (negative = premium over mean)
@@ -114,6 +119,32 @@ KNOWN_DECIMALS: dict[str, int] = {
     "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": 8,  # ZEC
     "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": 9,  # HYPE
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,  # USDC
+}
+
+# Symbol -> mint, for the --collateral CLI filter (accepts either).
+SYMBOL_TO_MINT: dict[str, str] = {
+    "SOL": "So11111111111111111111111111111111111111112",
+    "MSOL": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+    "BSOL": "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",
+    "JUPSOL": "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v",
+    "JITOSOL": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+    "BBSOL": "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B",
+    "BNSOL": "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85",
+    "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    "JLP": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+    "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "HNT": "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux",
+    "NOS": "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7",
+    "WEN": "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst",
+    "CBBTC": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+    "KYKYROS": "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk",
+    "STKE": "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh",
+    "PUMP": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+    "SMRT": "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC",
+    "USELESS": "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk",
+    "NEET": "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump",
+    "ZEC": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "HYPE": "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g",
 }
 
 # ---------------------------------------------------------------------------
@@ -708,37 +739,108 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Signer (lazy — only needed when DRY_RUN=false)
+# ---------------------------------------------------------------------------
+
+_ledger_signer = None
+
+
+def _get_ledger_signer():
+    global _ledger_signer
+    if _ledger_signer is not None:
+        return _ledger_signer
+    try:
+        from ledger_signer import LedgerSigner
+    except ImportError:
+        log.error("Missing dependencies: pip install ledgerblue hidapi base58")
+        sys.exit(1)
+    _ledger_signer = LedgerSigner(path=LEDGER_PATH)
+    return _ledger_signer
+
+
+def resolve_signer_wallet() -> str:
+    """
+    Resolve WALLET_PUBKEY for the active signing mode. For Ledger, the device
+    is the source of truth (overrides/fills in OFFERBOOK_WALLET).
+    """
+    global WALLET_PUBKEY
+    if SIGNING_MODE == "ledger":
+        from ledger_signer import LedgerError
+
+        try:
+            signer = _get_ledger_signer()
+            device_pubkey = signer.get_pubkey()
+        except LedgerError as exc:
+            log.error(str(exc))
+            sys.exit(1)
+        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
+            log.warning(
+                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
+                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
+            )
+        WALLET_PUBKEY = device_pubkey
+    return WALLET_PUBKEY
+
+
+def confirm_signing_mode(skip_prompt: bool) -> None:
+    label = "LEDGER (hardware wallet)" if SIGNING_MODE == "ledger" else "PRIVATE KEY (.env hot wallet)"
+    log.info("=" * 60)
+    log.info("  Signing mode : %s", label)
+    log.info("  Wallet       : %s", WALLET_PUBKEY)
+    if SIGNING_MODE == "ledger":
+        log.info("  Derivation   : %s", LEDGER_PATH)
+    log.info("  Dry run      : %s", DRY_RUN)
+    log.info("=" * 60)
+    if skip_prompt:
+        return
+    choice = input("Continue with this signing mode? [y/N] ").strip().lower()
+    if choice not in ("y", "yes"):
+        log.info("Aborted by user.")
+        sys.exit(0)
+
+# ---------------------------------------------------------------------------
 # Transaction submission
 # ---------------------------------------------------------------------------
 
 def sign_and_send_transaction(tx_b64: str) -> str:
     """
-    Sign a base64-encoded Solana transaction with our private key and broadcast
-    it via the Solana RPC.
+    Sign a base64-encoded Solana transaction (Ledger or private key, per
+    SIGNING_MODE) and broadcast it via the Solana RPC.
 
-    Requires:  pip install solders base58
+    Requires:  pip install solders base58   (+ ledgerblue hidapi for --ledger)
     """
-    try:
-        from solders.keypair import Keypair  # type: ignore
-        from solders.transaction import VersionedTransaction  # type: ignore
-        import base58  # type: ignore
-    except ImportError:
-        log.error(
-            "solders / base58 not installed.  Run:  pip install solders base58\n"
-            "Transaction NOT submitted."
-        )
-        return ""
+    if SIGNING_MODE == "ledger":
+        from ledger_signer import LedgerError
 
-    # Decode the keypair
-    secret_bytes = base58.b58decode(PRIVATE_KEY_B58)
-    keypair = Keypair.from_bytes(secret_bytes)
+        signer = _get_ledger_signer()
+        log.info("  Awaiting approval on Ledger device …")
+        try:
+            signed_b64 = signer.sign_transaction(tx_b64, expected_signer=WALLET_PUBKEY)
+        except LedgerError as exc:
+            log.error("  %s", exc)
+            return ""
+    else:
+        try:
+            from solders.keypair import Keypair  # type: ignore
+            from solders.transaction import VersionedTransaction  # type: ignore
+            import base58  # type: ignore
+        except ImportError:
+            log.error(
+                "solders / base58 not installed.  Run:  pip install solders base58\n"
+                "Transaction NOT submitted."
+            )
+            return ""
 
-    # Deserialise and sign
-    raw_tx = base64.b64decode(tx_b64)
-    tx = VersionedTransaction.from_bytes(raw_tx)
-    signed_tx = VersionedTransaction(tx.message, [keypair])
+        # Decode the keypair
+        secret_bytes = base58.b58decode(PRIVATE_KEY_B58)
+        keypair = Keypair.from_bytes(secret_bytes)
 
-    signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
+        # Deserialise and sign
+        raw_tx = base64.b64decode(tx_b64)
+        tx = VersionedTransaction.from_bytes(raw_tx)
+        signed_tx = VersionedTransaction(tx.message, [keypair])
+
+        signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
 
     # Send via JSON-RPC
     payload = {
@@ -791,7 +893,7 @@ def create_offer(params: dict[str, Any]) -> bool:
         log.error("  TX builder returned no transactions!")
         return False
 
-    if not PRIVATE_KEY_B58:
+    if SIGNING_MODE == "private_key" and not PRIVATE_KEY_B58:
         log.warning(
             "  OFFERBOOK_PRIVATE_KEY not set – cannot sign.  "
             "Transaction bytes (base64):\n%s",
@@ -815,9 +917,50 @@ def create_offer(params: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if not WALLET_PUBKEY:
-        log.error("OFFERBOOK_WALLET env var not set.  Exiting.")
+    global SIGNING_MODE, WALLET_PUBKEY
+
+    parser = argparse.ArgumentParser(description="Offerbook competitive lending strategy")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--ledger", action="store_const", dest="signing_mode", const="ledger",
+        help="Sign with a Ledger hardware wallet (default)",
+    )
+    mode_group.add_argument(
+        "--private-key", action="store_const", dest="signing_mode", const="private_key",
+        help="Sign with OFFERBOOK_PRIVATE_KEY from .env",
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the signing-mode confirmation prompt",
+    )
+    parser.add_argument(
+        "--collateral", default=None,
+        help="Only create an offer for this collateral (symbol like HYPE, or a mint address). "
+             "Omit to run the full strategy across every allocated pair.",
+    )
+    args = parser.parse_args()
+
+    collateral_filter = None
+    if args.collateral:
+        collateral_filter = SYMBOL_TO_MINT.get(args.collateral.upper(), args.collateral)
+
+    if args.signing_mode:
+        SIGNING_MODE = args.signing_mode
+    if SIGNING_MODE not in ("ledger", "private_key"):
+        log.error("Invalid signing mode %r — must be 'ledger' or 'private_key'", SIGNING_MODE)
         sys.exit(1)
+
+    if SIGNING_MODE == "private_key":
+        if not WALLET_PUBKEY:
+            log.error("OFFERBOOK_WALLET env var not set.  Exiting.")
+            sys.exit(1)
+        if not DRY_RUN and not PRIVATE_KEY_B58:
+            log.error("OFFERBOOK_PRIVATE_KEY is not set (required for live private-key mode)")
+            sys.exit(1)
+    else:
+        resolve_signer_wallet()  # queries the Ledger device, sets WALLET_PUBKEY
+
+    confirm_signing_mode(skip_prompt=args.yes)
 
     log.info("=" * 60)
     log.info("Offerbook Competitive Lending Bot")
@@ -855,6 +998,16 @@ def main() -> None:
         if ps.lending_apys or ps.global_lending_apys
     }
     log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
+
+    if collateral_filter:
+        relevant_pairs = {
+            pair: ps for pair, ps in relevant_pairs.items() if pair[1] == collateral_filter
+        }
+        log.info("Filtered to collateral %s: %d pair(s)", args.collateral, len(relevant_pairs))
+        if not relevant_pairs:
+            log.error("No benchmarkable pair found for collateral %s (%s) — nothing to do.",
+                      args.collateral, collateral_filter)
+            return
 
     # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
     pair_offer_params: dict = {}

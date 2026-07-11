@@ -7,11 +7,20 @@ and cancels matching offers in batches.
 Handles "underfunded" offers (orphaned on-chain PDAs that the API won't list)
 by scanning on-chain accounts directly via getProgramAccounts.
 
+Signing modes:
+  --ledger        Sign with a Ledger hardware wallet (default). Requires the
+                   Solana app open on-device; you approve each transaction
+                   with a button press. Path: OFFERBOOK_LEDGER_PATH (default
+                   44'/501'/0').
+  --private-key   Sign with OFFERBOOK_PRIVATE_KEY from .env (hot wallet).
+
 Usage:
-  python cancel_offers.py                   # interactive strategy prompt
+  python cancel_offers.py                   # interactive strategy prompt, Ledger signing
+  python cancel_offers.py --private-key     # same, but sign with the hot wallet key
   python cancel_offers.py --days 7          # skip prompt, cancel 7-day offers
   python cancel_offers.py --days all        # skip prompt, cancel everything
   python cancel_offers.py --withdraw        # also pull funds back to wallet
+  python cancel_offers.py --yes             # skip the signing-mode confirmation prompt
   DRY_RUN=true python cancel_offers.py      # preview without submitting
 """
 from __future__ import annotations
@@ -39,6 +48,10 @@ SOLANA_RPC    = os.getenv("SOLANA_RPC",            "https://api.mainnet-beta.sol
 WALLET_PUBKEY = os.getenv("OFFERBOOK_WALLET",      "")
 PRIVATE_KEY_B58 = os.getenv("OFFERBOOK_PRIVATE_KEY", "")
 DRY_RUN       = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+
+# "ledger" or "private_key" — Ledger is the default signing mode.
+SIGNING_MODE   = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
+LEDGER_PATH    = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
 BATCH_SIZE = 5    # offers per cancel tx (keep conservative)
 PAGE_SIZE  = 100
@@ -96,10 +109,11 @@ def _post_tx(endpoint: str, payload: dict) -> dict:
     return resp.json()
 
 # ---------------------------------------------------------------------------
-# Keypair (lazy — only needed when DRY_RUN=false)
+# Signer (lazy — only needed when DRY_RUN=false)
 # ---------------------------------------------------------------------------
 
 _keypair = None
+_ledger_signer = None
 
 
 def _get_keypair():
@@ -114,6 +128,63 @@ def _get_keypair():
         sys.exit(1)
     _keypair = Keypair.from_bytes(base58.b58decode(PRIVATE_KEY_B58))
     return _keypair
+
+
+def _get_ledger_signer():
+    global _ledger_signer
+    if _ledger_signer is not None:
+        return _ledger_signer
+    try:
+        from ledger_signer import LedgerSigner
+    except ImportError:
+        log.error("Missing dependencies: pip install ledgerblue hidapi base58")
+        sys.exit(1)
+    _ledger_signer = LedgerSigner(path=LEDGER_PATH)
+    return _ledger_signer
+
+
+def resolve_signer_wallet() -> str:
+    """
+    Resolve WALLET_PUBKEY for the active signing mode. For Ledger, the device
+    is the source of truth (overrides/fills in OFFERBOOK_WALLET). For
+    private-key mode, OFFERBOOK_WALLET is used as-is (the on-chain program
+    validates that the signer matches).
+    """
+    global WALLET_PUBKEY
+    if SIGNING_MODE == "ledger":
+        from ledger_signer import LedgerError
+
+        try:
+            signer = _get_ledger_signer()
+            device_pubkey = signer.get_pubkey()
+        except LedgerError as exc:
+            log.error(str(exc))
+            sys.exit(1)
+        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
+            log.warning(
+                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
+                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
+            )
+        WALLET_PUBKEY = device_pubkey
+    return WALLET_PUBKEY
+
+
+def confirm_signing_mode(skip_prompt: bool) -> None:
+    label = "LEDGER (hardware wallet)" if SIGNING_MODE == "ledger" else "PRIVATE KEY (.env hot wallet)"
+    print()
+    print("=" * 70)
+    print(f"  Signing mode : {label}")
+    print(f"  Wallet       : {WALLET_PUBKEY}")
+    if SIGNING_MODE == "ledger":
+        print(f"  Derivation   : {LEDGER_PATH}")
+    print(f"  Dry run      : {DRY_RUN}")
+    print("=" * 70)
+    if skip_prompt:
+        return
+    choice = input("Continue with this signing mode? [y/N] ").strip().lower()
+    if choice not in ("y", "yes"):
+        log.info("Aborted by user.")
+        sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # Strategy selection prompt
@@ -222,12 +293,22 @@ def fetch_onchain_orphans(api_pubkeys: set[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _sign_and_send(tx_b64: str) -> str:
-    from solders.transaction import VersionedTransaction  # type: ignore
-    keypair = _get_keypair()
-    raw_tx = base64.b64decode(tx_b64)
-    tx = VersionedTransaction.from_bytes(raw_tx)
-    signed_tx = VersionedTransaction(tx.message, [keypair])
-    signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
+    if SIGNING_MODE == "ledger":
+        from ledger_signer import LedgerError
+
+        signer = _get_ledger_signer()
+        log.info("  Awaiting approval on Ledger device …")
+        try:
+            signed_b64 = signer.sign_transaction(tx_b64, expected_signer=WALLET_PUBKEY)
+        except LedgerError as exc:
+            raise RuntimeError(str(exc)) from exc
+    else:
+        from solders.transaction import VersionedTransaction  # type: ignore
+        keypair = _get_keypair()
+        raw_tx = base64.b64decode(tx_b64)
+        tx = VersionedTransaction.from_bytes(raw_tx)
+        signed_tx = VersionedTransaction(tx.message, [keypair])
+        signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
 
     payload = {
         "jsonrpc": "2.0",
@@ -280,6 +361,8 @@ def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global SIGNING_MODE, WALLET_PUBKEY
+
     parser = argparse.ArgumentParser(description="Cancel Offerbook lending offers by strategy")
     parser.add_argument(
         "--days",
@@ -292,14 +375,38 @@ def main() -> None:
         action="store_true",
         help="Withdraw funds back to wallet after cancellation (default: leave in escrow)",
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--ledger", action="store_const", dest="signing_mode", const="ledger",
+        help="Sign with a Ledger hardware wallet (default)",
+    )
+    mode_group.add_argument(
+        "--private-key", action="store_const", dest="signing_mode", const="private_key",
+        help="Sign with OFFERBOOK_PRIVATE_KEY from .env",
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the signing-mode confirmation prompt",
+    )
     args = parser.parse_args()
 
-    if not WALLET_PUBKEY:
-        log.error("OFFERBOOK_WALLET is not set")
+    if args.signing_mode:
+        SIGNING_MODE = args.signing_mode
+    if SIGNING_MODE not in ("ledger", "private_key"):
+        log.error("Invalid signing mode %r — must be 'ledger' or 'private_key'", SIGNING_MODE)
         sys.exit(1)
-    if not DRY_RUN and not PRIVATE_KEY_B58:
-        log.error("OFFERBOOK_PRIVATE_KEY is not set (required for live mode)")
-        sys.exit(1)
+
+    if SIGNING_MODE == "private_key":
+        if not WALLET_PUBKEY:
+            log.error("OFFERBOOK_WALLET is not set")
+            sys.exit(1)
+        if not DRY_RUN and not PRIVATE_KEY_B58:
+            log.error("OFFERBOOK_PRIVATE_KEY is not set (required for live private-key mode)")
+            sys.exit(1)
+    else:
+        resolve_signer_wallet()  # queries the Ledger device, sets WALLET_PUBKEY
+
+    confirm_signing_mode(skip_prompt=args.yes)
 
     # Determine strategy
     strategy_key = args.days if args.days else prompt_strategy()

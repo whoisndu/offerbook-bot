@@ -224,6 +224,9 @@ The script identifies each strategy's offers by their `duration` field (259 200 
 python -m venv venv
 source venv/bin/activate
 pip install requests python-dotenv solders base58 pyyaml
+
+# Only needed for --ledger signing mode (see cancel_offers.py):
+pip install ledgerblue hidapi
 ```
 
 ### 2. Configure environment
@@ -249,12 +252,15 @@ ALLOCATION_CONFIG=path/to/allocation_config.yaml
 ### 3. Run
 
 ```bash
-# Safe preview — no transactions submitted
+# Safe preview — no transactions submitted (Ledger signing by default, see below)
 DRY_RUN=true python strategy_7_days.py
 
 # Live — cancel first, then run all three strategies
 python cancel_offers.py --days all
 python strategy_3_days.py && python strategy_7_days.py && python strategy_15_days.py
+
+# Prefer the hot wallet key instead of the Ledger?
+python strategy_7_days.py --private-key
 ```
 
 ## Environment variables
@@ -269,6 +275,31 @@ python strategy_3_days.py && python strategy_7_days.py && python strategy_15_day
 | `SOLANA_RPC` | No | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
 | `MAX_OFFER_PRINCIPAL_USDC` | No | `0` | Per-offer USDC cap (0 = full allocation) |
 | `ALLOCATION_CONFIG` | No | `allocation_config.yaml` | Path to allocation config file |
+| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py` |
+| `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing |
+
+## Signing modes
+
+Every script (`cancel_offers.py`, `strategy_3_days.py`, `strategy_7_days.py`,
+`strategy_15_days.py`) supports two signing modes — **Ledger is the default**:
+
+- `--ledger` (default): signs via a Ledger hardware wallet over USB. Requires
+  the Solana app open on-device and blind signing enabled (Offerbook's
+  program isn't in Ledger's known-instruction registry). You approve each
+  transaction with a physical button press — the private key never touches
+  this machine. See `ledger_signer.py`.
+- `--private-key`: signs with `OFFERBOOK_PRIVATE_KEY` from `.env` (hot wallet).
+
+Every run prints the resolved signing mode and wallet address and asks for
+confirmation before doing anything, so you always know which wallet/mode
+you're about to act with. Pass `--yes` to skip that prompt.
+
+```bash
+python cancel_offers.py                 # Ledger signing (default), interactive
+python cancel_offers.py --private-key   # hot wallet signing
+python cancel_offers.py --ledger --days 7 --yes
+python strategy_7_days.py --private-key --yes
+```
 
 ## Security
 

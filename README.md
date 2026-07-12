@@ -160,9 +160,11 @@ python update_config.py --dry-run
 python update_config.py
 ```
 
-`update_config.py` fetches all currently active collateral mints from Offerbook, looks up their symbol/name, and:
+`update_config.py` fetches all currently active collateral mints from Offerbook, resolves symbol/name for every mint (both new ones and any already in the file), and:
 - Appends new tokens (allocation defaults to `0.0` — opt-in to enable)
 - Updates comments for previously-unknown tokens where the symbol is now resolved
+
+Symbol resolution tries **Jupiter's token search API** first (`api.jup.ag/tokens/v2/search`, batched) — it indexes far more long-tail/pump.fun/meme tokens than Offerbook's own `/tokens` endpoint — then falls back to Offerbook's registry, then the hardcoded `KNOWN_TOKENS` table (which always wins on conflict). Allocation values already set are never touched, regardless of source.
 
 ## Post-placement sanity check (`verify_offers.py`)
 

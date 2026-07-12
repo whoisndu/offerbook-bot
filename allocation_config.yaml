@@ -48,44 +48,44 @@ allocations:
   # ===========================================================================
 
   # mSOL (Marinade Finance staked SOL)
-  mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So: 0.7
+  mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So: 1.0
 
   # bSOL (BlazeStake staked SOL)
   bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1: 0.7
 
   # JupSOL (Jupiter staked SOL)
-  jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v: 0.7
+  jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v: 1.0
 
   # jitoSOL (Jito staked SOL)
-  J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn: 0.7
+  J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn: 1.0
 
   # bbSOL (Bybit staked SOL)
-  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 0.3
+  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 0.7
 
   # bnSOL (Binance staked SOL)
-  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 0.3
+  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 0.7
 
   # ===========================================================================
   # TIER 3 — Major DeFi / well-known tokens  (50% allocation)
   # ===========================================================================
 
   # JUP (Jupiter governance token)
-  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 0.5
+  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 0.9
 
   # JLP (Jupiter Liquidity Pool token)
-  4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R: 0.5
+  4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R: 0.9
 
   # BONK
-  DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: 0.5
+  DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: 0.6
 
   # HNT (Helium Network Token)
   hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux: 0.5
 
   # NOS (Nosana)
-  nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7: 0.1
+  nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7: 0.6
 
   # WEN
-  WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst: 0.1
+  WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst: 0.6
 
   # ===========================================================================
   # TIER 4 — Smaller / less-known tokens active on Offerbook  (20-30%)
@@ -94,34 +94,34 @@ allocations:
   # ===========================================================================
 
   # Bert — Bertram The Pomeranian  (ltv ~22%)
-  HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump: 0.0
+  HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump: 0.3
 
   # (ltv ~16%)  — unknown token
   HNg5PYJmtqcmzXrv6S9zP1CDKk5BgDuyFBxbvNaDvCN: 0.0
 
   # AVICI — Avici  (ltv unknown)
-  BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta: 0.0
+  BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta: 0.5
 
   # UFD — Unicorn Fart Dust  (ltv ~24%)
-  eL5fUxj2J4CiQsmW85k5FG9DvuQjjUoBHoQBi2Kpump: 0.0
+  eL5fUxj2J4CiQsmW85k5FG9DvuQjjUoBHoQBi2Kpump: 0.2
 
   # MELANIA — Melania Meme  (ltv unknown)
-  FUAfBo2jgks6gB4Z4LfZkqSZgzNucisEHqnNebaRxM1P: 0.0
+  FUAfBo2jgks6gB4Z4LfZkqSZgzNucisEHqnNebaRxM1P: 0.2
 
   # swarms — swarms  (ltv ~23%)
-  74SBV4zDXxTRgv1pEMoECskKBkZHc2yGPnc7GYVepump: 0.0
+  74SBV4zDXxTRgv1pEMoECskKBkZHc2yGPnc7GYVepump: 0.2
 
   # UMBRA — Umbra  (ltv unknown)
-  PRVT6TB7uss3FrUd2D9xs2zqDBsa3GbMJMwCQsgmeta: 0.0
+  PRVT6TB7uss3FrUd2D9xs2zqDBsa3GbMJMwCQsgmeta: 0.2
 
   # GOAT — Goatseus Maximus  (ltv unknown)
-  CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump: 0.0
+  CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump: 0.2
 
   # Pnut — Peanut the Squirrel  (ltv ~26%)
-  2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump: 0.0
+  2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump: 0.2
 
   # Buttcoin — Buttcoin  (ltv ~41%)
-  Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump: 0.0
+  Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump: 0.2
 
   # DOOD — Doodles  (ltv unknown)
   DvjbEsdca43oQcw2h3HW1CT7N3x5vRcr3QrvTUHnXvgV: 0.0
@@ -130,10 +130,10 @@ allocations:
   J6pQQ3FAcJQeWPPGppWRb4nM8jU3wLyYbRrLh7feMfvd: 0.0
 
   # SPX — SPX6900 (Wormhole)  (ltv ~40%)
-  J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr: 0.0
+  J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr: 0.6
 
   # (ltv ~33%)  — NEET
-  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 0.7
+  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 0.9
 
   # ZEREBRO — zerebro  (ltv ~36%)
   8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn: 0.0
@@ -142,10 +142,10 @@ allocations:
   KMNo3nJsBXfcpJTVhZcXLW7RmTwTt4GVFE7suUBo9sS: 0.0
 
   # $WIF — dogwifhat  (ltv ~55%)
-  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 0.0
+  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 0.5
 
   # aura — aura  (ltv ~44%)
-  DtR4D9FtVoTX2569gaL837ZgrB6wNjj6tkmnX9Rdk9B2: 0.0
+  DtR4D9FtVoTX2569gaL837ZgrB6wNjj6tkmnX9Rdk9B2: 0.2
 
   # TUNA — DefiTuna  (ltv unknown)
   TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx: 0.0
@@ -163,7 +163,7 @@ allocations:
   61V8vBaqAGMpgDQi4JcAwo1dmBGHsyhzodcPqnEVpump: 0.0
 
   # TROLL — TROLL  (ltv ~34%)
-  5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2: 0.0
+  5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2: 0.2
 
   # pippin — Pippin  (ltv ~40%)
   Dfh5DzRgSvvCFDoYc2ciTkMrbDfRKybA4SoFbPmApump: 0.0
@@ -184,13 +184,13 @@ allocations:
   SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3: 0.0
 
   # POPCAT — Popcat  (ltv ~53%)
-  7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr: 0.0
+  7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr: 0.6
 
   # SMRT — Streamflow SMRT  (ltv ~44%)
   5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC: 0.0
 
   # Fartcoin — Fartcoin  (ltv ~48%)
-  9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump: 0.0
+  9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump: 0.6
 
   # (ltv ~51%)  — staked token (stKE?)
   stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh: 0.0
@@ -211,10 +211,10 @@ allocations:
   A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS: 1.0
 
   # pbSPYx — PiggyBank SPYx  (ltv ~71%)
-  E65CoK961Rs5LzKhGZxbKsB7xpFhYhXogH8nhr8zamTK: 0.0
+  E65CoK961Rs5LzKhGZxbKsB7xpFhYhXogH8nhr8zamTK: 0.3
 
   # URANUS — Uranus  (ltv ~51%)
-  BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups: 0.0
+  BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups: 0.2
 
   # (ltv ~72%)  — kyKYROS
   kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk: 0.0
@@ -233,7 +233,7 @@ allocations:
   25wyr6L1aXx4XFGfYQmkWx99HrUkhLdhHz2mzPRsQ2d6: 0.0
 
   # ANDURIL — Anduril PreStocks  (ltv ~10%)
-  PresTj4Yc2bAR197Er7wz4UUKSfqt6FryBEdAriBoQB: 0.0
+  PresTj4Yc2bAR197Er7wz4UUKSfqt6FryBEdAriBoQB: 0.2
 
   # KLED — KLEDAI  (ltv unknown)
   1zJX5gRnjLgmTpq5sVwkq69mNDQkCemqoasyjaPW6jm: 0.0
@@ -242,10 +242,10 @@ allocations:
   5U4By4BkSu2WVLYTqx7YsMTk5JTa7JBqrovpPeHaFoDM: 0.0
 
   # NEST — Nest  (ltv ~41%)
-  68Nq68CrtLVpyvK5Un7UADiNczaGf39hBbj3diRsYj6D: 0.0
+  68Nq68CrtLVpyvK5Un7UADiNczaGf39hBbj3diRsYj6D: 0.2
 
   # CHILLGUY — Just a chill guy  (ltv ~36%)
-  Df6yfrKC8kZE3KNkrHERKzAetSxbrWeniQfyJY4Jpump: 0.0
+  Df6yfrKC8kZE3KNkrHERKzAetSxbrWeniQfyJY4Jpump: 0.2
 
   # MANIFEST — Manifesting  (ltv ~40%)
   BCdwQBAn8dYB5YjTsoB6TdHAWokxv28k2oZUodERpump: 0.0
@@ -263,7 +263,7 @@ allocations:
   CrAr4RRJMBVwRsZtT62pEhfA9H5utymC2mVx8e7FreP2: 0.0
 
   # VIRTUAL — Virtual Protocol  (ltv ~42%)
-  3iQL8BFS2vE7mww4ehAqQHAsbmRNCrPxizWAT2Zfyr9y: 0.0
+  3iQL8BFS2vE7mww4ehAqQHAsbmRNCrPxizWAT2Zfyr9y: 0.3
 
   # House — Housecoin  (ltv unknown)
   DitHyRMQiSDhn5cnKMJV2CDDt6sVct96YrECiM49pump: 0.0
@@ -275,7 +275,7 @@ allocations:
   4Cnk9EPnW5ixfLZatCPJjDB1PUtcRpVVgTQukm9epump: 0.0
 
   # Jotchua — Jotchua  (ltv ~42%)
-  BcHEaaTCvycPwwsJ9yQTXdHP9X2gCLkznDbZ8VySpump: 0.0
+  BcHEaaTCvycPwwsJ9yQTXdHP9X2gCLkznDbZ8VySpump: 0.2
 
   # MPLX — Metaplex Token  (ltv ~44%)
   METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m: 0.0
@@ -287,7 +287,7 @@ allocations:
   ALaBcBiKBxCmUP2hcvfWz4EmfVL9BuUqKh5FozaYr7Xd: 0.0
 
   # JTO — JITO  (ltv ~45%)
-  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: 0.0
+  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: 0.6
 
   # ZEX — Zeta  (ltv ~47%)
   ZEXy1pqteRu3n13kdyh4LwPQknkFk3GzmMYMuNadWPo: 0.0
@@ -299,16 +299,16 @@ allocations:
   4EJ6xHjvfm4HsEe2Jfv3X1R1TMnFtkHGicmVcaNkDKXM: 0.0
 
   # KINS — Kintara  (ltv ~48%)
-  Tqj8yFmagrg7oorpQkVGYR52r96RFTamvWfth9bpump: 1.0
+  Tqj8yFmagrg7oorpQkVGYR52r96RFTamvWfth9bpump: 0.6
 
   # MET — Meteora  (ltv ~52%)
   METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL: 0.0
 
   # HOODx — Robinhood xStock  (ltv unknown)
-  XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg: 0.0
+  XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg: 0.5
 
   # GOOGLx — Alphabet xStock  (ltv unknown)
-  XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN: 0.0
+  XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN: 0.5
 
   # (ltv ~52%)  — unknown token
   FNokdAZDEKhqPR5YEG3qtv6DWBggndWv54XpHCbNFby6: 0.0
@@ -365,7 +365,7 @@ allocations:
   6K1Bsttm2fknG554v416qZMupMTkVjTfPkyXmNCAmfb5: 0.0
 
   # SPCX — SpaceX - Backpack Securities  (ltv ~57%)
-  SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb: 0.0
+  SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb: 0.5
 
   # GIGA — GIGACHAD  (ltv ~51%)
   63LfDmNb3MQ8mw9MtZ2To9bEA2M71kZUUGq5tiJxcqj9: 0.0
@@ -383,13 +383,13 @@ allocations:
   SV151D5pjygAKA8aJJcKzm4wFnRX5G92Fye94jQJk7g: 0.0
 
   # FWOG — FWOG  (ltv ~61%)
-  A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump: 0.0
+  A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump: 0.3
 
   # (ltv ~67%)  — unknown token
   CTHU9e1X9k2dLCQm6axswzpWwRVG8tKsGpbmdrGuvoN5: 0.0
 
   # JLP — Jupiter Perps  (ltv ~60%)
-  27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4: 0.0
+  27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4: 0.3
 
   # (ltv ~68%)  — unknown token
   Fajqu1RDuzt5Rr7nEWDyyjXD6ErEy2oxmjTweAcAC5xb: 0.0
@@ -419,7 +419,7 @@ allocations:
   BXeosz6CCFZHVH1VPME2fZv9QKPDUtChysDpWGWsRYJG: 0.0
 
   # TAO — Bittensor  (ltv ~84%)
-  taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY: 0.0
+  taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY: 0.3
 
   # NVDAx — NVIDIA xStock  (ltv ~75%)
   Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh: 0.0
@@ -428,13 +428,13 @@ allocations:
   3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh: 0.0
 
   # TSLAx — Tesla xStock  (ltv ~77%)
-  XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB: 0.0
+  XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB: 0.3
 
   # QQQx — Nasdaq xStock  (ltv ~80%)
-  Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ: 0.0
+  Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ: 0.3
 
   # SPYx — SP500 xStock  (ltv ~80%)
-  XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W: 0.0
+  XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W: 0.3
 
   # (ltv ~80%)  — unknown token
   DnDPkdfaQ2KKJrpsTqnhohHJmmSjGvatyL4euRsUKzs: 0.0
@@ -446,7 +446,7 @@ allocations:
   7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs: 0.0
 
   # ONyc — Onchain Yield Coin  (ltv ~85%)
-  5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5: 0.0
+  5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5: 0.5
 
   # (ltv ~90%)  — unknown token
   7jFnFghorScJJGjPJGA77HjyNQ3yBrRmutP7qLz8ycFW: 0.0
@@ -501,7 +501,7 @@ allocations:
   KENJSUYLASHUMfHyy5o4Hp2FdNqZg1AsUPhfH2kYvEP: 0.0
 
   # SPCXx — SpaceX xStock  (ltv ~31%)
-  Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8: 0.0
+  Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8: 0.5
 
   # AVA — Ava AI  (ltv ~34%)
   DKu9kykSfbN5LBfFXtNNDPaX35o4Fv6vJ9FKk7pZpump: 0.0
@@ -510,5 +510,5 @@ allocations:
   3dQTr7ror2QPKQ3GbBCokJUmjErGg8kTJzdnYjNfvi3Z: 0.0
 
   # SNDK — Sandisk - Backpack Securities  (ltv ~70%)
-  SNDKbwMUQvZhnLnxLduradgLHG5KrPuKwpnrkkGRhfH: 0.0
+  SNDKbwMUQvZhnLnxLduradgLHG5KrPuKwpnrkkGRhfH: 0.5
 default: 0.0

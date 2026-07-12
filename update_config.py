@@ -93,6 +93,31 @@ def fetch_offerbook_token_registry() -> dict[str, tuple[str, str]]:
         return {}
 
 
+JUPITER_TOKEN_SEARCH_API = "https://api.jup.ag/tokens/v2/search"
+JUPITER_SEARCH_BATCH_SIZE = 50  # keep query strings reasonably sized
+
+
+def fetch_jupiter_token_registry(mints: list[str]) -> dict[str, tuple[str, str]]:
+    """
+    Resolve symbol + name for `mints` via Jupiter's token search API.
+    Jupiter indexes far more long-tail/pump.fun tokens than Offerbook's own
+    /tokens endpoint, so this is the primary source for the "???" entries.
+    """
+    registry: dict[str, tuple[str, str]] = {}
+    for i in range(0, len(mints), JUPITER_SEARCH_BATCH_SIZE):
+        chunk = mints[i : i + JUPITER_SEARCH_BATCH_SIZE]
+        try:
+            data = _get(JUPITER_TOKEN_SEARCH_API, query=",".join(chunk))
+            for t in data:
+                mint = t.get("id")
+                symbol = t.get("symbol")
+                if mint and symbol:
+                    registry[mint] = (symbol, t.get("name", ""))
+        except Exception as exc:
+            print(f"  [warn] Jupiter token search batch {i // JUPITER_SEARCH_BATCH_SIZE} failed: {exc}")
+    return registry
+
+
 def resolve_symbol(mint: str, registry: dict[str, tuple[str, str]]) -> tuple[str, str]:
     """Return (symbol, name) for a mint, or ('???', 'unknown token')."""
     if mint in registry:
@@ -210,22 +235,28 @@ def main() -> None:
 
     print(f"Config file: {CONFIG_PATH}\n")
 
-    # 1. Resolve token symbols
-    print("Loading token registry …")
-    registry = {**fetch_offerbook_token_registry(), **KNOWN_TOKENS}  # KNOWN_TOKENS wins on conflict
-    print(f"  {len(registry)} tokens known\n")
-
-    # 2. Fetch active collateral mints + their LTV
+    # 1. Fetch active collateral mints + their LTV
     active_mints = fetch_active_collateral_mints()
     print(f"\nFound {len(active_mints)} active collateral mints on Offerbook\n")
 
-    # 3. Load the current config file
+    # 2. Load the current config file
     lines = load_file_lines(CONFIG_PATH)
     mint_index = build_mint_index(lines)
+    already_in_config = set(mint_index.keys())
 
-    already_in_config  = set(mint_index.keys())
-    new_mints          = {m for m in active_mints if m not in already_in_config}
-    updatable_mints    = {}   # mint -> new comment line
+    # 3. Resolve token symbols — Jupiter's token search indexes far more
+    #    long-tail/pump.fun tokens than Offerbook's own /tokens endpoint, so
+    #    it's queried for every mint we might write a comment for (both
+    #    already-in-config and newly-discovered), not just the new ones.
+    print("Loading token registry …")
+    all_mints = sorted(already_in_config | set(active_mints))
+    jupiter_registry = fetch_jupiter_token_registry(all_mints)
+    offerbook_registry = fetch_offerbook_token_registry()
+    registry = {**offerbook_registry, **jupiter_registry, **KNOWN_TOKENS}  # KNOWN_TOKENS wins on conflict
+    print(f"  {len(registry)} tokens known ({len(jupiter_registry)} from Jupiter)\n")
+
+    new_mints       = {m for m in active_mints if m not in already_in_config}
+    updatable_mints = {}   # mint -> new comment line
 
     # 4. Find existing entries whose comment says "unknown" but we now know the symbol
     for mint, line_idx in mint_index.items():

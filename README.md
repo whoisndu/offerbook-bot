@@ -64,7 +64,7 @@ $$\bar{r}_{vw}(\mathcal{S}) = \frac{\displaystyle\sum_{i \in \mathcal{S}} r_i \c
 
 Offers of different durations reflect different risk premia and should not be pooled blindly. The benchmark APY for strategy $d$ is:
 
-$$\bar{r}^{(d)} = \begin{cases} \bar{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\[6pt] \bar{r}_{vw}(\mathcal{O}) & \text{otherwise} \end{cases}$$
+$$\bar{r}^{(d)} = \begin{cases} \bar{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\ \bar{r}_{vw}(\mathcal{O}) & \text{otherwise} \end{cases}$$
 
 The log records which branch was taken (`[from live offers (same duration)]` vs `[from live offers (global)]`).
 

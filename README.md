@@ -1,16 +1,18 @@
 # Offerbook Competitive Lending Bot
 
-An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol on Solana. It scans active lending offers, posts competitive lending offers sized to your per-collateral allocation, and enforces LTV limits using real-time prices from Jupiter and DexScreener.
+An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol on Solana. It scans active lending offers, posts competitive lending offers sized to your per-collateral allocation, and sizes collateral against a **dynamic, per-token LTV target** using real-time prices from Jupiter and DexScreener.
 
 ## Strategies
 
 Three independent scripts — run whichever suits your risk appetite. Each offer listing expires after **24 hours** and is re-posted on the next run.
 
-| Script | Loan term | Max LTV | APY target | Collateral ratio |
+| Script | Loan term | LTV floor (thin market data) | LTV hard ceiling | APY target |
 |---|---|---|---|---|
-| `strategy_3_days.py` | 3 days | **65%** | Mean + 10% | ≥ 1.54× loan |
-| `strategy_7_days.py` | 7 days | **45%** | Mean − 10% | ≥ 2.22× loan |
-| `strategy_15_days.py` | 15 days | **25%** | Mean − 12% | ≥ 4× loan |
+| `strategy_3_days.py` | 3 days | **60%** | 75% | Mean + 10% |
+| `strategy_7_days.py` | 7 days | **45%** | 75% | Mean − 10% |
+| `strategy_15_days.py` | 15 days | **25%** | 75% | Mean − 12% |
+
+LTV is no longer a single fixed ceiling — it's computed per collateral token from that token's own live market data, bounded by the floor and ceiling above. See [§4](#4-dynamic-ltv-target-and-safe-collateral-sizing) for the full rule.
 
 ### How it works
 
@@ -18,8 +20,8 @@ Three independent scripts — run whichever suits your risk appetite. Each offer
 2. Group by `(principalMint, collateralMint)` pair
 3. Compute the **volume-weighted mean APY** from live offers of the same duration — large offers carry more weight than small high-APY outliers. If no same-duration offers exist for a pair, fall back to the global mean across all durations. The log shows which source was used: `[from live offers (same duration)]` or `[from live offers (global)]`
 4. Fetch real-time collateral prices from **Jupiter Price API** (primary) with **DexScreener** as fallback
-5. For each pair, compute `collateralAmount` to enforce the strategy's max LTV at **current prices** — not stale prices from other lenders' old offers. If no live price is available from either source, the pair is skipped entirely rather than sized off a stale pool-implied price (see below)
-6. **Cross-validate the live price** against the pool-implied price from existing loans. If the two differ enough that the offer's true LTV would exceed `MAX_LTV`, skip the pair and log a warning (guards against bad price feeds)
+5. For each pair, compute the token's **dynamic LTV target** (§4) from its own market data and current token age, then size `collateralAmount` to hit that target at **current prices** — not stale prices from other lenders' old offers. If no live price is available from either source, the pair is skipped entirely rather than sized off a stale pool-implied price (see below)
+6. **Cross-validate the live price** against the pool-implied price from existing loans. If the two differ enough that the offer's true LTV would exceed the dynamic target, skip the pair and log a warning (guards against bad price feeds)
 7. Set `principalAmount` to your configured allocation fraction of your total USDC balance (wallet + escrow)
 8. Post the offer with `allowPartialFill = true` so borrowers can take any amount up to the full offer
 
@@ -46,7 +48,8 @@ This section formalises the pricing, risk, and allocation decisions made by the 
 | $C$ | Collateral amount required for that offer |
 | $\pi_c$ | Live USD price of the collateral token (from Jupiter / DexScreener) |
 | $\pi_p$ | Live USD price of the principal token (USDC, $\pi_p \approx 1$) |
-| $L_{\max}$ | Maximum loan-to-value ratio permitted by the strategy |
+| $L_k$ | Dynamic LTV target for collateral token $k$ (§4) |
+| $\bar\ell_k$ | Volume-weighted mean LTV of token $k$'s own live market offers/loans |
 | $\alpha_k \in [0,1]$ | Allocation fraction for collateral token $k$ |
 | $B$ | Combined lender budget: $B = B_{\text{wallet}} + B_{\text{escrow}}$ |
 
@@ -86,23 +89,29 @@ A hard floor $r^* \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or ne
 
 ---
 
-### 4. LTV Enforcement and Safe Collateral Sizing
+### 4. Dynamic LTV Target and Safe Collateral Sizing
 
 The **loan-to-value ratio** of a proposed offer is:
 
 $$\text{LTV} = \frac{P \cdot \pi_p}{C \cdot \pi_c}$$
 
-To guarantee $\text{LTV} \leq L_{\max}$, the minimum collateral the borrower must post is:
+Unlike a single fixed ceiling, the target LTV $L_k$ for collateral token $k$ is computed from **that token's own live market data** — every other lender's open offers/loans against the same token (always vs. USDC, the only principal Offerbook supports). Let $\mathcal{S}_k$ be that set, with per-entry LTV $\ell_i$ and principal-USD weight $p_i$; the volume-weighted market LTV is:
 
-$$C_{\min} = \frac{P \cdot \pi_p}{L_{\max} \cdot \pi_c}$$
+$$\bar\ell_k = \frac{\sum_{i \in \mathcal{S}_k} \ell_i \, p_i}{\sum_{i \in \mathcal{S}_k} p_i}$$
+
+$L_k$ is then set by three rules, applied in order:
+
+1. **Not enough data** ($|\mathcal{S}_k| < 5$): fall back to the strategy's flat floor, $L_k = L_{\text{floor}}$ (60% / 45% / 25% — see the table above). Thin data (a couple of offers) is too easy for a single actor to fake.
+2. **Young token** ($|\mathcal{S}_k| \geq 5$ and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \bar\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
+3. **Mature token** ($|\mathcal{S}_k| \geq 5$ and age $\geq$ 60 days): $L_k = \bar\ell_k / 0.9$ — the bot accepts 10% less collateral than the market average implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
+
+In every case, $L_k$ is clamped to $[0.05,\ 0.75]$ — the 75% hard ceiling applies no matter how loose an established token's market looks, since an entire market trading at very high LTV is itself a warning sign rather than something to mirror.
+
+Given $L_k$, the minimum collateral the borrower must post is:
+
+$$C_{\min} = \frac{P \cdot \pi_p}{L_k \cdot \pi_c}$$
 
 The bot sets $C = C_{\min}$, using prices fetched at offer-posting time (not prices embedded in stale third-party offers).
-
-| Strategy | $L_{\max}$ | Implied collateral ratio $C/P$ at $\pi_p = \pi_c = 1$ |
-|---|---|---|
-| 3 days | 0.65 | $\approx 1.54\times$ |
-| 7 days | 0.45 | $\approx 2.22\times$ |
-| 15 days | 0.25 | $4\times$ |
 
 ---
 
@@ -116,7 +125,7 @@ where $(P_{\text{ref}}, C_{\text{ref}})$ are the principal and collateral from a
 
 $$\widehat{\text{LTV}}_{\text{live}} = \frac{P_{\text{ref}} \cdot \pi_p}{C_{\text{ref}} \cdot \pi_c}$$
 
-If $\widehat{\text{LTV}}_{\text{live}} > 2 \cdot L_{\max}$, the live price is inconsistent with market-observed collateralisation — the bot skips the pair and logs a warning. This guards against posting an under-collateralised offer when a price feed returns an anomalously high $\pi_c$. The threshold is set at $2\times$ rather than $1\times$ to avoid false positives from minor price divergence between the live feed and pool-implied prices.
+If $\widehat{\text{LTV}}_{\text{live}} > 2 \cdot L_k$ (using the same per-token dynamic target from §4), the live price is inconsistent with market-observed collateralisation — the bot skips the pair and logs a warning. This guards against posting an under-collateralised offer when a price feed returns an anomalously high $\pi_c$. The threshold is set at $2\times$ rather than $1\times$ to avoid false positives from minor price divergence between the live feed and pool-implied prices.
 
 ---
 
@@ -136,7 +145,7 @@ $$P_k^{\text{eff}} = \min(P_k,\ M)$$
 
 ## Allocation config (`allocation_config.yaml`)
 
-Controls what fraction of your total USDC balance you're willing to offer per collateral token. Tokens listed here also **bypass the LTV filter** (you're explicitly trusting them); unlisted tokens go through the LTV filter first.
+Controls what fraction of your total USDC balance you're willing to offer per collateral token. Tokens listed here also **bypass the market-participation LTV filter** (you're explicitly trusting them); unlisted tokens must have a market LTV (from existing offers/loans, at their stale creation-time prices) at or below the **75% hard ceiling** to be considered at all. Passing that filter only means the pair is eligible — the actual collateral sizing still goes through the dynamic per-token target in [§4](#4-dynamic-ltv-target-and-safe-collateral-sizing).
 
 ```yaml
 allocations:
@@ -188,6 +197,8 @@ For each offer the script prints a table row:
 | `LTV %` | Recomputed from fresh Jupiter/DexScreener prices; must be ≤ the strategy's `MaxLTV` |
 | `Vol USDC` | Principal amount; flagged if dust (< 1 000 raw units) |
 | `status` | `PASS` / `WARN` (non-critical) / `FAIL` (LTV violation) |
+
+> **Known gap:** `verify_offers.py` still checks against its own hardcoded `max_ltv` per strategy (65% / 45% / 25%, ±2% tolerance) — it has not been updated for the dynamic per-token LTV target in [§4](#4-dynamic-ltv-target-and-safe-collateral-sizing). A valid offer sized against a mature token's target (which can legitimately run up to 75%) will now show as a `FAIL` here even though it's correct. Treat `FAIL` results as "needs manual review against §4," not as an automatic problem, until this script is updated to match.
 
 Exit code is `1` if any LTV violations are found, `0` otherwise — safe to use in shell pipelines:
 

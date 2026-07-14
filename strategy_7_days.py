@@ -65,8 +65,26 @@ LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 APY_DISCOUNT = 0.10          # undercut market mean by 10%
 MAX_DURATION_DAYS = 7
 MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 604 800
-MAX_LTV = 0.45               # 45%  =>  collateral must be >= 2.22x principal
 OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term is still 7 days
+
+# LTV target is computed per-token from that token's own market data (see
+# effective_target_ltv() below) rather than a single fixed ceiling:
+#   - Fewer than MIN_MARKET_SAMPLES offers/loans for the token → not enough
+#     data to trust; use FALLBACK_LTV.
+#   - Token younger than YOUNG_TOKEN_AGE_DAYS (or of unknown age, fail safe) →
+#     target = token's own weighted-mean market LTV - YOUNG_TOKEN_DISCOUNT.
+#   - Token older than YOUNG_TOKEN_AGE_DAYS → target = weighted-mean market LTV
+#     / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT), i.e. we require
+#     MATURE_TOKEN_COLLATERAL_DISCOUNT less collateral than the market average
+#     to be more attractive to borrowers.
+# HARD_LTV_CEILING always applies on top, regardless of which branch produced
+# the target.
+FALLBACK_LTV = 0.45                        # used when there's not enough market data for the token
+YOUNG_TOKEN_AGE_DAYS = 60
+MIN_MARKET_SAMPLES = 5
+YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's own market LTV
+MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
+HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
 
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
@@ -84,8 +102,8 @@ _cap_env = os.getenv("MAX_OFFER_PRINCIPAL_USDC", "0")
 MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in ("", "0") else None
 
 # Jupiter Price API — used to get real-time collateral token prices so that
-# collateralAmount is always sized to enforce MAX_LTV at current market prices,
-# not at whatever stale price the market's existing offers were created with.
+# collateralAmount is always sized to enforce effective_target_ltv() at current market
+# prices, not at whatever stale price the market's existing offers were created with.
 JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
 JUPITER_API_KEY   = os.getenv("JUPITER_API_KEY", "")
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
@@ -264,6 +282,8 @@ class PairStats:
 
     # USD LTV values (principal_usd / collateral_usd) from market offers
     offer_ltv_usds: list[float] = field(default_factory=list)
+    # principal_usd weight for each entry in offer_ltv_usds (same index), for volume-weighting
+    offer_ltv_weights_usd: list[float] = field(default_factory=list)
 
     # Implied collateral price per raw unit from offer/loan USD metadata.
     # Used as fallback when Jupiter price is unavailable (stale but self-consistent).
@@ -325,6 +345,17 @@ class PairStats:
             return None
         s = sorted(self.offer_ltv_usds)
         return s[len(s) // 2]
+
+    @property
+    def weighted_mean_ltv_usd(self) -> float | None:
+        """Principal-USD-weighted mean LTV across this token's own market offers/loans —
+        large offers dominate over small high-LTV fringe outliers."""
+        if not self.offer_ltv_usds:
+            return None
+        total_weight = sum(self.offer_ltv_weights_usd)
+        if total_weight > 0:
+            return sum(ltv * w for ltv, w in zip(self.offer_ltv_usds, self.offer_ltv_weights_usd)) / total_weight
+        return sum(self.offer_ltv_usds) / len(self.offer_ltv_usds)
 
     @property
     def median_collateral_price_per_raw(self) -> float | None:
@@ -587,15 +618,62 @@ def fetch_current_prices(collateral_mints: list[str]) -> tuple[dict[str, float],
 # Strategy logic
 # ---------------------------------------------------------------------------
 
+_token_age_cache: dict[str, float | None] = {}
+
+
+def _token_age_days(mint: str) -> float | None:
+    """Days since `mint`'s earliest known DexScreener pool was created. None if unknown."""
+    if mint in _token_age_cache:
+        return _token_age_cache[mint]
+    age_days = None
+    try:
+        resp = SESSION.get(f"{DEXSCREENER_API}/{mint}", timeout=10)
+        if resp.ok:
+            created = [p["pairCreatedAt"] for p in (resp.json().get("pairs") or []) if p.get("pairCreatedAt")]
+            if created:
+                age_days = (time.time() * 1000 - min(created)) / 86_400_000
+    except Exception:
+        pass
+    _token_age_cache[mint] = age_days
+    return age_days
+
+
+def effective_target_ltv(
+    collateral_mint: str,
+    market_weighted_ltv: float | None = None,
+    market_sample_count: int = 0,
+) -> float:
+    """
+    Per-token dynamic LTV target — see the constants block above for the full rule.
+    Not enough of the token's own market data → FALLBACK_LTV. Otherwise young tokens
+    (< YOUNG_TOKEN_AGE_DAYS, or of unknown age — fail safe) target a discount below
+    their own market rate; mature tokens target a premium above it (less collateral
+    required than the market average, to be more competitive). HARD_LTV_CEILING always
+    applies on top.
+    """
+    if not market_weighted_ltv or market_sample_count < MIN_MARKET_SAMPLES:
+        return min(FALLBACK_LTV, HARD_LTV_CEILING)
+
+    age_days = _token_age_days(collateral_mint)
+    if age_days is not None and age_days >= YOUNG_TOKEN_AGE_DAYS:
+        target = market_weighted_ltv / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT)
+    else:
+        target = market_weighted_ltv - YOUNG_TOKEN_DISCOUNT
+
+    return max(min(target, HARD_LTV_CEILING), 0.05)
+
+
 def safe_collateral_amount(
     principal_raw: int,
     collateral_mint: str,
     current_prices: dict[str, float],
     decimals_map: dict[str, int],
+    market_weighted_ltv: float | None = None,
+    market_sample_count: int = 0,
 ) -> int | None:
     """
-    Return the collateral raw amount required so that LTV == MAX_LTV at current prices.
-    Returns None if no live price is available (caller should skip the offer).
+    Return the collateral raw amount required so that LTV == effective_target_ltv(...) at
+    current prices. Returns None if no live price is available (caller should skip the offer).
 
     `decimals_map` should be KNOWN_DECIMALS merged with any decimals Jupiter's
     price response supplied for mints outside that curated table — otherwise a
@@ -608,7 +686,7 @@ def safe_collateral_amount(
     price for an illiquid/moved token would silently produce a bad LTV.
     """
     principal_usdc = principal_raw / 10 ** USDC_DECIMALS
-    required_collateral_usdc = principal_usdc / MAX_LTV
+    required_collateral_usdc = principal_usdc / effective_target_ltv(collateral_mint, market_weighted_ltv, market_sample_count)
     price_per_token = current_prices.get(collateral_mint)
     decimals = decimals_map.get(collateral_mint)
     if price_per_token and price_per_token > 0 and decimals is not None:
@@ -646,6 +724,7 @@ def build_pair_stats(
             ps.offer_collateral_amounts.append(offer.collateral_amount)
         if offer.ltv is not None:
             ps.offer_ltv_usds.append(offer.ltv)
+            ps.offer_ltv_weights_usd.append(offer.principal_usd or 0)
         if offer.collateral_usd and offer.collateral_amount > 0:
             ps.offer_collateral_prices_per_raw.append(offer.collateral_usd / offer.collateral_amount)
 
@@ -660,6 +739,7 @@ def build_pair_stats(
             ps.loan_collateral_amounts.append(loan.collateral_amount)
         if loan.ltv is not None:
             ps.offer_ltv_usds.append(loan.ltv)
+            ps.offer_ltv_weights_usd.append(loan.principal_usd or 0)
         if loan.collateral_usd and loan.collateral_amount > 0:
             ps.offer_collateral_prices_per_raw.append(loan.collateral_usd / loan.collateral_amount)
 
@@ -702,15 +782,15 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
             return None
         # Trusted token: skip the stale-LTV filter
     else:
-        # Not in config: enforce max 40% USD LTV using loan/offer creation prices.
+        # Not in config: enforce the hard LTV ceiling using loan/offer creation prices.
         median_ltv = ps.median_ltv_usd
         if median_ltv is not None:
-            if median_ltv > MAX_LTV:
+            if median_ltv > HARD_LTV_CEILING:
                 log.info(
-                    "  Skipping %s/%s — market USD LTV %.1f%% > max %.0f%%  "
+                    "  Skipping %s/%s — market USD LTV %.1f%% > hard ceiling %.0f%%  "
                     "(not in allocation config and collateral appears undervalued)",
                     ps.principal_mint[:8], ps.collateral_mint[:8],
-                    median_ltv * 100, MAX_LTV * 100,
+                    median_ltv * 100, HARD_LTV_CEILING * 100,
                 )
                 return None
         if allocation_fraction == 0.0:
@@ -728,8 +808,8 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
 
     median_ltv = ps.median_ltv_usd
     if median_ltv is not None:
-        log.debug("  USD LTV = %.1f%% (market median, max allowed = %.0f%%)",
-                  median_ltv * 100, MAX_LTV * 100)
+        log.debug("  USD LTV = %.1f%% (market median, hard ceiling = %.0f%%)",
+                  median_ltv * 100, HARD_LTV_CEILING * 100)
 
     # minFillAmount: minimum a borrower must take in a partial fill.
     # API requires this to be > 1000 raw units. Use 1% of principal, floored at 1001.
@@ -978,8 +1058,8 @@ def main() -> None:
     log.info("Offerbook Competitive Lending Bot")
     log.info("Wallet  : %s", WALLET_PUBKEY)
     log.info("DRY RUN : %s", DRY_RUN)
-    log.info("Strategy: APY = market_mean × %.0f%%  |  max LTV = %.0f%%  |  max duration = %d days",
-             (1 - APY_DISCOUNT) * 100, MAX_LTV * 100, MAX_DURATION_DAYS)
+    log.info("Strategy: APY = market_mean × %.0f%%  |  LTV floor = %.0f%%, hard ceiling = %.0f%%  |  max duration = %d days",
+             (1 - APY_DISCOUNT) * 100, FALLBACK_LTV * 100, HARD_LTV_CEILING * 100, MAX_DURATION_DAYS)
     log.info("=" * 60)
 
     # 1. Fetch USDC balance (wallet + escrow) before doing anything.
@@ -1045,8 +1125,9 @@ def main() -> None:
     log.info("=" * 60)
 
     # 5b. Fetch real-time prices for every collateral mint we're going to offer on.
-    #     These are used to compute collateralAmount so that LTV ≤ MAX_LTV at current
-    #     market prices — NOT at whatever stale price market offers were created with.
+    #     These are used to compute collateralAmount so that LTV matches
+    #     effective_target_ltv() at current market prices — NOT at whatever stale
+    #     price market offers were created with.
     collateral_mints = list({relevant_pairs[p].collateral_mint for p in pair_offer_params})
     current_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
     decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
@@ -1085,8 +1166,8 @@ def main() -> None:
             # allowPartialFill=True means borrowers can take any fraction of it.
             offer_params["principalAmount"] = pair_budget_raw
 
-            # Compute collateral required so that LTV = MAX_LTV at current prices.
-            # This is the critical fix: we do NOT copy collateralAmount from other
+            # Compute collateral required so that LTV = effective_target_ltv() at current
+            # prices. This is the critical fix: we do NOT copy collateralAmount from other
             # lenders' offers because those offers may have been created when token
             # prices were very different.
             collateral_raw = safe_collateral_amount(
@@ -1094,6 +1175,8 @@ def main() -> None:
                 collateral_mint=ps.collateral_mint,
                 current_prices=current_prices,
                 decimals_map=decimals_map,
+                market_weighted_ltv=ps.weighted_mean_ltv_usd,
+                market_sample_count=len(ps.offer_ltv_usds),
             )
 
             if collateral_raw is None:
@@ -1110,16 +1193,17 @@ def main() -> None:
             # Cross-validate the live price against the pool-implied price from existing
             # loans/offers. If the price feed is wrong (e.g. DexScreener returning 5000×
             # the real price), collateral_raw will be far too low and our offer's true LTV
-            # will exceed MAX_LTV — skip rather than create an undercollateralised offer.
+            # will exceed the target — skip rather than create an undercollateralised offer.
             pool_price = ps.median_collateral_price_per_raw
+            pair_max_ltv = effective_target_ltv(ps.collateral_mint, ps.weighted_mean_ltv_usd, len(ps.offer_ltv_usds))
             if pool_price and pool_price > 0 and collateral_raw > 0:
                 ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)
-                if ltv_at_pool_price > MAX_LTV * 2.0:
+                if ltv_at_pool_price > pair_max_ltv * 2.0:
                     log.warning(
                         "  %s: skipping — live price requires %.4g tokens but pool-implied "
                         "price gives LTV %.0f%% (2× limit %.0f%%) — likely bad price feed",
                         ps.collateral_mint[:8], collateral_raw,
-                        ltv_at_pool_price * 100, MAX_LTV * 100,
+                        ltv_at_pool_price * 100, pair_max_ltv * 100,
                     )
                     skipped += 1
                     continue

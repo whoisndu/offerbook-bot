@@ -2,7 +2,9 @@
 Offerbook Post-Placement Sanity Check
 ======================================
 Run this after placing orders to verify that every live offer has:
-  - LTV within the strategy's limit (using fresh on-chain prices)
+  - LTV within the dynamic per-token target the strategy would compute right now
+    (using fresh on-chain prices and fresh market data — mirrors effective_target_ltv()
+    in strategy_3_days.py / strategy_7_days.py / strategy_15_days.py)
   - APY above the 10 bps floor
   - Correct duration for the chosen strategy
   - Non-dust principal amount
@@ -25,6 +27,7 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 
 import requests
 from dotenv import load_dotenv
@@ -51,12 +54,22 @@ PAGE_SIZE     = 100
 # ---------------------------------------------------------------------------
 # Per-strategy constants
 # ---------------------------------------------------------------------------
+# Mirrors effective_target_ltv() in strategy_3_days.py / strategy_7_days.py /
+# strategy_15_days.py — see those files (and README §4) for the full rule.
+# Only fallback_ltv (the thin-market-data floor) differs by strategy; the
+# rest of the formula is shared.
 
 STRATEGY_PARAMS: dict[int, dict] = {
-    3:  {"max_ltv": 0.65, "duration_secs": 3  * 86400},
-    7:  {"max_ltv": 0.45, "duration_secs": 7  * 86400},
-    15: {"max_ltv": 0.25, "duration_secs": 15 * 86400},
+    3:  {"fallback_ltv": 0.60, "duration_secs": 3  * 86400},
+    7:  {"fallback_ltv": 0.45, "duration_secs": 7  * 86400},
+    15: {"fallback_ltv": 0.25, "duration_secs": 15 * 86400},
 }
+
+YOUNG_TOKEN_AGE_DAYS = 60
+MIN_MARKET_SAMPLES = 5
+YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's own market LTV
+MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
+HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
 
 KNOWN_DECIMALS: dict[str, int] = {
     "So11111111111111111111111111111111111111112":   9,  # wSOL
@@ -164,6 +177,95 @@ def fetch_current_prices(mints: list[str]) -> dict[str, float]:
     return prices
 
 # ---------------------------------------------------------------------------
+# Dynamic LTV target — mirrors effective_target_ltv() in strategy_*.py
+# ---------------------------------------------------------------------------
+
+_token_age_cache: dict[str, float | None] = {}
+
+
+def _token_age_days(mint: str) -> float | None:
+    """Days since `mint`'s earliest known DexScreener pool was created. None if unknown."""
+    if mint in _token_age_cache:
+        return _token_age_cache[mint]
+    age_days = None
+    try:
+        resp = SESSION.get(f"{DEXSCREENER_API}/{mint}", timeout=10)
+        if resp.ok:
+            created = [p["pairCreatedAt"] for p in (resp.json().get("pairs") or []) if p.get("pairCreatedAt")]
+            if created:
+                age_days = (time.time() * 1000 - min(created)) / 86_400_000
+    except Exception:
+        pass
+    _token_age_cache[mint] = age_days
+    return age_days
+
+
+def fetch_market_ltv_stats(collateral_mints: set[str]) -> dict[str, tuple[float | None, int]]:
+    """
+    For each collateral mint, return (volume-weighted-mean LTV, sample count) computed
+    from ALL active lending offers + active loans market-wide (every lender, not just us)
+    — the same data source strategy_*.py's PairStats.weighted_mean_ltv_usd draws from.
+    """
+    raw_offers: list[dict] = []
+    for status in ("active", "partiallyFilled"):
+        raw_offers += _fetch_all_pages("/offers", {"offerType": "lending", "status": status, "hideExpired": "true"})
+    raw_loans = _fetch_all_pages("/loans/status/active")
+
+    ltvs: dict[str, list[float]] = defaultdict(list)
+    weights: dict[str, list[float]] = defaultdict(list)
+
+    for r in raw_offers:
+        cmint = r.get("collateralMint") or _mint_from_asset(r.get("collateral", {}))
+        if cmint not in collateral_mints:
+            continue
+        meta = r.get("metadata") or {}
+        p_usd, c_usd = meta.get("principalAmountUsd"), meta.get("collateralAmountUsd")
+        if p_usd and c_usd and c_usd > 0:
+            ltvs[cmint].append(p_usd / c_usd)
+            weights[cmint].append(p_usd)
+
+    for r in raw_loans:
+        cmint = r.get("collateralMint") or _mint_from_asset(r.get("collateral", {}))
+        if cmint not in collateral_mints:
+            continue
+        meta = r.get("metadata") or {}
+        p_usd, c_usd = meta.get("startPrincipalAmountUsd"), meta.get("startCollateralAmountUsd")
+        if p_usd and c_usd and c_usd > 0:
+            ltvs[cmint].append(p_usd / c_usd)
+            weights[cmint].append(p_usd)
+
+    stats: dict[str, tuple[float | None, int]] = {}
+    for mint in collateral_mints:
+        vals, wts = ltvs.get(mint, []), weights.get(mint, [])
+        if not vals:
+            stats[mint] = (None, 0)
+            continue
+        total_w = sum(wts)
+        weighted_mean = sum(v * w for v, w in zip(vals, wts)) / total_w if total_w > 0 else sum(vals) / len(vals)
+        stats[mint] = (weighted_mean, len(vals))
+    return stats
+
+
+def effective_target_ltv(
+    collateral_mint: str,
+    fallback_ltv: float,
+    market_weighted_ltv: float | None,
+    market_sample_count: int,
+) -> float:
+    """Recomputes the same dynamic LTV target the strategy scripts use — see
+    effective_target_ltv() in strategy_*.py and README §4 for the full rule."""
+    if not market_weighted_ltv or market_sample_count < MIN_MARKET_SAMPLES:
+        return min(fallback_ltv, HARD_LTV_CEILING)
+
+    age_days = _token_age_days(collateral_mint)
+    if age_days is not None and age_days >= YOUNG_TOKEN_AGE_DAYS:
+        target = market_weighted_ltv / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT)
+    else:
+        target = market_weighted_ltv - YOUNG_TOKEN_DISCOUNT
+
+    return max(min(target, HARD_LTV_CEILING), 0.05)
+
+# ---------------------------------------------------------------------------
 # Offer fetching
 # ---------------------------------------------------------------------------
 
@@ -193,13 +295,16 @@ def check_strategy(days: int) -> tuple[int, int, int]:
     Verify all live offers for the given strategy duration.
     Returns (pass_count, warn_count, fail_count).
     """
-    params  = STRATEGY_PARAMS[days]
-    max_ltv = params["max_ltv"]
-    dur_sec = params["duration_secs"]
+    params       = STRATEGY_PARAMS[days]
+    fallback_ltv = params["fallback_ltv"]
+    dur_sec      = params["duration_secs"]
 
     log.info("")
     log.info("=" * 68)
-    log.info("Strategy: %d-day  |  max LTV: %.0f%%  |  min APY: %d bps", days, max_ltv * 100, MIN_APY_BPS)
+    log.info(
+        "Strategy: %d-day  |  LTV floor: %.0f%%, hard ceiling: %.0f%%  |  min APY: %d bps",
+        days, fallback_ltv * 100, HARD_LTV_CEILING * 100, MIN_APY_BPS,
+    )
     log.info("=" * 68)
 
     raw_offers = fetch_our_offers_for_duration(dur_sec)
@@ -216,11 +321,14 @@ def check_strategy(days: int) -> tuple[int, int, int]:
     log.info("Fetching live prices for %d collateral token(s) …", len(collateral_mints))
     live_prices = fetch_current_prices(collateral_mints)
 
+    log.info("Fetching market-wide LTV data for %d collateral token(s) …", len(collateral_mints))
+    market_ltv_stats = fetch_market_ltv_stats(set(collateral_mints))
+
     pass_count = warn_count = fail_count = 0
 
     # Header
     col = "{:<10}  {:<10}  {:>8}  {:>6}  {:>7}  {:>7}  {:>10}  {}"
-    log.info(col.format("principal", "collateral", "APY bps", "APY %", "LTV %", "MaxLTV", "Vol USDC", "status"))
+    log.info(col.format("principal", "collateral", "APY bps", "APY %", "LTV %", "Target%", "Vol USDC", "status"))
     log.info("-" * 80)
 
     for r in raw_offers:
@@ -244,11 +352,14 @@ def check_strategy(days: int) -> tuple[int, int, int]:
         if principal_raw < 1000:
             issues.append(f"dust principal ({principal_raw} raw units)")
 
-        # --- LTV (live prices) ---
+        # --- LTV (live prices, against the recomputed dynamic target) ---
         collateral_price = live_prices.get(collateral_mint)
         decimals         = KNOWN_DECIMALS.get(collateral_mint)
         live_ltv: float | None = None
         vol_usdc: float | None = None
+
+        market_weighted_ltv, market_sample_count = market_ltv_stats.get(collateral_mint, (None, 0))
+        target_ltv = effective_target_ltv(collateral_mint, fallback_ltv, market_weighted_ltv, market_sample_count)
 
         if collateral_price and decimals is not None and collateral_raw > 0:
             principal_usdc  = principal_raw / 10 ** USDC_DECIMALS
@@ -256,8 +367,8 @@ def check_strategy(days: int) -> tuple[int, int, int]:
             vol_usdc = principal_usdc
             if collateral_usdc > 0:
                 live_ltv = principal_usdc / collateral_usdc
-            if live_ltv is not None and live_ltv > max_ltv * 1.02:  # 2 % tolerance
-                issues.append(f"LTV {live_ltv*100:.1f}% > limit {max_ltv*100:.0f}%")
+            if live_ltv is not None and live_ltv > target_ltv * 1.02:  # 2 % tolerance
+                issues.append(f"LTV {live_ltv*100:.1f}% > target {target_ltv*100:.0f}%")
         elif collateral_raw > 0:
             issues.append(f"no live price for collateral {collateral_mint[:8]}…")
 
@@ -283,7 +394,7 @@ def check_strategy(days: int) -> tuple[int, int, int]:
                 apy_bps,
                 f"{apy_bps/100:.2f}",
                 ltv_str,
-                f"{max_ltv*100:.0f}",
+                f"{target_ltv*100:.0f}",
                 vol_str,
                 verdict + flag,
             )

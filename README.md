@@ -194,11 +194,10 @@ For each offer the script prints a table row:
 | Column | What is checked |
 |---|---|
 | `APY bps` / `APY %` | Must be ≥ 10 bps (the floor) |
-| `LTV %` | Recomputed from fresh Jupiter/DexScreener prices; must be ≤ the strategy's `MaxLTV` |
+| `LTV %` | Recomputed from fresh Jupiter/DexScreener prices; must be ≤ `Target%` |
+| `Target%` | The dynamic LTV target ([§4](#4-dynamic-ltv-target-and-safe-collateral-sizing)) recomputed *right now* from fresh market-wide offer/loan data for that collateral token — not a fixed per-strategy number, and not necessarily the same value the strategy script computed at offer-creation time, since market conditions move |
 | `Vol USDC` | Principal amount; flagged if dust (< 1 000 raw units) |
 | `status` | `PASS` / `WARN` (non-critical) / `FAIL` (LTV violation) |
-
-> **Known gap:** `verify_offers.py` still checks against its own hardcoded `max_ltv` per strategy (65% / 45% / 25%, ±2% tolerance) — it has not been updated for the dynamic per-token LTV target in [§4](#4-dynamic-ltv-target-and-safe-collateral-sizing). A valid offer sized against a mature token's target (which can legitimately run up to 75%) will now show as a `FAIL` here even though it's correct. Treat `FAIL` results as "needs manual review against §4," not as an automatic problem, until this script is updated to match.
 
 Exit code is `1` if any LTV violations are found, `0` otherwise — safe to use in shell pipelines:
 

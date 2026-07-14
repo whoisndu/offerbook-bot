@@ -99,11 +99,11 @@ Unlike a single fixed ceiling, the target LTV $L_k$ for collateral token $k$ is 
 
 $$\bar\ell_k = \frac{\sum_{i \in \mathcal{S}_k} \ell_i \, p_i}{\sum_{i \in \mathcal{S}_k} p_i}$$
 
-$L_k$ is then set by three rules, applied in order:
+"Enough data" to trust $\mathcal{S}_k$ means **either** $|\mathcal{S}_k| \geq 5$, **or** the total volume $V_k = \sum_{i \in \mathcal{S}_k} p_i$ is at least $2\times$ our own offer's principal $P$ — a few small dust offers shouldn't qualify, but one large, capital-backed offer can stand on its own even with fewer than 5 orders on the book (Offerbook's escrow model means posting a lending offer requires the lender to actually fund the principal, so a large offer costs real capital to fake). $L_k$ is then set by three rules, applied in order:
 
-1. **Not enough data** ($|\mathcal{S}_k| < 5$): fall back to the strategy's flat floor, $L_k = L_{\text{floor}}$ (60% / 45% / 25% — see the table above). Thin data (a couple of offers) is too easy for a single actor to fake.
-2. **Young token** ($|\mathcal{S}_k| \geq 5$ and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \bar\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
-3. **Mature token** ($|\mathcal{S}_k| \geq 5$ and age $\geq$ 60 days): $L_k = \bar\ell_k / 0.9$ — the bot accepts 10% less collateral than the market average implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
+1. **Not enough data** (neither condition above holds): fall back to the strategy's flat floor, $L_k = L_{\text{floor}}$ (60% / 45% / 25% — see the table above).
+2. **Young token** (enough data, and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \bar\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
+3. **Mature token** (enough data, and age $\geq$ 60 days): $L_k = \bar\ell_k / 0.9$ — the bot accepts 10% less collateral than the market average implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
 
 In every case, $L_k$ is clamped to $[0.05,\ 0.75]$ — the 75% hard ceiling applies no matter how loose an established token's market looks, since an entire market trading at very high LTV is itself a warning sign rather than something to mirror.
 

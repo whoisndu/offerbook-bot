@@ -71,6 +71,7 @@ STRATEGY_PARAMS: dict[int, dict] = {
 
 YOUNG_TOKEN_AGE_DAYS = 60
 MIN_MARKET_SAMPLES = 5
+MARKET_VOLUME_MULTIPLIER = 2.0             # OR: market volume >= this x our own offer size
 YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's own market LTV
 MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
 HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
@@ -213,11 +214,12 @@ def _token_age_days(mint: str) -> float | None:
     return age_days
 
 
-def fetch_market_ltv_stats(collateral_mints: set[str]) -> dict[str, tuple[float | None, int]]:
+def fetch_market_ltv_stats(collateral_mints: set[str]) -> dict[str, tuple[float | None, int, float]]:
     """
-    For each collateral mint, return (volume-weighted-mean LTV, sample count) computed
-    from ALL active lending offers + active loans market-wide (every lender, not just us)
-    — the same data source strategy_*.py's PairStats.weighted_mean_ltv_usd draws from.
+    For each collateral mint, return (volume-weighted-mean LTV, sample count, total
+    volume USD) computed from ALL active lending offers + active loans market-wide
+    (every lender, not just us) — the same data source strategy_*.py's
+    PairStats.weighted_mean_ltv_usd / offer_ltv_weights_usd draw from.
     """
     raw_offers: list[dict] = []
     for status in ("active", "partiallyFilled"):
@@ -247,15 +249,15 @@ def fetch_market_ltv_stats(collateral_mints: set[str]) -> dict[str, tuple[float 
             ltvs[cmint].append(p_usd / c_usd)
             weights[cmint].append(p_usd)
 
-    stats: dict[str, tuple[float | None, int]] = {}
+    stats: dict[str, tuple[float | None, int, float]] = {}
     for mint in collateral_mints:
         vals, wts = ltvs.get(mint, []), weights.get(mint, [])
         if not vals:
-            stats[mint] = (None, 0)
+            stats[mint] = (None, 0, 0.0)
             continue
         total_w = sum(wts)
         weighted_mean = sum(v * w for v, w in zip(vals, wts)) / total_w if total_w > 0 else sum(vals) / len(vals)
-        stats[mint] = (weighted_mean, len(vals))
+        stats[mint] = (weighted_mean, len(vals), total_w)
     return stats
 
 
@@ -264,10 +266,18 @@ def effective_target_ltv(
     fallback_ltv: float,
     market_weighted_ltv: float | None,
     market_sample_count: int,
+    market_total_volume_usd: float = 0.0,
+    our_offer_usdc: float = 0.0,
 ) -> float:
     """Recomputes the same dynamic LTV target the strategy scripts use — see
-    effective_target_ltv() in strategy_*.py and README §4 for the full rule."""
-    if not market_weighted_ltv or market_sample_count < MIN_MARKET_SAMPLES:
+    effective_target_ltv() in strategy_*.py and README §4 for the full rule.
+    "Enough data" means EITHER >= MIN_MARKET_SAMPLES orders OR market volume
+    >= MARKET_VOLUME_MULTIPLIER x our_offer_usdc (our_offer_usdc must be > 0
+    for the volume path to apply)."""
+    has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
+    has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
+
+    if not market_weighted_ltv or not has_enough_data:
         return min(fallback_ltv, HARD_LTV_CEILING)
 
     age_days = _token_age_days(collateral_mint)
@@ -400,11 +410,16 @@ def check_strategy(days: int) -> tuple[int, int, int]:
         live_ltv: float | None = None
         vol_usdc: float | None = None
 
-        market_weighted_ltv, market_sample_count = market_ltv_stats.get(collateral_mint, (None, 0))
-        target_ltv = effective_target_ltv(collateral_mint, fallback_ltv, market_weighted_ltv, market_sample_count)
+        principal_usdc = principal_raw / 10 ** USDC_DECIMALS
+        market_weighted_ltv, market_sample_count, market_total_volume_usd = market_ltv_stats.get(
+            collateral_mint, (None, 0, 0.0)
+        )
+        target_ltv = effective_target_ltv(
+            collateral_mint, fallback_ltv, market_weighted_ltv, market_sample_count,
+            market_total_volume_usd, principal_usdc,
+        )
 
         if collateral_price and decimals is not None and collateral_raw > 0:
-            principal_usdc  = principal_raw / 10 ** USDC_DECIMALS
             collateral_usdc = (collateral_raw / 10 ** decimals) * collateral_price
             vol_usdc = principal_usdc
             if collateral_usdc > 0:

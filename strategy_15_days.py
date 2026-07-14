@@ -70,8 +70,11 @@ OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term
 
 # LTV target is computed per-token from that token's own market data (see
 # effective_target_ltv() below) rather than a single fixed ceiling:
-#   - Fewer than MIN_MARKET_SAMPLES offers/loans for the token → not enough
-#     data to trust; use FALLBACK_LTV.
+#   - Not enough data to trust the token's own market → use FALLBACK_LTV.
+#     "Enough data" means EITHER >= MIN_MARKET_SAMPLES offers/loans, OR total
+#     market volume >= MARKET_VOLUME_MULTIPLIER x our own offer size — a few
+#     small dust offers don't count, but one large, capital-backed offer can
+#     qualify on its own even without 5 orders.
 #   - Token younger than YOUNG_TOKEN_AGE_DAYS (or of unknown age, fail safe) →
 #     target = token's own weighted-mean market LTV - YOUNG_TOKEN_DISCOUNT.
 #   - Token older than YOUNG_TOKEN_AGE_DAYS → target = weighted-mean market LTV
@@ -83,6 +86,7 @@ OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term
 FALLBACK_LTV = 0.25                        # used when there's not enough market data for the token
 YOUNG_TOKEN_AGE_DAYS = 60
 MIN_MARKET_SAMPLES = 5
+MARKET_VOLUME_MULTIPLIER = 2.0             # OR: market volume >= this x our own offer size
 YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's own market LTV
 MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
 HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
@@ -643,16 +647,28 @@ def effective_target_ltv(
     collateral_mint: str,
     market_weighted_ltv: float | None = None,
     market_sample_count: int = 0,
+    market_total_volume_usd: float = 0.0,
+    our_offer_usdc: float = 0.0,
 ) -> float:
     """
     Per-token dynamic LTV target — see the constants block above for the full rule.
-    Not enough of the token's own market data → FALLBACK_LTV. Otherwise young tokens
-    (< YOUNG_TOKEN_AGE_DAYS, or of unknown age — fail safe) target a discount below
-    their own market rate; mature tokens target a premium above it (less collateral
-    required than the market average, to be more competitive). HARD_LTV_CEILING always
-    applies on top.
+
+    "Enough data" to trust the token's own market (rather than FALLBACK_LTV) means
+    EITHER >= MIN_MARKET_SAMPLES offers/loans, OR market_total_volume_usd >=
+    MARKET_VOLUME_MULTIPLIER x our_offer_usdc — a handful of dust offers shouldn't
+    qualify, but one large, capital-backed offer can stand on its own even with
+    fewer than 5 orders on the book. our_offer_usdc must be > 0 for the volume path
+    to apply (a missing/zero value can't silently satisfy "volume >= 0").
+
+    Otherwise young tokens (< YOUNG_TOKEN_AGE_DAYS, or of unknown age — fail safe)
+    target a discount below their own market rate; mature tokens target a premium
+    above it (less collateral required than the market average, to be more
+    competitive). HARD_LTV_CEILING always applies on top.
     """
-    if not market_weighted_ltv or market_sample_count < MIN_MARKET_SAMPLES:
+    has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
+    has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
+
+    if not market_weighted_ltv or not has_enough_data:
         return min(FALLBACK_LTV, HARD_LTV_CEILING)
 
     age_days = _token_age_days(collateral_mint)
@@ -671,6 +687,7 @@ def safe_collateral_amount(
     decimals_map: dict[str, int],
     market_weighted_ltv: float | None = None,
     market_sample_count: int = 0,
+    market_total_volume_usd: float = 0.0,
 ) -> int | None:
     """
     Return the collateral raw amount required so that LTV == effective_target_ltv(...) at
@@ -687,7 +704,9 @@ def safe_collateral_amount(
     price for an illiquid/moved token would silently produce a bad LTV.
     """
     principal_usdc = principal_raw / 10 ** USDC_DECIMALS
-    required_collateral_usdc = principal_usdc / effective_target_ltv(collateral_mint, market_weighted_ltv, market_sample_count)
+    required_collateral_usdc = principal_usdc / effective_target_ltv(
+        collateral_mint, market_weighted_ltv, market_sample_count, market_total_volume_usd, principal_usdc
+    )
     price_per_token = current_prices.get(collateral_mint)
     decimals = decimals_map.get(collateral_mint)
     if price_per_token and price_per_token > 0 and decimals is not None:
@@ -1178,6 +1197,7 @@ def main() -> None:
                 decimals_map=decimals_map,
                 market_weighted_ltv=ps.weighted_mean_ltv_usd,
                 market_sample_count=len(ps.offer_ltv_usds),
+                market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
             )
 
             if collateral_raw is None:
@@ -1196,7 +1216,10 @@ def main() -> None:
             # the real price), collateral_raw will be far too low and our offer's true LTV
             # will exceed the target — skip rather than create an undercollateralised offer.
             pool_price = ps.median_collateral_price_per_raw
-            pair_max_ltv = effective_target_ltv(ps.collateral_mint, ps.weighted_mean_ltv_usd, len(ps.offer_ltv_usds))
+            pair_max_ltv = effective_target_ltv(
+                ps.collateral_mint, ps.weighted_mean_ltv_usd, len(ps.offer_ltv_usds),
+                sum(ps.offer_ltv_weights_usd), principal_usdc,
+            )
             if pool_price and pool_price > 0 and collateral_raw > 0:
                 ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)
                 if ltv_at_pool_price > pair_max_ltv * 2.0:

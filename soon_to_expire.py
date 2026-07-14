@@ -124,8 +124,17 @@ def _fetch_dexscreener_price(mint: str) -> float | None:
         return None
 
 
-def fetch_prices(mints: set[str]) -> dict[str, float]:
+def fetch_prices(mints: set[str]) -> tuple[dict[str, float], dict[str, int]]:
+    """
+    Return ({mint: usd_price_per_whole_token}, {mint: decimals}).
+
+    Jupiter's price response includes each token's `decimals` — we capture that
+    here so mints missing from the hardcoded KNOWN_DECIMALS table (which also
+    carries a display symbol) can still be formatted and priced, just without
+    a friendly symbol.
+    """
     prices: dict[str, float] = {}
+    jupiter_decimals: dict[str, int] = {}
     mints = {m for m in mints if m and m != USDC_MINT}
     mints_list = list(mints)
     for i in range(0, len(mints_list), 50):
@@ -136,6 +145,9 @@ def fetch_prices(mints: set[str]) -> dict[str, float]:
             resp.raise_for_status()
             data = resp.json()
             prices.update({m: float(info["usdPrice"]) for m, info in data.items() if info.get("usdPrice")})
+            jupiter_decimals.update(
+                {m: int(info["decimals"]) for m, info in data.items() if info.get("decimals") is not None}
+            )
         except Exception as exc:
             log.warning("Jupiter price batch %d failed: %s", i // 50, exc)
 
@@ -146,22 +158,29 @@ def fetch_prices(mints: set[str]) -> dict[str, float]:
             prices[mint] = price
 
     prices[USDC_MINT] = 1.0
-    return prices
+    return prices, jupiter_decimals
 
 
-def fmt_amount(mint: str | None, raw: int) -> str:
+def fmt_amount(mint: str | None, raw: int, decimals_map: dict[str, int]) -> str:
     if mint and mint in KNOWN_DECIMALS:
         dec, sym = KNOWN_DECIMALS[mint]
         return f"{raw / 10**dec:,.4f} {sym}"
+    if mint and mint in decimals_map:
+        return f"{raw / 10**decimals_map[mint]:,.4f} ({mint[:6]}…{mint[-4:]})"
     if mint:
         return f"{raw} raw ({mint[:6]}…{mint[-4:]})"
     return "1 NFT"
 
 
-def usd_value(mint: str | None, raw: int, prices: dict[str, float]) -> float | None:
-    if not mint or mint not in KNOWN_DECIMALS:
+def usd_value(mint: str | None, raw: int, prices: dict[str, float], decimals_map: dict[str, int]) -> float | None:
+    if not mint:
         return None
-    dec, _ = KNOWN_DECIMALS[mint]
+    if mint in KNOWN_DECIMALS:
+        dec = KNOWN_DECIMALS[mint][0]
+    elif mint in decimals_map:
+        dec = decimals_map[mint]
+    else:
+        return None
     price = prices.get(mint)
     if not price:
         return None
@@ -185,7 +204,7 @@ def bucket_loans(loans: list[dict], now: datetime, window_hours: float) -> dict[
     return buckets
 
 
-def print_bucket(label: str, rows: list[dict], prices: dict[str, float]) -> None:
+def print_bucket(label: str, rows: list[dict], prices: dict[str, float], decimals_map: dict[str, int]) -> None:
     rows = sorted(rows, key=lambda l: l["_delta_hours"])
     log.info("")
     log.info("=" * 100)
@@ -199,10 +218,10 @@ def print_bucket(label: str, rows: list[dict], prices: dict[str, float]) -> None
     for loan in rows:
         pmint = loan.get("principalMint") or _asset_mint(loan.get("principal", {}))
         cmint = loan.get("collateralMint") or _asset_mint(loan.get("collateral", {}))
-        p_amt = fmt_amount(pmint, loan["principalAmount"])
-        c_amt = fmt_amount(cmint, loan["collateralAmount"])
-        p_usd = usd_value(pmint, loan["principalAmount"], prices)
-        c_usd = usd_value(cmint, loan["collateralAmount"], prices)
+        p_amt = fmt_amount(pmint, loan["principalAmount"], decimals_map)
+        c_amt = fmt_amount(cmint, loan["collateralAmount"], decimals_map)
+        p_usd = usd_value(pmint, loan["principalAmount"], prices, decimals_map)
+        c_usd = usd_value(cmint, loan["collateralAmount"], prices, decimals_map)
 
         hrs = loan["_delta_hours"]
         when = f"expired {abs(hrs):.1f}h ago" if hrs < 0 else f"expires in {hrs:.1f}h"
@@ -247,11 +266,11 @@ def main() -> None:
     all_mints.discard("")
 
     log.info("Fetching live prices for %d unique token(s) …", len(all_mints))
-    prices = fetch_prices(all_mints)
+    prices, decimals_map = fetch_prices(all_mints)
 
     if not args.no_expired:
-        print_bucket("ALREADY EXPIRED (still active)", buckets["expired"], prices)
-    print_bucket(f"EXPIRING WITHIN {args.hours:.0f}H", buckets["soon"], prices)
+        print_bucket("ALREADY EXPIRED (still active)", buckets["expired"], prices, decimals_map)
+    print_bucket(f"EXPIRING WITHIN {args.hours:.0f}H", buckets["soon"], prices, decimals_map)
 
     sys.exit(1 if relevant else 0)
 

@@ -161,16 +161,25 @@ def _fetch_dexscreener_price(mint: str) -> float | None:
         return None
 
 
-def fetch_current_prices(mints: list[str]) -> dict[str, float]:
+def fetch_current_prices(mints: list[str]) -> tuple[dict[str, float], dict[str, int]]:
+    """
+    Return ({mint: usd_price_per_whole_token}, {mint: decimals}).
+
+    Jupiter's price response includes each token's `decimals` — we capture that
+    here so mints missing from the hardcoded KNOWN_DECIMALS table still get a
+    usable price instead of being misreported as having no live price.
+    """
     if not mints:
-        return {}
+        return {}, {}
     prices: dict[str, float] = {}
+    jupiter_decimals: dict[str, int] = {}
     try:
         headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
         resp = SESSION.get(JUPITER_PRICE_API, params={"ids": ",".join(mints)}, headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         prices = {m: float(info["usdPrice"]) for m, info in data.items() if info.get("usdPrice")}
+        jupiter_decimals = {m: int(info["decimals"]) for m, info in data.items() if info.get("decimals") is not None}
     except Exception as exc:
         log.warning("Jupiter price fetch failed: %s", exc)
 
@@ -178,7 +187,7 @@ def fetch_current_prices(mints: list[str]) -> dict[str, float]:
         price = _fetch_dexscreener_price(mint)
         if price:
             prices[mint] = price
-    return prices
+    return prices, jupiter_decimals
 
 # ---------------------------------------------------------------------------
 # Dynamic LTV target — mirrors effective_target_ltv() in strategy_*.py
@@ -351,7 +360,8 @@ def check_strategy(days: int) -> tuple[int, int, int]:
         for r in raw_offers
     })
     log.info("Fetching live prices for %d collateral token(s) …", len(collateral_mints))
-    live_prices = fetch_current_prices(collateral_mints)
+    live_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
+    decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
 
     log.info("Fetching market-wide LTV data for %d collateral token(s) …", len(collateral_mints))
     market_ltv_stats = fetch_market_ltv_stats(set(collateral_mints))
@@ -386,7 +396,7 @@ def check_strategy(days: int) -> tuple[int, int, int]:
 
         # --- LTV (live prices, against the recomputed dynamic target) ---
         collateral_price = live_prices.get(collateral_mint)
-        decimals         = KNOWN_DECIMALS.get(collateral_mint)
+        decimals         = decimals_map.get(collateral_mint)
         live_ltv: float | None = None
         vol_usdc: float | None = None
 

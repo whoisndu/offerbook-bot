@@ -1,0 +1,33 @@
+base58==2.1.1
+bleak==3.0.2
+certifi==2026.5.20
+charset-normalizer==3.4.7
+ECPy==1.2.5
+future==1.0.0
+hidapi==0.15.0
+idna==3.18
+jsonalias==0.1.1
+ledgerblue==0.1.58
+libusb1==3.4.0
+ndeflib==0.3.3
+nfcpy==1.0.4
+pillow==12.3.0
+protobuf==5.29.6
+pycryptodome==3.23.0
+pycryptodomex==3.23.0
+pyDes==2.0.1
+pyelftools==0.33
+pyobjc-core==12.2.1; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.1; sys_platform == "darwin"
+pyobjc-framework-CoreBluetooth==12.2.1; sys_platform == "darwin"
+pyobjc-framework-libdispatch==12.2.1; sys_platform == "darwin"
+pyserial==3.5
+python-dotenv==1.2.2
+python-gnupg==0.5.6
+python-u2flib-host==3.0.3
+PyYAML==6.0.3
+requests==2.34.2
+solders==0.27.1
+typing_extensions==4.15.0
+urllib3==2.7.0
+websocket-client==1.9.0

@@ -227,10 +227,7 @@ The script identifies each strategy's offers by their `duration` field (259 200 
 ```bash
 python -m venv venv
 source venv/bin/activate
-pip install requests python-dotenv solders base58 pyyaml
-
-# Only needed for --ledger signing mode (see cancel_offers.py):
-pip install ledgerblue hidapi
+pip install -r requirements.txt
 ```
 
 ### 2. Configure environment

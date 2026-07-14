@@ -42,6 +42,10 @@ API_BASE        = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/
 SOLANA_RPC      = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 WALLET_PUBKEY   = os.getenv("OFFERBOOK_WALLET", "")
 
+# "ledger" or "private_key" — Ledger is the default signing mode, matching strategy_*.py.
+SIGNING_MODE: str = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
+LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
+
 JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
 JUPITER_API_KEY   = os.getenv("JUPITER_API_KEY", "")
 DEXSCREENER_API   = "https://api.dexscreener.com/latest/dex/tokens"
@@ -273,6 +277,34 @@ def _mint_from_asset(asset: dict) -> str:
     return asset.get("mint") or asset.get("data", {}).get("mint") or asset.get("data", {}).get("asset") or ""
 
 
+def resolve_signer_wallet() -> str:
+    """
+    Resolve WALLET_PUBKEY for the active signing mode. For Ledger (the default),
+    the device is the source of truth (overrides/fills in OFFERBOOK_WALLET) — matches
+    resolve_signer_wallet() in strategy_*.py so this checks the same wallet they sign
+    offers from. Read-only: only queries the device's pubkey, never signs anything.
+    """
+    global WALLET_PUBKEY
+    if SIGNING_MODE == "ledger":
+        try:
+            from ledger_signer import LedgerError, LedgerSigner
+        except ImportError:
+            log.error("Missing dependencies: pip install ledgerblue hidapi base58")
+            sys.exit(1)
+        try:
+            device_pubkey = LedgerSigner(path=LEDGER_PATH).get_pubkey()
+        except LedgerError as exc:
+            log.error(str(exc))
+            sys.exit(1)
+        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
+            log.warning(
+                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
+                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
+            )
+        WALLET_PUBKEY = device_pubkey
+    return WALLET_PUBKEY
+
+
 def fetch_our_offers_for_duration(duration_secs: int) -> list[dict]:
     """Return raw offer dicts belonging to this wallet with the given duration."""
     raw: list[dict] = []
@@ -429,12 +461,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    resolve_signer_wallet()
     if not WALLET_PUBKEY:
-        log.error("OFFERBOOK_WALLET env var not set. Exiting.")
+        log.error("OFFERBOOK_WALLET env var not set (and no Ledger available). Exiting.")
         sys.exit(1)
 
     log.info("Offerbook Offer Sanity Check")
-    log.info("Wallet : %s", WALLET_PUBKEY)
+    log.info("Wallet : %s  (%s)", WALLET_PUBKEY, SIGNING_MODE)
 
     strategies = [3, 7, 15] if args.days == "all" else [int(args.days)]
 

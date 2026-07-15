@@ -32,6 +32,7 @@ import argparse
 import base64
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any
@@ -327,6 +328,17 @@ def _sign_and_send(tx_b64: str) -> str:
 # Cancel batch
 # ---------------------------------------------------------------------------
 
+# The builder API names the specific offer in its error, e.g. "Offer <pubkey>
+# does not exist anymore" — used to drop just that one and re-batch the rest
+# instead of falling back to fully-individual retries for the whole batch.
+_MISSING_OFFER_RE = re.compile(r"Offer\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s+does not exist")
+
+
+def _extract_missing_offer(exc: Exception) -> str | None:
+    m = _MISSING_OFFER_RE.search(str(exc))
+    return m.group(1) if m else None
+
+
 def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
     payload: dict = {"signer": WALLET_PUBKEY, "withdraw": withdraw_mode}
     if len(pubkeys) == 1:
@@ -451,14 +463,28 @@ def main() -> None:
     errors    = 0
     for i in range(0, len(pubkeys), BATCH_SIZE):
         batch = pubkeys[i : i + BATCH_SIZE]
-        try:
-            cancel_batch(batch, withdraw_mode)
-            cancelled += len(batch)
-        except Exception as exc:
-            if len(batch) == 1:
-                log.warning("Skipping offer %s — no longer exists or already cancelled: %s", batch[0], exc)
-                errors += 1
-            else:
+        while batch:
+            try:
+                cancel_batch(batch, withdraw_mode)
+                cancelled += len(batch)
+                break
+            except Exception as exc:
+                bad_pk = _extract_missing_offer(exc)
+                if bad_pk and bad_pk in batch:
+                    # The API told us exactly which offer is gone — drop just that one
+                    # and re-batch the rest, instead of falling back to fully-individual
+                    # retries (and Ledger prompts) for the whole batch.
+                    log.warning(
+                        "Skipping %s — no longer exists or already cancelled (retrying remaining %d in batch)",
+                        bad_pk, len(batch) - 1,
+                    )
+                    batch = [pk for pk in batch if pk != bad_pk]
+                    errors += 1
+                    continue
+                if len(batch) == 1:
+                    log.warning("Skipping offer %s — no longer exists or already cancelled: %s", batch[0], exc)
+                    errors += 1
+                    break
                 log.warning("Batch of %d failed (%s) — retrying individually …", len(batch), exc)
                 for pk in batch:
                     try:
@@ -467,6 +493,7 @@ def main() -> None:
                     except Exception as inner:
                         log.warning("Skipping %s — no longer exists or already cancelled: %s", pk, inner)
                         errors += 1
+                break
 
     log.info("Done.  Cancelled=%d  Errors=%d", cancelled, errors)
 

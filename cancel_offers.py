@@ -220,6 +220,12 @@ def fetch_my_offers(duration_filter: int | None) -> list[dict]:
     Return active + partiallyFilled lending offers for WALLET_PUBKEY.
     If duration_filter is set, only return offers whose duration matches
     that strategy's loan term (in seconds).
+
+    showUnverified=true and includeUnderfunded=true are both required — the API
+    hides offers whose collateral isn't Jupiter-verified, and separately hides
+    underfunded ones, by default. Missing either would mean "cancel all my
+    offers" silently leaves some of them live. (fetch_onchain_orphans() below
+    also catches whatever this still misses, as a second line of defense.)
     """
     offers: list[dict] = []
     offset = 0
@@ -229,6 +235,8 @@ def fetch_my_offers(duration_filter: int | None) -> list[dict]:
             creator=WALLET_PUBKEY,
             offerType="lending",
             status="Active,PartiallyFilled",
+            showUnverified="true",
+            includeUnderfunded="true",
             limit=PAGE_SIZE,
             offset=offset,
         )

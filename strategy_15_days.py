@@ -522,15 +522,34 @@ def _parse_loan(raw: dict) -> Loan:
 
 
 def fetch_active_lending_offers() -> list[Offer]:
+    """
+    includeUnderfunded=true is required. On this platform, "underfunded" mostly
+    means "one of several offers sharing a rehypothecated escrow pool" (the same
+    intentional strategy this bot itself uses — post many offers whose sizes sum
+    to more than the actual escrow balance, since only one can be filled at a
+    time). It is NOT a signal of a fake/unbacked offer. Without this flag, the
+    vast majority of the live market — including most meme/pump.fun/tokenized-
+    stock offers — is invisible and there's nothing to benchmark against.
+
+    showUnverified=true is also set (hides non-Jupiter-verified collateral by
+    default) — harmless to include even though it had no measurable effect when
+    last checked.
+    """
     log.info("Fetching active lending offers …")
     raw_items = _fetch_all_pages(
         "/offers",
-        {"offerType": "lending", "status": "active", "hideExpired": "true"},
+        {
+            "offerType": "lending", "status": "active", "hideExpired": "true",
+            "showUnverified": "true", "includeUnderfunded": "true",
+        },
     )
     # also grab partiallyFilled
     raw_items += _fetch_all_pages(
         "/offers",
-        {"offerType": "lending", "status": "partiallyFilled", "hideExpired": "true"},
+        {
+            "offerType": "lending", "status": "partiallyFilled", "hideExpired": "true",
+            "showUnverified": "true", "includeUnderfunded": "true",
+        },
     )
     offers = [_parse_offer(r) for r in raw_items]
     log.info("  → %d active lending offers", len(offers))

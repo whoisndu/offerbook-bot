@@ -214,18 +214,19 @@ def _token_age_days(mint: str) -> float | None:
     return age_days
 
 
-def fetch_market_ltv_stats(collateral_mints: set[str]) -> dict[str, tuple[float | None, int, float]]:
+def fetch_market_ltv_stats(
+    collateral_mints: set[str], raw_offers: list[dict], raw_loans: list[dict]
+) -> dict[str, tuple[float | None, int, float]]:
     """
     For each collateral mint, return (volume-weighted-mean LTV, sample count, total
     volume USD) computed from ALL active lending offers + active loans market-wide
     (every lender, not just us) — the same data source strategy_*.py's
     PairStats.weighted_mean_ltv_usd / offer_ltv_weights_usd draw from.
-    """
-    raw_offers: list[dict] = []
-    for status in ("active", "partiallyFilled"):
-        raw_offers += _fetch_all_pages("/offers", {"offerType": "lending", "status": status, "hideExpired": "true"})
-    raw_loans = _fetch_all_pages("/loans/status/active")
 
+    Takes already-fetched market data (raw_offers from fetch_all_lending_offers(),
+    raw_loans from /loans/status/active) so callers can fetch once per run and
+    reuse across every strategy checked, rather than refetching per duration.
+    """
     ltvs: dict[str, list[float]] = defaultdict(list)
     weights: dict[str, list[float]] = defaultdict(list)
 
@@ -324,16 +325,33 @@ def resolve_signer_wallet() -> str:
     return WALLET_PUBKEY
 
 
-def fetch_our_offers_for_duration(duration_secs: int) -> list[dict]:
-    """Return raw offer dicts belonging to this wallet with the given duration."""
+def fetch_all_lending_offers() -> list[dict]:
+    """
+    Return every lending offer on the market (fetched once per run and reused
+    across all strategies checked, instead of once per duration).
+
+    showUnverified=true and includeUnderfunded=true are both set — we want to see
+    ALL offers regardless of collateral verification or funding status; missing
+    one because of either flag would defeat the point of a sanity check (and
+    "underfunded" mostly just means "one of several rehypothecated-escrow
+    offers" here, not a fake/unbacked one).
+    """
     raw: list[dict] = []
     for status in ("active", "partiallyFilled"):
         raw += _fetch_all_pages(
             "/offers",
-            {"offerType": "lending", "status": status, "hideExpired": "true"},
+            {
+                "offerType": "lending", "status": status, "hideExpired": "true",
+                "showUnverified": "true", "includeUnderfunded": "true",
+            },
         )
+    return raw
+
+
+def filter_our_offers(all_offers: list[dict], duration_secs: int) -> list[dict]:
+    """Filter already-fetched market offers down to ours, for the given duration."""
     return [
-        r for r in raw
+        r for r in all_offers
         if r.get("creator") == WALLET_PUBKEY and r.get("duration") == duration_secs
     ]
 
@@ -341,10 +359,21 @@ def fetch_our_offers_for_duration(duration_secs: int) -> list[dict]:
 # Core check
 # ---------------------------------------------------------------------------
 
-def check_strategy(days: int) -> tuple[int, int, int]:
+def check_strategy(
+    days: int,
+    all_offers: list[dict],
+    live_prices: dict[str, float],
+    decimals_map: dict[str, int],
+    market_ltv_stats: dict[str, tuple[float | None, int, float]],
+) -> tuple[int, int, int]:
     """
     Verify all live offers for the given strategy duration.
     Returns (pass_count, warn_count, fail_count).
+
+    Takes market data pre-fetched once in main() (all_offers, live_prices,
+    decimals_map, market_ltv_stats) instead of fetching it per duration — with
+    --days all this used to refetch the same ~250+ offer market-wide dataset,
+    the full active-loans list, and DexScreener prices independently 3 times.
     """
     params       = STRATEGY_PARAMS[days]
     fallback_ltv = params["fallback_ltv"]
@@ -358,23 +387,12 @@ def check_strategy(days: int) -> tuple[int, int, int]:
     )
     log.info("=" * 68)
 
-    raw_offers = fetch_our_offers_for_duration(dur_sec)
+    raw_offers = filter_our_offers(all_offers, dur_sec)
     log.info("Found %d offer(s) on-chain for this strategy.", len(raw_offers))
 
     if not raw_offers:
         log.warning("  No offers found — they may still be propagating, or none were placed.")
         return 0, 0, 0
-
-    collateral_mints = list({
-        _mint_from_asset(r.get("collateral", {})) or r.get("collateralMint", "")
-        for r in raw_offers
-    })
-    log.info("Fetching live prices for %d collateral token(s) …", len(collateral_mints))
-    live_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
-    decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
-
-    log.info("Fetching market-wide LTV data for %d collateral token(s) …", len(collateral_mints))
-    market_ltv_stats = fetch_market_ltv_stats(set(collateral_mints))
 
     pass_count = warn_count = fail_count = 0
 
@@ -496,9 +514,30 @@ def main() -> None:
 
     strategies = [3, 7, 15] if args.days == "all" else [int(args.days)]
 
+    # Fetch market-wide data once and reuse across every strategy checked below,
+    # instead of refetching independently per duration.
+    log.info("Fetching all lending offers market-wide …")
+    all_offers = fetch_all_lending_offers()
+    log.info("  → %d lending offer(s)", len(all_offers))
+    log.info("Fetching all active loans market-wide …")
+    all_loans = _fetch_all_pages("/loans/status/active")
+    log.info("  → %d active loan(s)", len(all_loans))
+
+    our_offers = [r for r in all_offers if r.get("creator") == WALLET_PUBKEY]
+    collateral_mints = list({
+        _mint_from_asset(r.get("collateral", {})) or r.get("collateralMint", "")
+        for r in our_offers
+    })
+    log.info("Fetching live prices for %d collateral token(s) …", len(collateral_mints))
+    live_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
+    decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
+
+    log.info("Computing market-wide LTV data for %d collateral token(s) …", len(collateral_mints))
+    market_ltv_stats = fetch_market_ltv_stats(set(collateral_mints), all_offers, all_loans)
+
     total_fail = 0
     for days in strategies:
-        _, _, fail = check_strategy(days)
+        _, _, fail = check_strategy(days, all_offers, live_prices, decimals_map, market_ltv_stats)
         total_fail += fail
 
     log.info("")

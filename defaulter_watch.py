@@ -319,6 +319,33 @@ def print_report(
 
     log.info("")
     log.info("=" * 100)
+    log.info("ACTIONABLE — watchlisted borrowers with a loan expiring within 24h (or already overdue)")
+    log.info("=" * 100)
+    any_expiring_soon = False
+    for t in targets:
+        for l in active_loans_by_addr.get(t["borrower"], []):
+            expired_at = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
+            hrs_left = (expired_at - now).total_seconds() / 3600.0
+            if hrs_left > 24:
+                continue
+            any_expiring_soon = True
+            actionable = True
+            cmint = l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
+            meta = l.get("metadata") or {}
+            p_usd = meta.get("startPrincipalAmountUsd")
+            when = f"overdue by {abs(hrs_left):.1f}h" if hrs_left < 0 else f"expires in {hrs_left:.1f}h"
+            log.info("")
+            log.info("  borrower        : %s  (%.0f defaults, %.0f late repayments, $%.2f known surplus)",
+                      t["borrower"], t["defaults"], t["late_repays"], t["surplus_usd"])
+            log.info("  loan            : %s", l.get("pubkey"))
+            log.info("  borrowed        : %s against %s", f"${p_usd:,.2f}" if p_usd else "n/a", symbol_for(cmint))
+            log.info("  current lender  : %s", l.get("lender"))
+            log.info("  status          : %s", when)
+    if not any_expiring_soon:
+        log.info("  none right now")
+
+    log.info("")
+    log.info("=" * 100)
     log.info("Currently active loans by watchlisted borrowers (watch expiry — they may reborrow)")
     log.info("=" * 100)
     any_active = False

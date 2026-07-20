@@ -248,7 +248,30 @@ python defaulter_watch.py --min-surplus 100
 python defaulter_watch.py --top 15
 ```
 
-For each watchlisted borrower, the report checks whether they currently have an open borrow request (actionable now) or an active loan (worth tracking for its expiry, since they may return to borrow again). Never signs or submits anything — meant to be run periodically to catch a borrow request while it's still open. Exit code `1` if any watchlisted borrower has an open request right now, `0` otherwise.
+For each watchlisted borrower, the report flags two actionable conditions: an open borrow request right now, or an active loan expiring within 24h (they may return to borrow again). Never signs or submits anything — meant to be run periodically to catch these while they're still relevant. Exit code `1` if either condition applies to any watchlisted borrower, `0` otherwise.
+
+## Automated capture (`defaulter_capture.py`)
+
+Reacts to the actionable conditions from `defaulter_watch.py` by posting a competitive lending offer into that same collateral pool — sized from `allocation_config.yaml` exactly like the strategy scripts, not a special override. Pricing targets the single largest live offer already in the pool (excluding our own) — the offer a borrower comparison-shopping the pool is actually most likely to pick, not a pool-wide average — and is bounded, not a race to win at any cost:
+
+- **APY**: undercuts the largest offer's APY by a small, fixed margin.
+- **LTV**: a small edge above the largest offer's LTV, capped by the same `effective_target_ltv()` safety ceiling used in the strategy scripts (§4) — a borrower's historical profitability never overrides this cap.
+- **Duration**: matches the largest offer's own duration, since that's the specific listing being targeted.
+
+A collateral not listed in `allocation_config.yaml` (or listed at 0%) is skipped, same as a normal strategy run.
+
+```bash
+# DRY_RUN is respected exactly like every other script here (see .env)
+python defaulter_capture.py
+
+# Only act on borrowers above a surplus threshold, matching defaulter_watch.py
+python defaulter_capture.py --min-surplus 100
+
+# Skip the signing-mode confirmation prompt
+python defaulter_capture.py --yes
+```
+
+Every offer's principal, collateral, target LTV, and target APY is logged in full immediately before signing — one transaction at a time, so each can be verified before it lands on-chain. Exit code `1` if nothing was actionable (nothing to do), `0` otherwise.
 
 ## Setup
 

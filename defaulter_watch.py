@@ -1,10 +1,20 @@
 """
-Offerbook Repeat-Defaulter Watchlist
+Offerbook Repeat-Defaulter / Late-Payer Watchlist
 ======================================
-Scans the full defaulted-loan history to find borrowers whose collateral has
-historically been worth more than the principal they defaulted on ("surplus"
-to whichever lender seized it) — i.e. borrowers worth lending to again, since
-history suggests a default nets the lender a profit rather than a loss.
+Scans the full loan history (defaulted AND repaid) to find borrowers who are
+worth lending to again because history shows a positive outcome for the
+lender even when this borrower doesn't pay on time:
+
+  - DEFAULTED loans where the seized collateral was worth more than the
+    principal (a straight surplus for whoever claimed it), and
+  - REPAID loans that were paid back LATE (repayment happened after the
+    loan's expiredAt) where the collateral was ALSO worth more than
+    principal at the time — i.e. a lenient lender let this borrower slide
+    past the deadline instead of claiming the (profitable) default. These
+    borrowers got away with being sloppy once; nothing about that history
+    suggests they'll suddenly become punctual, and a lender who claims
+    promptly at expiry (instead of extending leniency) stands to profit
+    from the same behavior next time.
 
 For each such borrower, checks whether they currently:
   - have an open borrow request (actionable now — you could fill it directly)
@@ -12,7 +22,7 @@ For each such borrower, checks whether they currently:
 
 Read-only: never signs or submits anything. Meant to be run periodically
 (manually, via cron, or the /loop skill) to catch borrow requests from known
-repeat defaulters while they're still open.
+repeat defaulters/late-payers while they're still open.
 
 Usage:
   python defaulter_watch.py                    # any positive historical surplus
@@ -111,33 +121,35 @@ def symbol_for(mint: str) -> str:
 # Watchlist computation
 # ---------------------------------------------------------------------------
 
-def compute_target_borrowers(min_surplus: float) -> list[dict]:
-    """
-    Return borrowers whose total historical (collateral - principal) surplus
-    across all their defaulted loans exceeds min_surplus, sorted by surplus
-    descending.
+def _new_borrower_entry() -> dict:
+    return {"count": 0, "principal_usd": 0.0, "collateral_usd": 0.0, "collateral_mints": defaultdict(int)}
 
-    Uses each defaulted loan's USD value AT THE TIME OF DEFAULT (metadata's
-    "end" fields, falling back to "start" if a loan closed before end values
-    were recorded) — this is a snapshot of historical outcomes, not a live
-    repricing, which is fine for a watchlist but shouldn't be treated as a
-    live LTV figure.
+
+def _loan_usd_values(l: dict) -> tuple[float, float]:
+    """(principal_usd, collateral_usd) at loan close, falling back to origination values."""
+    meta = l.get("metadata") or {}
+    p_usd = meta.get("endPrincipalAmountUsd") or meta.get("startPrincipalAmountUsd") or 0
+    c_usd = meta.get("endCollateralAmountUsd") or meta.get("startCollateralAmountUsd") or 0
+    return p_usd, c_usd
+
+
+def compute_defaulted_stats() -> dict[str, dict]:
+    """
+    Per-borrower stats from ALL defaulted loans (no surplus filtering yet — see
+    merge_target_borrowers). Uses USD values AT THE TIME OF DEFAULT (metadata's
+    "end" fields, falling back to "start"): a snapshot of historical outcomes,
+    not a live repricing.
     """
     log.info("Fetching full defaulted-loan history …")
     defaulted = _fetch_all_pages("/loans/status/defaulted")
     log.info("  → %d defaulted loan(s) fetched", len(defaulted))
 
-    by_borrower: dict[str, dict] = defaultdict(lambda: {
-        "count": 0, "principal_usd": 0.0, "collateral_usd": 0.0, "collateral_mints": defaultdict(int),
-    })
-
+    by_borrower: dict[str, dict] = defaultdict(_new_borrower_entry)
     for l in defaulted:
         borrower = l.get("borrower")
         if not borrower:
             continue
-        meta = l.get("metadata") or {}
-        p_usd = meta.get("endPrincipalAmountUsd") or meta.get("startPrincipalAmountUsd") or 0
-        c_usd = meta.get("endCollateralAmountUsd") or meta.get("startCollateralAmountUsd") or 0
+        p_usd, c_usd = _loan_usd_values(l)
         cmint = l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
 
         entry = by_borrower[borrower]
@@ -146,19 +158,81 @@ def compute_target_borrowers(min_surplus: float) -> list[dict]:
         entry["collateral_usd"] += c_usd
         entry["collateral_mints"][cmint] += 1
 
+    return by_borrower
+
+
+def compute_late_repayer_stats() -> dict[str, dict]:
+    """
+    Per-borrower stats from REPAID loans that were paid back after their
+    expiredAt (a lenient lender let them slide instead of claiming default)
+    AND where collateral was individually worth more than principal at the
+    time — i.e. loans that would have been a profitable default had the
+    lender not extended leniency. Loans failing either condition are simply
+    not counted; a borrower with no qualifying late-and-profitable loan
+    contributes nothing here.
+    """
+    log.info("Fetching full repaid-loan history …")
+    repaid = _fetch_all_pages("/loans/status/repaid")
+    log.info("  → %d repaid loan(s) fetched", len(repaid))
+
+    by_borrower: dict[str, dict] = defaultdict(_new_borrower_entry)
+    for l in repaid:
+        borrower = l.get("borrower")
+        if not borrower:
+            continue
+        try:
+            expired = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
+            updated = datetime.fromisoformat(l["updatedAt"].replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if updated <= expired:
+            continue  # repaid on time — not a leniency case
+
+        p_usd, c_usd = _loan_usd_values(l)
+        if c_usd <= p_usd:
+            continue  # late, but not individually profitable — skip per the "positive collateral wise" rule
+        cmint = l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
+
+        entry = by_borrower[borrower]
+        entry["count"] += 1
+        entry["principal_usd"] += p_usd
+        entry["collateral_usd"] += c_usd
+        entry["collateral_mints"][cmint] += 1
+
+    return by_borrower
+
+
+def merge_target_borrowers(
+    defaulted_stats: dict[str, dict], late_stats: dict[str, dict], min_surplus: float
+) -> list[dict]:
+    """Combine defaulted + late-repayer stats per borrower, filter by total surplus, sort descending."""
+    all_borrowers = set(defaulted_stats) | set(late_stats)
     targets = []
-    for borrower, s in by_borrower.items():
-        surplus = s["collateral_usd"] - s["principal_usd"]
-        if surplus > min_surplus:
-            main_mint = max(s["collateral_mints"], key=s["collateral_mints"].get)
-            targets.append({
-                "borrower": borrower,
-                "defaults": s["count"],
-                "principal_usd": s["principal_usd"],
-                "collateral_usd": s["collateral_usd"],
-                "surplus_usd": surplus,
-                "main_collateral_mint": main_mint,
-            })
+    for borrower in all_borrowers:
+        d = defaulted_stats.get(borrower, _new_borrower_entry())
+        r = late_stats.get(borrower, _new_borrower_entry())
+        principal_usd = d["principal_usd"] + r["principal_usd"]
+        collateral_usd = d["collateral_usd"] + r["collateral_usd"]
+        surplus = collateral_usd - principal_usd
+        if surplus <= min_surplus:
+            continue
+
+        mints: dict[str, int] = defaultdict(int)
+        for mint, n in d["collateral_mints"].items():
+            mints[mint] += n
+        for mint, n in r["collateral_mints"].items():
+            mints[mint] += n
+        main_mint = max(mints, key=mints.get)
+
+        targets.append({
+            "borrower": borrower,
+            "defaults": d["count"],
+            "late_repays": r["count"],
+            "principal_usd": principal_usd,
+            "collateral_usd": collateral_usd,
+            "surplus_usd": surplus,
+            "main_collateral_mint": main_mint,
+        })
 
     targets.sort(key=lambda t: -t["surplus_usd"])
     return targets
@@ -229,8 +303,8 @@ def print_report(
             p_usd = meta.get("principalAmountUsd")
             c_usd = meta.get("collateralAmountUsd")
             log.info("")
-            log.info("  borrower        : %s  (%.0f historical defaults, $%.2f known surplus)",
-                      t["borrower"], t["defaults"], t["surplus_usd"])
+            log.info("  borrower        : %s  (%.0f defaults, %.0f late repayments, $%.2f known surplus)",
+                      t["borrower"], t["defaults"], t["late_repays"], t["surplus_usd"])
             log.info("  offer           : %s", o.get("pubkey"))
             log.info("  wants to borrow : %s%s", symbol_for(pmint), f"  (~${p_usd:,.2f})" if p_usd else "")
             log.info("  collateral      : %s%s", symbol_for(cmint), f"  (~${c_usd:,.2f})" if c_usd else "")
@@ -265,12 +339,12 @@ def print_report(
     log.info("=" * 100)
     log.info("Full watchlist (top %d by historical surplus)", top)
     log.info("=" * 100)
-    col = "{:<45}  {:>9}  {:>14}  {:>14}  {:>12}  {}"
-    log.info(col.format("borrower", "defaults", "principal $", "collateral $", "surplus $", "main collateral"))
-    log.info("-" * 120)
+    col = "{:<45}  {:>9}  {:>12}  {:>14}  {:>14}  {:>12}  {}"
+    log.info(col.format("borrower", "defaults", "late repays", "principal $", "collateral $", "surplus $", "main collateral"))
+    log.info("-" * 135)
     for t in targets[:top]:
         log.info(col.format(
-            t["borrower"], t["defaults"],
+            t["borrower"], t["defaults"], t["late_repays"],
             f"{t['principal_usd']:,.2f}", f"{t['collateral_usd']:,.2f}", f"{t['surplus_usd']:,.2f}",
             symbol_for(t["main_collateral_mint"]),
         ))
@@ -284,7 +358,8 @@ def print_report(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Watch for borrow requests from Offerbook borrowers whose past defaults netted lenders a surplus."
+        description="Watch for borrow requests from Offerbook borrowers whose past defaults or late "
+                    "repayments netted lenders a surplus."
     )
     parser.add_argument(
         "--min-surplus", type=float, default=0.0,
@@ -296,11 +371,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    targets = compute_target_borrowers(args.min_surplus)
+    defaulted_stats = compute_defaulted_stats()
+    late_stats = compute_late_repayer_stats()
+    targets = merge_target_borrowers(defaulted_stats, late_stats, args.min_surplus)
     log.info("Watchlist: %d borrower(s) with > $%.2f historical surplus", len(targets), args.min_surplus)
 
     if not targets:
-        log.info("Nothing to watch — no borrower has a positive historical default surplus above the threshold.")
+        log.info("Nothing to watch — no borrower has a positive historical surplus (default or late repayment) above the threshold.")
         sys.exit(0)
 
     target_addrs = {t["borrower"] for t in targets}

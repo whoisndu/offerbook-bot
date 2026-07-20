@@ -300,6 +300,16 @@ class PairStats:
     loan_principal_amounts: list[int] = field(default_factory=list)
     loan_collateral_amounts: list[int] = field(default_factory=list)
 
+    # The single largest live lending offer for this pair (any duration), by
+    # principal USD — a borrower comparison-shopping the pool is most likely
+    # to pick this one. Used as an extra safety guardrail (never a driver of
+    # aggressiveness): our own target can be tightened toward this offer's
+    # terms if they're more conservative than the weighted-mean-derived
+    # target, but never loosened past it.
+    largest_offer_principal_usd: float = 0.0
+    largest_offer_apy_bps: int | None = None
+    largest_offer_ltv: float | None = None
+
     @property
     def mean_apy_bps(self) -> float | None:
         # Prefer same-duration offers; fall back to global cross-duration mean.
@@ -670,6 +680,7 @@ def effective_target_ltv(
     market_sample_count: int = 0,
     market_total_volume_usd: float = 0.0,
     our_offer_usdc: float = 0.0,
+    largest_offer_ltv: float | None = None,
 ) -> float:
     """
     Per-token dynamic LTV target — see the constants block above for the full rule.
@@ -685,18 +696,29 @@ def effective_target_ltv(
     target a discount below their own market rate; mature tokens target a premium
     above it (less collateral required than the market average, to be more
     competitive). HARD_LTV_CEILING always applies on top.
+
+    largest_offer_ltv, when provided, is the LTV of this pair's single largest
+    live lending offer (see PairStats.largest_offer_ltv). If it's MORE
+    conservative (lower) than whatever this function would otherwise target,
+    the result is capped down to match it — this can only make the result
+    safer, never more aggressive, guarding against the weighted-mean benchmark
+    being looser than what the market's most prominent participant actually
+    accepts (e.g. because it's skewed by several small, thin offers).
     """
     has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
     has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
 
     if not market_weighted_ltv or not has_enough_data:
-        return min(FALLBACK_LTV, HARD_LTV_CEILING)
-
-    age_days = _token_age_days(collateral_mint)
-    if age_days is not None and age_days >= YOUNG_TOKEN_AGE_DAYS:
-        target = market_weighted_ltv / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT)
+        target = FALLBACK_LTV
     else:
-        target = market_weighted_ltv - YOUNG_TOKEN_DISCOUNT
+        age_days = _token_age_days(collateral_mint)
+        if age_days is not None and age_days >= YOUNG_TOKEN_AGE_DAYS:
+            target = market_weighted_ltv / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT)
+        else:
+            target = market_weighted_ltv - YOUNG_TOKEN_DISCOUNT
+
+    if largest_offer_ltv is not None:
+        target = min(target, largest_offer_ltv)
 
     return max(min(target, HARD_LTV_CEILING), 0.05)
 
@@ -709,6 +731,7 @@ def safe_collateral_amount(
     market_weighted_ltv: float | None = None,
     market_sample_count: int = 0,
     market_total_volume_usd: float = 0.0,
+    largest_offer_ltv: float | None = None,
 ) -> int | None:
     """
     Return the collateral raw amount required so that LTV == effective_target_ltv(...) at
@@ -726,7 +749,8 @@ def safe_collateral_amount(
     """
     principal_usdc = principal_raw / 10 ** USDC_DECIMALS
     required_collateral_usdc = principal_usdc / effective_target_ltv(
-        collateral_mint, market_weighted_ltv, market_sample_count, market_total_volume_usd, principal_usdc
+        collateral_mint, market_weighted_ltv, market_sample_count, market_total_volume_usd,
+        principal_usdc, largest_offer_ltv,
     )
     price_per_token = current_prices.get(collateral_mint)
     decimals = decimals_map.get(collateral_mint)
@@ -768,6 +792,10 @@ def build_pair_stats(
             ps.offer_ltv_weights_usd.append(offer.principal_usd or 0)
         if offer.collateral_usd and offer.collateral_amount > 0:
             ps.offer_collateral_prices_per_raw.append(offer.collateral_usd / offer.collateral_amount)
+        if offer.principal_usd and offer.principal_usd > ps.largest_offer_principal_usd:
+            ps.largest_offer_principal_usd = offer.principal_usd
+            ps.largest_offer_apy_bps = offer.apy
+            ps.largest_offer_ltv = offer.ltv
 
     for loan in active_loans:
         ps = get_or_create(loan.pair)
@@ -800,6 +828,12 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
     if target_apy is None:
         log.debug("Skipping %s/%s – no market APY reference", ps.principal_mint[:8], ps.collateral_mint[:8])
         return None
+
+    # Guardrail: never undercut the single largest live offer's APY, even if
+    # the weighted-mean target would otherwise be lower — that offer is the
+    # one a borrower comparison-shopping the pool is most likely to pick.
+    if ps.largest_offer_apy_bps is not None:
+        target_apy = max(target_apy, ps.largest_offer_apy_bps)
 
     # Size the offer: use the median principal amount from existing offers
     principal_amount = ps.median_principal_amount
@@ -1219,6 +1253,7 @@ def main() -> None:
                 market_weighted_ltv=ps.weighted_mean_ltv_usd,
                 market_sample_count=len(ps.offer_ltv_usds),
                 market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
+                largest_offer_ltv=ps.largest_offer_ltv,
             )
 
             if collateral_raw is None:
@@ -1239,7 +1274,7 @@ def main() -> None:
             pool_price = ps.median_collateral_price_per_raw
             pair_max_ltv = effective_target_ltv(
                 ps.collateral_mint, ps.weighted_mean_ltv_usd, len(ps.offer_ltv_usds),
-                sum(ps.offer_ltv_weights_usd), principal_usdc,
+                sum(ps.offer_ltv_weights_usd), principal_usdc, ps.largest_offer_ltv,
             )
             if pool_price and pool_price > 0 and collateral_raw > 0:
                 ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)

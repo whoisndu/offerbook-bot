@@ -230,6 +230,26 @@ DRY_RUN=true python cancel_offers.py
 
 The script identifies each strategy's offers by their `duration` field (259 200 / 604 800 / 1 296 000 seconds) so only the right orders are touched.
 
+## Collateral-coverage watchlist (`defaulter_watch.py`)
+
+A read-only analytics scanner over the platform's full loan history (defaulted and repaid), used to identify borrowers whose positions have historically been fully covered by collateral value from a lender's perspective — a more direct signal of downside risk than repayment punctuality alone. It combines two signals per borrower:
+
+- **Defaulted loans** where collateral value at default exceeded the outstanding principal (full recovery for whoever held the loan).
+- **Repaid loans that closed after their `expiredAt`** (a late repayment the original lender chose not to enforce) where collateral value also exceeded principal at the time — i.e. the lender's capital was covered throughout regardless of repayment timing.
+
+```bash
+# Any borrower with positive historical collateral coverage
+python defaulter_watch.py
+
+# Only borrowers with more than $100 in aggregate historical surplus
+python defaulter_watch.py --min-surplus 100
+
+# Limit the reference table to the top 15 rows
+python defaulter_watch.py --top 15
+```
+
+For each watchlisted borrower, the report checks whether they currently have an open borrow request (actionable now) or an active loan (worth tracking for its expiry, since they may return to borrow again). Never signs or submits anything — meant to be run periodically to catch a borrow request while it's still open. Exit code `1` if any watchlisted borrower has an open request right now, `0` otherwise.
+
 ## Setup
 
 ### 1. Install dependencies

@@ -1,28 +1,33 @@
 """
-Offerbook Repeat-Defaulter / Late-Payer Watchlist
+Offerbook Collateral-Coverage Watchlist
 ======================================
-Scans the full loan history (defaulted AND repaid) to find borrowers who are
-worth lending to again because history shows a positive outcome for the
-lender even when this borrower doesn't pay on time:
+Scans the full loan history (defaulted and repaid) to identify borrowers
+whose positions have historically been well-collateralized from a lender's
+perspective, based on two signals:
 
   - DEFAULTED loans where the seized collateral was worth more than the
-    principal (a straight surplus for whoever claimed it), and
-  - REPAID loans that were paid back LATE (repayment happened after the
-    loan's expiredAt) where the collateral was ALSO worth more than
-    principal at the time — i.e. a lenient lender let this borrower slide
-    past the deadline instead of claiming the (profitable) default. These
-    borrowers got away with being sloppy once; nothing about that history
-    suggests they'll suddenly become punctual, and a lender who claims
-    promptly at expiry (instead of extending leniency) stands to profit
-    from the same behavior next time.
+    outstanding principal at the time of default (full principal recovery
+    for the lender), and
+  - REPAID loans that closed after their stipulated expiredAt (a late
+    repayment, tolerated by the original lender rather than enforced) where
+    collateral value also exceeded principal at the time — i.e. positions
+    where the lender's capital was fully covered by collateral throughout,
+    independent of whether the repayment was timely.
+
+Repayment timeliness on this protocol carries no penalty beyond the
+lender's discretion to enforce the expiry, so a borrower's on-time-repayment
+rate isn't necessarily predictive of future timeliness. This watchlist
+instead ranks borrowers by demonstrated collateral coverage — a more
+directly relevant signal for a lender's downside risk than repayment
+punctuality alone.
 
 For each such borrower, checks whether they currently:
   - have an open borrow request (actionable now — you could fill it directly)
-  - have an active loan (watch its expiry — they may come back to reborrow)
+  - have an active loan (watch its expiry — they may return to borrow again)
 
 Read-only: never signs or submits anything. Meant to be run periodically
-(manually, via cron, or the /loop skill) to catch borrow requests from known
-repeat defaulters/late-payers while they're still open.
+(manually, via cron, or the /loop skill) to surface borrow requests from
+watchlisted borrowers while they're still open.
 
 Usage:
   python defaulter_watch.py                    # any positive historical surplus
@@ -163,13 +168,12 @@ def compute_defaulted_stats() -> dict[str, dict]:
 
 def compute_late_repayer_stats() -> dict[str, dict]:
     """
-    Per-borrower stats from REPAID loans that were paid back after their
-    expiredAt (a lenient lender let them slide instead of claiming default)
-    AND where collateral was individually worth more than principal at the
-    time — i.e. loans that would have been a profitable default had the
-    lender not extended leniency. Loans failing either condition are simply
-    not counted; a borrower with no qualifying late-and-profitable loan
-    contributes nothing here.
+    Per-borrower stats from REPAID loans that closed after their expiredAt
+    (the original lender chose not to enforce the expiry) AND where
+    collateral value individually exceeded principal at the time — i.e.
+    loans where the lender's downside was fully covered by collateral
+    regardless of the late repayment. Loans failing either condition are
+    not counted; a borrower with no qualifying loan contributes nothing here.
     """
     log.info("Fetching full repaid-loan history …")
     repaid = _fetch_all_pages("/loans/status/repaid")
@@ -186,11 +190,11 @@ def compute_late_repayer_stats() -> dict[str, dict]:
         except (KeyError, ValueError):
             continue
         if updated <= expired:
-            continue  # repaid on time — not a leniency case
+            continue  # repaid on time — no signal to capture here
 
         p_usd, c_usd = _loan_usd_values(l)
         if c_usd <= p_usd:
-            continue  # late, but not individually profitable — skip per the "positive collateral wise" rule
+            continue  # late, but collateral didn't cover principal — not a fully-covered position
         cmint = l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
 
         entry = by_borrower[borrower]
@@ -289,7 +293,7 @@ def print_report(
 
     log.info("")
     log.info("=" * 100)
-    log.info("ACTIONABLE — open borrow requests from known repeat/profitable defaulters")
+    log.info("ACTIONABLE — open borrow requests from watchlisted borrowers")
     log.info("=" * 100)
     any_open = False
     for t in targets:
@@ -359,7 +363,7 @@ def print_report(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Watch for borrow requests from Offerbook borrowers whose past defaults or late "
-                    "repayments netted lenders a surplus."
+                    "repayments were fully covered by collateral value."
     )
     parser.add_argument(
         "--min-surplus", type=float, default=0.0,

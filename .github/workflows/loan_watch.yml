@@ -2,7 +2,7 @@ name: Loan expiry watch
 
 on:
   schedule:
-    - cron: "17 */2 * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch: {}
 
 permissions:

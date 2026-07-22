@@ -10,5 +10,17 @@
     "expiredAt": "2026-07-18T08:37:32Z",
     "lender": "CnnaudqeP1m8mJwFPPG6CJ8xYaPxDJbHE4byoTPgcKhe",
     "principal_usd": 3788.0679314393965
+  },
+  "HoLKU76kk4Bopw9rMycDDGSjYdVphAZpeHyYWcYxMP2r": {
+    "borrower": "4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ",
+    "expiredAt": "2026-07-22T18:56:52Z",
+    "lender": "13UHfjKr6rpKwRXQ1KGAMcwjtY7eYBA2B5m9RBgxrFBz",
+    "principal_usd": 9998.301698240683
+  },
+  "nEQboVhXUkXTsqcWgJ9wum5xvB2Uan3e1Qc5rYtujt1": {
+    "borrower": "6Yi99tYPredxSnm7SXporVs7cfLkEoNZqMmrtPaTvKKy",
+    "expiredAt": "2026-07-22T17:52:52Z",
+    "lender": "23MeNoGzz7aZGqfWANraiDesHC891JTEQ9sbXtvm1kGU",
+    "principal_usd": 10.110781420739135
   }
 }

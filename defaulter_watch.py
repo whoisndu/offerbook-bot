@@ -47,8 +47,10 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
+import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -60,6 +62,12 @@ load_dotenv()
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PAGE_SIZE = 100
+
+# Private, gitignored, ever-growing ledger of borrowers worth watching — see
+# load_defaulter_config()/save_defaulter_config() below. Never committed:
+# this is a personal risk-tracking record, not something to publish alongside
+# the public strategy code.
+DEFAULTER_CONFIG_PATH = Path(__file__).parent / "defaulter_config.yaml"
 
 KNOWN_SYMBOLS: dict[str, str] = {
     "So11111111111111111111111111111111111111112": "SOL",
@@ -242,6 +250,116 @@ def merge_target_borrowers(
     return targets
 
 
+def find_newly_overdue_first_timers(
+    all_active_loans: list[dict], known_addrs: set[str], now: datetime
+) -> dict[str, list[dict]]:
+    """
+    Borrowers with an active loan already past its expiredAt right now, who
+    have NO resolved default/late-repay history yet (so compute_defaulted_stats/
+    compute_late_repayer_stats can't see them at all). A borrower's first-ever
+    loan sitting overdue is itself a signal worth tracking, even before we know
+    how it resolves — this is what surfaces cases like a first-time borrower
+    stuck at 96h overdue that the historical-surplus watchlist has no way to
+    catch on its own.
+    """
+    by_addr: dict[str, list[dict]] = defaultdict(list)
+    for l in all_active_loans:
+        borrower = l.get("borrower")
+        if not borrower or borrower in known_addrs:
+            continue
+        try:
+            expired_at = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if expired_at <= now:
+            by_addr[borrower].append(l)
+    return by_addr
+
+
+def load_defaulter_config() -> dict:
+    if DEFAULTER_CONFIG_PATH.exists():
+        return yaml.safe_load(DEFAULTER_CONFIG_PATH.read_text()) or {}
+    return {}
+
+
+def save_defaulter_config(config: dict) -> None:
+    header = (
+        "# Personal defaulter/late-payer watchlist — auto-maintained by defaulter_watch.py.\n"
+        "# NEVER commit this file (see .gitignore) — it's a private risk-tracking ledger, not\n"
+        "# something to publish alongside the public strategy code.\n"
+        "#\n"
+        "# Entries are upserted every run for whichever borrowers currently qualify (proven\n"
+        "# historical surplus, or a first-ever loan sitting overdue with no history yet).\n"
+        "# first_seen is preserved across runs. Borrowers who don't qualify on a given run are\n"
+        "# left untouched rather than removed, so last_updated/currently_overdue can go stale —\n"
+        "# this file is a permanent ledger, not a live status board.\n\n"
+    )
+    DEFAULTER_CONFIG_PATH.write_text(header + yaml.safe_dump(config, sort_keys=True, default_flow_style=False))
+
+
+def upsert_defaulter_config(
+    config: dict,
+    targets: list[dict],
+    active_loans_by_addr: dict[str, list[dict]],
+    newly_overdue_by_addr: dict[str, list[dict]],
+    now: datetime,
+) -> int:
+    """Upsert config entries for every borrower qualifying this run. Returns count of brand-new entries."""
+    now_iso = now.isoformat()
+    new_count = 0
+
+    for t in targets:
+        borrower = t["borrower"]
+        existing = config.get(borrower, {})
+        if not existing:
+            new_count += 1
+        is_overdue = False
+        for l in active_loans_by_addr.get(borrower, []):
+            try:
+                expired_at = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                continue
+            if expired_at <= now:
+                is_overdue = True
+                break
+        config[borrower] = {
+            "first_seen": existing.get("first_seen", now_iso),
+            "last_updated": now_iso,
+            "defaults": t["defaults"],
+            "late_repayments": t["late_repays"],
+            "principal_usd": round(t["principal_usd"], 2),
+            "collateral_usd": round(t["collateral_usd"], 2),
+            "surplus_usd": round(t["surplus_usd"], 2),
+            "main_collateral": t["main_collateral_mint"],
+            "currently_overdue": is_overdue,
+            "source": "historical",
+        }
+
+    for borrower, loans in newly_overdue_by_addr.items():
+        if borrower in config and config[borrower].get("source") == "historical":
+            continue  # already tracked with real history — don't downgrade the entry
+        existing = config.get(borrower, {})
+        if not existing:
+            new_count += 1
+        principal_usd = sum((l.get("metadata") or {}).get("startPrincipalAmountUsd") or 0 for l in loans)
+        collateral_usd = sum((l.get("metadata") or {}).get("startCollateralAmountUsd") or 0 for l in loans)
+        cmint = loans[0].get("collateralMint") or _mint_from_asset(loans[0].get("collateral", {}))
+        config[borrower] = {
+            "first_seen": existing.get("first_seen", now_iso),
+            "last_updated": now_iso,
+            "defaults": 0,
+            "late_repayments": 0,
+            "principal_usd": round(principal_usd, 2),
+            "collateral_usd": round(collateral_usd, 2),
+            "surplus_usd": 0.0,
+            "main_collateral": cmint,
+            "currently_overdue": True,
+            "source": "currently_overdue_first_time",
+        }
+
+    return new_count
+
+
 def fetch_open_borrow_offers(target_addrs: set[str]) -> dict[str, list[dict]]:
     """Open (active/partiallyFilled) borrow offers from any of the target addresses."""
     log.info("Fetching open borrow offers market-wide …")
@@ -264,14 +382,17 @@ def fetch_open_borrow_offers(target_addrs: set[str]) -> dict[str, list[dict]]:
     return by_addr
 
 
-def fetch_active_loans_as_borrower(target_addrs: set[str]) -> dict[str, list[dict]]:
-    """Currently active loans where the borrower is one of the target addresses."""
+def fetch_all_active_loans() -> list[dict]:
     log.info("Fetching active loans market-wide …")
     raw = _fetch_all_pages("/loans/status/active")
     log.info("  → %d active loan(s) market-wide", len(raw))
+    return raw
 
+
+def group_active_loans_by_borrower(all_active_loans: list[dict], target_addrs: set[str]) -> dict[str, list[dict]]:
+    """Currently active loans where the borrower is one of the target addresses."""
     by_addr: dict[str, list[dict]] = defaultdict(list)
-    for l in raw:
+    for l in all_active_loans:
         borrower = l.get("borrower")
         if borrower in target_addrs:
             by_addr[borrower].append(l)
@@ -285,6 +406,7 @@ def print_report(
     targets: list[dict],
     open_offers_by_addr: dict[str, list[dict]],
     active_loans_by_addr: dict[str, list[dict]],
+    newly_overdue_by_addr: dict[str, list[dict]],
     top: int,
 ) -> bool:
     """Prints the report. Returns True if anything is actionable right now."""
@@ -368,6 +490,28 @@ def print_report(
 
     log.info("")
     log.info("=" * 100)
+    log.info("NEWLY OBSERVED — first-time borrowers with a loan already overdue, no prior history yet")
+    log.info("=" * 100)
+    if not newly_overdue_by_addr:
+        log.info("  none right now")
+    else:
+        for borrower, loans in newly_overdue_by_addr.items():
+            for l in loans:
+                expired_at = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
+                hrs_late = (now - expired_at).total_seconds() / 3600.0
+                cmint = l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
+                meta = l.get("metadata") or {}
+                p_usd = meta.get("startPrincipalAmountUsd")
+                log.info("")
+                log.info("  borrower        : %s  (no resolved history — first loan overdue)", borrower)
+                log.info("  loan            : %s", l.get("pubkey"))
+                log.info("  borrowed        : %s against %s", f"${p_usd:,.2f}" if p_usd else "n/a", symbol_for(cmint))
+                log.info("  current lender  : %s", l.get("lender"))
+                log.info("  overdue by      : %.1fh", hrs_late)
+                log.info("  -> added to defaulter_config.yaml for future tracking")
+
+    log.info("")
+    log.info("=" * 100)
     log.info("Full watchlist (top %d by historical surplus)", top)
     log.info("=" * 100)
     col = "{:<45}  {:>9}  {:>12}  {:>14}  {:>14}  {:>12}  {}"
@@ -407,15 +551,28 @@ def main() -> None:
     targets = merge_target_borrowers(defaulted_stats, late_stats, args.min_surplus)
     log.info("Watchlist: %d borrower(s) with > $%.2f historical surplus", len(targets), args.min_surplus)
 
-    if not targets:
-        log.info("Nothing to watch — no borrower has a positive historical surplus (default or late repayment) above the threshold.")
+    target_addrs = {t["borrower"] for t in targets}
+    all_active_loans = fetch_all_active_loans()
+    active_loans_by_addr = group_active_loans_by_borrower(all_active_loans, target_addrs)
+
+    now = datetime.now(timezone.utc)
+    newly_overdue_by_addr = find_newly_overdue_first_timers(all_active_loans, target_addrs, now)
+
+    open_offers_by_addr = fetch_open_borrow_offers(target_addrs) if target_addrs else {}
+
+    config = load_defaulter_config()
+    new_count = upsert_defaulter_config(config, targets, active_loans_by_addr, newly_overdue_by_addr, now)
+    save_defaulter_config(config)
+    log.info(
+        "defaulter_config.yaml: %d borrower(s) tracked total (%d new this run)",
+        len(config), new_count,
+    )
+
+    if not targets and not newly_overdue_by_addr:
+        log.info("Nothing to watch — no historical surplus and no first-time overdue borrower right now.")
         sys.exit(0)
 
-    target_addrs = {t["borrower"] for t in targets}
-    open_offers_by_addr = fetch_open_borrow_offers(target_addrs)
-    active_loans_by_addr = fetch_active_loans_as_borrower(target_addrs)
-
-    actionable = print_report(targets, open_offers_by_addr, active_loans_by_addr, args.top)
+    actionable = print_report(targets, open_offers_by_addr, active_loans_by_addr, newly_overdue_by_addr, args.top)
     sys.exit(1 if actionable else 0)
 
 

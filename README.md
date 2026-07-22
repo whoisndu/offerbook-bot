@@ -250,6 +250,8 @@ python defaulter_watch.py --top 15
 
 For each watchlisted borrower, the report flags two actionable conditions: an open borrow request right now, or an active loan expiring within 24h (they may return to borrow again). Never signs or submits anything — meant to be run periodically to catch these while they're still relevant. Exit code `1` if either condition applies to any watchlisted borrower, `0` otherwise.
 
+It also surfaces first-time borrowers who have no resolved default/late-repay history yet but already have a loan sitting overdue right now — a signal the historical-surplus watchlist alone can't catch, since it only looks at loans that have already resolved. Every borrower who qualifies either way is upserted into `defaulter_config.yaml`, a private, ever-growing tracking ledger (first-seen date, defaults, late repayments, known surplus) that's gitignored and never committed — a personal risk record, not something published alongside the strategy code.
+
 ## Automated capture (`defaulter_capture.py`)
 
 Reacts to the actionable conditions from `defaulter_watch.py` by posting a competitive lending offer into that same collateral pool — sized from `allocation_config.yaml` exactly like the strategy scripts, not a special override. Pricing targets the single largest live offer already in the pool (excluding our own) — the offer a borrower comparison-shopping the pool is actually most likely to pick, not a pool-wide average — and is bounded, not a race to win at any cost:

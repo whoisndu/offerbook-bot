@@ -1,4 +1,10 @@
 {
+  "DzuDArRY8Y17fMj9ok5W5dufzPw9A7BW59ZPQJT9axFG": {
+    "borrower": "4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ",
+    "expiredAt": "2026-07-23T18:57:08Z",
+    "lender": "13UHfjKr6rpKwRXQ1KGAMcwjtY7eYBA2B5m9RBgxrFBz",
+    "principal_usd": 2129.7903519588267
+  },
   "HoLKU76kk4Bopw9rMycDDGSjYdVphAZpeHyYWcYxMP2r": {
     "borrower": "4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ",
     "expiredAt": "2026-07-22T18:56:52Z",

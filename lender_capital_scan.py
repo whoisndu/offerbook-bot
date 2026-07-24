@@ -11,7 +11,9 @@ has ever been one on the platform — "lender" means anyone who:
 
 For each, reports wallet USDC, escrow USDC, and the combined total — the
 free/redeployable capital a competitor could bring to bear, not just what's
-already committed.
+already committed — plus a "last seen" column: the most recent createdAt/
+updatedAt across all of their Offerbook loan/offer records, i.e. purely
+platform activity, not general wallet activity elsewhere.
 
 Every run's balances are persisted to lender_capital_state.json (gitignored —
 like defaulter_config.yaml/tg_watchlist.json, this reveals your own
@@ -81,15 +83,39 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
     return items
 
 
-def fetch_all_lenders() -> set[str]:
+def _parse_ts(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _note_last_seen(last_seen: dict[str, datetime], addr: str, record: dict) -> None:
+    """Track the most recent createdAt/updatedAt seen for this address across any record."""
+    for field in ("updatedAt", "createdAt"):
+        ts = _parse_ts(record.get(field))
+        if ts is not None and (addr not in last_seen or ts > last_seen[addr]):
+            last_seen[addr] = ts
+
+
+def fetch_all_lenders() -> tuple[set[str], dict[str, datetime]]:
     """Union of everyone who is or has ever been a lender: active-loan lenders,
     open-lending-offer creators, and lenders from ALL resolved loan history
     (repaid + defaulted) — so a past lender shows up even if they currently have
-    no active loan or open offer at all."""
+    no active loan or open offer at all. Also returns each lender's most recent
+    createdAt/updatedAt across all of those records, as a "last seen" signal —
+    computed for free from data already being fetched, no extra API calls."""
+    last_seen: dict[str, datetime] = {}
+
     log.info("Fetching active loans …")
     active_loans = _fetch_all_pages("/loans/status/active")
     log.info("  → %d active loan(s)", len(active_loans))
     lenders = {l["lender"] for l in active_loans if l.get("lender")}
+    for l in active_loans:
+        if l.get("lender"):
+            _note_last_seen(last_seen, l["lender"], l)
 
     log.info("Fetching open lending offers …")
     open_offers: list[dict] = []
@@ -100,18 +126,27 @@ def fetch_all_lenders() -> set[str]:
         )
     log.info("  → %d open lending offer(s)", len(open_offers))
     lenders |= {o["creator"] for o in open_offers if o.get("creator")}
+    for o in open_offers:
+        if o.get("creator"):
+            _note_last_seen(last_seen, o["creator"], o)
 
     log.info("Fetching repaid-loan history …")
     repaid = _fetch_all_pages("/loans/status/repaid")
     log.info("  → %d repaid loan(s)", len(repaid))
     lenders |= {l["lender"] for l in repaid if l.get("lender")}
+    for l in repaid:
+        if l.get("lender"):
+            _note_last_seen(last_seen, l["lender"], l)
 
     log.info("Fetching defaulted-loan history …")
     defaulted = _fetch_all_pages("/loans/status/defaulted")
     log.info("  → %d defaulted loan(s)", len(defaulted))
     lenders |= {l["lender"] for l in defaulted if l.get("lender")}
+    for l in defaulted:
+        if l.get("lender"):
+            _note_last_seen(last_seen, l["lender"], l)
 
-    return lenders
+    return lenders, last_seen
 
 
 def wallet_usdc(wallet: str) -> float:
@@ -176,7 +211,20 @@ def scan_balances(lenders: set[str]) -> list[LenderBalance]:
         return list(ex.map(fetch_one, lenders))
 
 
-def print_report(balances: list[LenderBalance], previous: dict, min_total: float, top: int) -> None:
+def format_last_seen(ts: datetime | None) -> str:
+    """Relative time since ts, e.g. '2.3h ago' / '5.1d ago' — or 'unknown' if we
+    never saw a createdAt/updatedAt for this address in any Offerbook record."""
+    if ts is None:
+        return "unknown"
+    hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+    if hours < 48:
+        return f"{hours:.1f}h ago"
+    return f"{hours / 24:.1f}d ago"
+
+
+def print_report(
+    balances: list[LenderBalance], previous: dict, last_seen: dict[str, datetime], min_total: float, top: int
+) -> None:
     balances = [b for b in balances if b.total_usd > min_total]
     balances.sort(key=lambda b: -b.total_usd)
 
@@ -190,9 +238,9 @@ def print_report(balances: list[LenderBalance], previous: dict, min_total: float
     log.info("=" * 100)
     log.info("Lender capital (wallet + escrow USDC) — everyone who is or has ever been a lender")
     log.info("=" * 100)
-    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}"
-    log.info(col.format("lender", "wallet $", "escrow $", "total $", "Δ since last"))
-    log.info("-" * 108)
+    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}  {:>14}"
+    log.info(col.format("lender", "wallet $", "escrow $", "total $", "Δ since last", "last seen"))
+    log.info("-" * 124)
     for b in balances[:top]:
         prev = previous.get(b.lender)
         if prev is None:
@@ -200,8 +248,9 @@ def print_report(balances: list[LenderBalance], previous: dict, min_total: float
         else:
             delta = b.total_usd - prev.get("total_usd", 0.0)
             delta_str = f"{delta:+,.2f}"
-        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}", delta_str))
-    log.info("-" * 108)
+        seen_str = format_last_seen(last_seen.get(b.lender))
+        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}", delta_str, seen_str))
+    log.info("-" * 124)
 
     total_wallet = sum(b.wallet_usd for b in balances)
     total_escrow = sum(b.escrow_usd for b in balances)
@@ -229,10 +278,10 @@ def main() -> None:
 
     previous = load_state()
 
-    lenders = fetch_all_lenders()
+    lenders, last_seen = fetch_all_lenders()
     log.info("Distinct lenders (active loan, open offer, or resolved loan history): %d", len(lenders))
     balances = scan_balances(lenders)
-    print_report(balances, previous, args.min_total, args.top)
+    print_report(balances, previous, last_seen, args.min_total, args.top)
 
     if not args.no_save:
         save_state(balances, previous)

@@ -328,6 +328,43 @@ python loan_watch_notify.py
 gh workflow run loan_watch.yml
 ```
 
+## Real-time deposit watch (`tg_deposit_watch.py`)
+
+Unlike everything else above, this one is **not unattended**. It holds a live websocket subscription to Solana RPC (`accountSubscribe`) so a deposit to a watched wallet triggers a Telegram message within seconds — genuinely real-time, not polling — but only while it's actually running on your machine. Meant to be left open in a terminal (or `tmux`/`screen`) rather than deployed anywhere.
+
+Watches any number of wallets at once. The watchlist persists in `tg_watchlist.json` (gitignored — reveals which wallets you're targeting, kept private the same way `defaulter_config.yaml` is) and can be managed three ways:
+
+```bash
+# One-shot CLI (no need to have the watcher running)
+python tg_deposit_watch.py --add <wallet> [--mint <mint>] [--label <name>]
+python tg_deposit_watch.py --remove <wallet>
+python tg_deposit_watch.py --list
+
+# Interactive console menu
+python tg_deposit_watch.py
+
+# Start the live watcher (long-running)
+python tg_deposit_watch.py --watch
+```
+
+While `--watch` is running, the bot also takes live commands sent to it on Telegram, so you can manage the watchlist from your phone without touching a terminal:
+
+```
+/add <wallet> [mint]   - start watching a wallet (mint optional, defaults to USDC)
+/remove <wallet>       - stop watching a wallet
+/list                  - show the current watchlist
+/help                  - show this command list
+```
+
+Every added/removed wallet is validated as a real Solana pubkey (base58-decodes to exactly 32 bytes) before being accepted — a plain-English label typed where an address was expected (e.g. trying `/add <wallet> mylabel`) gets rejected with an error rather than silently treated as a token mint.
+
+Required env vars (`.env`, gitignored):
+
+```
+TELEGRAM_BOT_TOKEN  - from @BotFather
+TELEGRAM_CHAT_ID    - your chat id (message your bot once, then check https://api.telegram.org/bot<TOKEN>/getUpdates for "chat":{"id":...})
+```
+
 ## Setup
 
 ### 1. Install dependencies

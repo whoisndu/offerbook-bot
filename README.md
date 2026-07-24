@@ -365,6 +365,23 @@ TELEGRAM_BOT_TOKEN  - from @BotFather
 TELEGRAM_CHAT_ID    - your chat id (message your bot once, then check https://api.telegram.org/bot<TOKEN>/getUpdates for "chat":{"id":...})
 ```
 
+## Lender capital scanner (`lender_capital_scan.py`)
+
+Reports wallet + escrow USDC for every wallet currently a lender in any form — anyone with an active loan out, and/or an open lending offer (any status). A one-shot report, not a watcher: useful for sizing up how much free/redeployable capital your competition actually has before you post a big offer.
+
+```bash
+# Everyone, sorted by total descending
+python lender_capital_scan.py
+
+# Only lenders with more than $5,000 total
+python lender_capital_scan.py --min-total 5000
+
+# Limit the printed table to the top 20 rows
+python lender_capital_scan.py --top 20
+```
+
+Read-only, no signing. Exit code is always `0` — this is an informational report, not a pass/fail check.
+
 ## Setup
 
 ### 1. Install dependencies

@@ -250,13 +250,13 @@ allocations:
   # MANIFEST — Manifesting  (ltv ~40%)
   BCdwQBAn8dYB5YjTsoB6TdHAWokxv28k2oZUodERpump: 0.3
 
-  # Cupsey — Cupsey  (ltv unknown)
+  # Cupsey — Cupsey  (ltv ~40%)
   6NwarBvDkXhByqVp2Qkq5i9XbtA2B3Bwe8SWGu9vpump: 0.0
 
   # TripleT — Tung Tung Tung Sahur  (ltv ~39%)
   J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump: 0.0
 
-  # DRIFT — Drift  (ltv unknown)
+  # DRIFT — Drift  (ltv ~50%)
   DriFtupJYLTosbwoN8koMbEYSx54aFAVLddWsbksjwg7: 0.0
 
   # MON — Monad  (ltv ~40%)
@@ -271,7 +271,7 @@ allocations:
   # ANSEM — The Black Bull  (ltv ~41%)
   9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump: 0.9
 
-  # DADDY — DADDY TATE  (ltv unknown)
+  # DADDY — DADDY TATE  (ltv ~37%)
   4Cnk9EPnW5ixfLZatCPJjDB1PUtcRpVVgTQukm9epump: 0.0
 
   # Jotchua — Jotchua  (ltv ~42%)
@@ -304,10 +304,10 @@ allocations:
   # MET — Meteora  (ltv ~52%)
   METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL: 0.0
 
-  # HOODx — Robinhood xStock  (ltv unknown)
+  # HOODx — Robinhood xStock  (ltv ~53%)
   XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg: 0.5
 
-  # GOOGLx — Alphabet xStock  (ltv unknown)
+  # GOOGLx — Alphabet xStock  (ltv ~56%)
   XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN: 0.5
 
   # (ltv ~52%)  — unknown token
@@ -516,7 +516,7 @@ allocations:
   # Newly discovered tokens (allocation defaults to 0.0 — set your % to enable)
   # ---------------------------------------------------------------------------
 
-  # JUICED — JUICED  (ltv unknown)
+  # JUICED — JUICED  (ltv ~90%)
   7GxATsNMnaC88vdwd2t3mwrFuQwwGvmYPrUQ4D6FotXk: 0.0
 
   # PRCL — Parcl  (ltv ~24%)
@@ -527,4 +527,68 @@ allocations:
 
   # (ltv ~55%)  — unknown token
   12mVwFKqCVU5MhrkCmpVBSkK8VdREpFygbU9UvvVkpRq: 0.0
+
+  # ---------------------------------------------------------------------------
+  # Newly discovered tokens (allocation defaults to 0.0 — set your % to enable)
+  # ---------------------------------------------------------------------------
+
+  # CRED — Credible Finance  (ltv ~30%)
+  CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta: 0.0
+
+  # FAF — Flash.Trade  (ltv ~34%)
+  FAFxVxnkzZHMCodkWyoccgUNgVScqMw2mhhQBYDFjFAF: 0.3
+
+  # KET — KET  (ltv ~36%)
+  9Pfync3ejPC9eHqVzq3nYQJAhyhjqpnB9UsaSfLxpump: 0.0
+
+  # Jimothy — Jimothy The Raccoon  (ltv ~48%)
+  Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump: 0.0
+
+  # (ltv ~48%)  — unknown token
+  B9MM2fYFNnFDMxvGqbfSinZErTMDT3PhvcBi2yChVLXf: 0.0
+
+  # GLDx — Gold xStock  (ltv ~51%)
+  Xsv9hRk1z5ystj9MhnA7Lq4vjSsLwzL2nxrwmwtD3re: 0.0
+
+  # INTCx — Intel xStock  (ltv ~53%)
+  XshPgPdXFRWB8tP1j82rebb2Q9rPgGX37RuqzohmArM: 0.0
+
+  # (ltv ~54%)  — unknown token
+  FZZvxF6H2vJEDD41FeELCJMJJA9he2gABFnYTivgc4ei: 0.0
+
+  # COINx — Coinbase xStock  (ltv ~56%)
+  Xs7ZdzSHLU9ftNJsii5fCeJhoRWSC32SQGzGQtePxNu: 0.5
+
+  # ORCA — Orca  (ltv ~64%)
+  orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE: 0.5
+
+  # SKHY — SK Hynix - Backpack Securities  (ltv ~67%)
+  SKHYhSjuRWHgikq8eRKbtBbpABgJSkd7ytQV14i9EQ3: 0.0
+
+  # INTC — Intel - Backpack Securities  (ltv ~68%)
+  iNTCy1qTsUEZQe3DSocLz1ZXXai34Gdw8THQh5rxFaF: 0.5
+
+  # vSOL — The Vault  (ltv ~70%)
+  vSoLxydx6akxyMD9XEcPvGYNGq6Nn66oqVb3UkGkei7: 0.0
+
+  # MSFTx — Microsoft xStock  (ltv ~71%)
+  XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX: 0.5
+
+  # METAx — Meta xStock  (ltv ~71%)
+  Xsa62P5mvPszXL1krVUnU5ar38bBSVcWAB6fmPCo5Zu: 0.0
+
+  # hyloSOL — Hylo Staked SOL  (ltv ~74%)
+  hy1oXYgrBW6PVcJ4s6s2FKavRdwgWTXdfE69AxT7kPT: 0.0
+
+  # BulkSOL — BULK Staked SOL  (ltv ~75%)
+  BULKoNSGzxtCqzwTvg5hFJg8fx6dqZRScyXe5LYMfxrn: 0.0
+
+  # AMZNx — Amazon xStock  (ltv ~75%)
+  Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg: 0.3
+
+  # AAPLx — Apple xStock  (ltv ~76%)
+  XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp: 0.0
+
+  # xBTC — OKX Wrapped BTC  (ltv ~78%)
+  CtzPWv73Sn1dMGVU3ZtLv9yWSyUAanBni19YWDaznnkn: 0.8
 default: 0.0

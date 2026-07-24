@@ -87,6 +87,12 @@ $$r^* = \bar{r}^{(d)} \cdot (1 + \delta)$$
 
 A hard floor $r^* \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
 
+**Largest-offer guardrail.** Let $i^* = \arg\max_{i \in \mathcal{O}} p_i$ be the pair's single largest live lending offer (any duration, excluding our own), with APY $r_{i^*}$ and LTV $\ell_{i^*}$. This is the offer a borrower comparison-shopping the pool is most likely to pick, and the volume-weighted mean can be skewed looser than what that specific offer actually accepts (e.g. dragged down by several small, thin offers). The final APY target is capped up, never down:
+
+$$r^* \leftarrow \max(r^*,\ r_{i^*})$$
+
+This only ever raises the bar — never undercuts the market's most prominent participant — and applies purely as a safety guardrail, not a competitiveness driver; the volume-weighted mean from §1-§3 remains the primary target whenever it's already at least as conservative as $i^*$.
+
 ---
 
 ### 4. Dynamic LTV Target and Safe Collateral Sizing
@@ -105,9 +111,15 @@ $$\bar\ell_k = \frac{\sum_{i \in \mathcal{S}_k} \ell_i \, p_i}{\sum_{i \in \math
 2. **Young token** (enough data, and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \bar\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
 3. **Mature token** (enough data, and age $\geq$ 60 days): $L_k = \bar\ell_k / 0.9$ — the bot accepts 10% less collateral than the market average implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
 
-In every case, $L_k$ is clamped to $[0.05,\ 0.75]$ — the 75% hard ceiling applies no matter how loose an established token's market looks, since an entire market trading at very high LTV is itself a warning sign rather than something to mirror.
+**Largest-offer guardrail.** Using the same $i^*$ (the pair's single largest live offer) from §3, if its LTV $\ell_{i^*}$ is *more* conservative (lower) than whatever $L_k$ would otherwise be, the target is capped down to match it:
 
-Given $L_k$, the minimum collateral the borrower must post is:
+$$L_k \leftarrow \min(L_k,\ \ell_{i^*})$$
+
+This can only make the result safer, never looser — it guards against the volume-weighted benchmark being skewed by several small, thin offers into a target more permissive than what the market's most prominent participant actually accepts.
+
+Finally, $L_k$ is clamped to $[0.05,\ 0.75]$ — the 75% hard ceiling applies no matter how loose an established token's market looks, since an entire market trading at very high LTV is itself a warning sign rather than something to mirror.
+
+Given $L_k$ (after both guardrails and the clamp), the minimum collateral the borrower must post is:
 
 $$C_{\min} = \frac{P \cdot \pi_p}{L_k \cdot \pi_c}$$
 
@@ -174,6 +186,23 @@ python update_config.py
 - Updates comments for previously-unknown tokens where the symbol is now resolved
 
 Symbol resolution tries **Jupiter's token search API** first (`api.jup.ag/tokens/v2/search`, batched) — it indexes far more long-tail/pump.fun/meme tokens than Offerbook's own `/tokens` endpoint — then falls back to Offerbook's registry, then the hardcoded `KNOWN_TOKENS` table (which always wins on conflict). Allocation values already set are never touched, regardless of source.
+
+## Expiring/overdue loan scanner (`soon_to_expire.py`)
+
+Scans all active loans **platform-wide** and surfaces the ones already past their `expiredAt` (still marked "active" — not yet repaid or defaulted) or expiring within a configurable window. Read-only, no signing.
+
+```bash
+# Default: next 48h + already-expired bucket
+python soon_to_expire.py
+
+# Next 24h + already-expired
+python soon_to_expire.py --hours 24
+
+# Only the soon-to-expire window, skip the already-expired bucket
+python soon_to_expire.py --no-expired
+```
+
+Exit code `1` if anything is in the expired/soon-to-expire window, `0` otherwise. `loan_watch_notify.py` (below) automates the "already expired" half of this on a schedule via email; this script is for an ad-hoc/manual look, including the "expiring soon but not yet due" window that the email watcher doesn't cover.
 
 ## Post-placement sanity check (`verify_offers.py`)
 
@@ -274,6 +303,30 @@ python defaulter_capture.py --yes
 ```
 
 Every offer's principal, collateral, target LTV, and target APY is logged in full immediately before signing — one transaction at a time, so each can be verified before it lands on-chain. Exit code `1` if nothing was actionable (nothing to do), `0` otherwise.
+
+## Loan expiry watch (`loan_watch_notify.py`)
+
+A platform-wide (not just our own wallet) email notifier for loans going overdue and later resolving. Runs every 30 minutes via `.github/workflows/loan_watch.yml` — GitHub Actions, not a local process, so it keeps running whether or not any machine is on — free on a public repo regardless of frequency. GitHub's own scheduler can run a bit behind during platform-wide load, so "every 30 minutes" is a target, not a hard guarantee.
+
+For every currently active loan, it checks whether the loan is past its `expiredAt` and, if so, whether the collateral is **currently** worth more than what's owed (principal + accrued interest), using live Jupiter/DexScreener prices — not the values at origination. Only loans clearing that bar get an email and get tracked; loans without a usable price feed (mostly NFT collateral) or without surplus are left untracked and re-checked every run, since surplus can emerge later as prices move. A tracked loan then gets a second email the moment it resolves, repaid or defaulted, with exactly how late/early that was.
+
+State lives in `loan_watch_state.json` (committed back to the repo by the workflow itself) so the same loan is never emailed twice for the same event — it holds only public on-chain data (pubkeys, addresses, amounts), never anything sensitive.
+
+Required GitHub Actions secrets (set via `gh secret set`, never committed):
+
+```
+SMTP_FROM_EMAIL     - Gmail address to send from
+SMTP_APP_PASSWORD   - Gmail App Password for that address
+NOTIFY_EMAIL_TO     - recipient address
+```
+
+```bash
+# Manual local run (uses the same env vars, or logs "skipping email" if unset)
+python loan_watch_notify.py
+
+# Manually trigger the GitHub Actions workflow instead of waiting for its schedule
+gh workflow run loan_watch.yml
+```
 
 ## Setup
 
@@ -388,3 +441,5 @@ Note: with a single pair selected, the full per-pair allocation budget
 - Never commit your `.env` file — it is listed in `.gitignore`
 - Always do a dry run first before going live
 - `api-1.json` and `api-1 (2).json` are gitignored (internal API docs)
+- `defaulter_config.yaml` (`defaulter_watch.py`'s private borrower-tracking ledger) is gitignored — it's a personal risk record, never published
+- `loan_watch_notify.py`'s email credentials (`SMTP_FROM_EMAIL`, `SMTP_APP_PASSWORD`, `NOTIFY_EMAIL_TO`) live only in GitHub Actions secrets, never in a committed file

@@ -378,7 +378,12 @@ python lender_capital_scan.py --min-total 5000
 
 # Limit the printed table to the top 20 rows
 python lender_capital_scan.py --top 20
+
+# Compare against saved state without overwriting it
+python lender_capital_scan.py --no-save
 ```
+
+Every run's balances persist to `lender_capital_state.json` (gitignored, like `defaulter_config.yaml`/`tg_watchlist.json` — this reveals your own competitive-intelligence tracking) and are compared against the previous run, so each report shows a **Δ since last** column per lender plus an overall change in the grand total. The very first run has nothing to compare against, so every lender shows `NEW`.
 
 Read-only, no signing. Exit code is always `0` — this is an informational report, not a pass/fail check.
 

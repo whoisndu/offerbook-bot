@@ -13,12 +13,18 @@ For each, reports wallet USDC, escrow USDC, and the combined total — the
 free/redeployable capital a competitor could bring to bear, not just what's
 already committed.
 
+Every run's balances are persisted to lender_capital_state.json (gitignored —
+like defaulter_config.yaml/tg_watchlist.json, this reveals your own
+competitive-intelligence tracking, so it's kept private) and compared against
+the previous run, so each report also shows the change since last time.
+
 Read-only: never signs or submits anything.
 
 Usage:
   python lender_capital_scan.py                  # all lenders, sorted by total desc
   python lender_capital_scan.py --min-total 100   # only show lenders with > $100 total
   python lender_capital_scan.py --top 20          # limit output to the top 20 rows
+  python lender_capital_scan.py --no-save         # compare against saved state but don't overwrite it
 
 Exit codes:
   0 — always (informational script, not a pass/fail check)
@@ -26,11 +32,14 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -42,6 +51,8 @@ SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PAGE_SIZE = 100
 MAX_WORKERS = 10
+
+STATE_PATH = Path(__file__).parent / "lender_capital_state.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -137,6 +148,25 @@ class LenderBalance:
         return self.wallet_usd + self.escrow_usd
 
 
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        return json.loads(STATE_PATH.read_text())
+    return {}
+
+
+def save_state(balances: list[LenderBalance], previous: dict) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state = dict(previous)  # keep entries for lenders not in this run (rare, but don't lose history)
+    for b in balances:
+        state[b.lender] = {
+            "wallet_usd": b.wallet_usd,
+            "escrow_usd": b.escrow_usd,
+            "total_usd": b.total_usd,
+            "last_updated": now_iso,
+        }
+    STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
 def scan_balances(lenders: set[str]) -> list[LenderBalance]:
     def fetch_one(lender: str) -> LenderBalance:
         return LenderBalance(lender, wallet_usdc(lender), escrow_usdc(lender))
@@ -146,28 +176,47 @@ def scan_balances(lenders: set[str]) -> list[LenderBalance]:
         return list(ex.map(fetch_one, lenders))
 
 
-def print_report(balances: list[LenderBalance], min_total: float, top: int) -> None:
+def print_report(balances: list[LenderBalance], previous: dict, min_total: float, top: int) -> None:
     balances = [b for b in balances if b.total_usd > min_total]
     balances.sort(key=lambda b: -b.total_usd)
+
+    if previous:
+        last_updated = next(iter(previous.values())).get("last_updated", "unknown")
+        log.info("Comparing against previous run: %s", last_updated)
+    else:
+        log.info("No previous state found (first run) — every lender will show as NEW.")
 
     log.info("")
     log.info("=" * 100)
     log.info("Lender capital (wallet + escrow USDC) — everyone who is or has ever been a lender")
     log.info("=" * 100)
-    col = "{:<46}  {:>14}  {:>14}  {:>14}"
-    log.info(col.format("lender", "wallet $", "escrow $", "total $"))
-    log.info("-" * 92)
+    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}"
+    log.info(col.format("lender", "wallet $", "escrow $", "total $", "Δ since last"))
+    log.info("-" * 108)
     for b in balances[:top]:
-        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}"))
-    log.info("-" * 92)
+        prev = previous.get(b.lender)
+        if prev is None:
+            delta_str = "NEW"
+        else:
+            delta = b.total_usd - prev.get("total_usd", 0.0)
+            delta_str = f"{delta:+,.2f}"
+        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}", delta_str))
+    log.info("-" * 108)
 
     total_wallet = sum(b.wallet_usd for b in balances)
     total_escrow = sum(b.escrow_usd for b in balances)
+    grand_total = total_wallet + total_escrow
+    # Change for this same filtered set of lenders (not an independently-filtered
+    # previous total, which could mismatch if --min-total excludes different lenders
+    # than it did last run).
+    change = sum(b.total_usd - previous.get(b.lender, {}).get("total_usd", 0.0) for b in balances)
     log.info("")
     log.info("Lenders shown        : %d", len(balances[:top]))
     log.info("Total wallet USDC    : $%s", f"{total_wallet:,.2f}")
     log.info("Total escrow USDC    : $%s", f"{total_escrow:,.2f}")
-    log.info("GRAND TOTAL USDC     : $%s", f"{total_wallet + total_escrow:,.2f}")
+    log.info("GRAND TOTAL USDC     : $%s", f"{grand_total:,.2f}")
+    if previous:
+        log.info("Change since last run: $%s", f"{change:+,.2f}")
     log.info("=" * 100)
 
 
@@ -175,12 +224,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Report wallet+escrow USDC balances for every current Offerbook lender.")
     parser.add_argument("--min-total", type=float, default=0.0, help="Only show lenders with > this much total USDC (default: 0)")
     parser.add_argument("--top", type=int, default=1000, help="Limit the report to the top N rows by total (default: 1000, effectively all)")
+    parser.add_argument("--no-save", action="store_true", help="Compare against saved state but don't overwrite it with this run's results")
     args = parser.parse_args()
+
+    previous = load_state()
 
     lenders = fetch_all_lenders()
     log.info("Distinct lenders (active loan, open offer, or resolved loan history): %d", len(lenders))
     balances = scan_balances(lenders)
-    print_report(balances, args.min_total, args.top)
+    print_report(balances, previous, args.min_total, args.top)
+
+    if not args.no_save:
+        save_state(balances, previous)
 
 
 if __name__ == "__main__":

@@ -1,15 +1,17 @@
 """
 Offerbook Lender Capital Scanner
 ================================
-Reports the total USDC balance (wallet + escrow) of every lender currently
-active on the platform, where "lender" means anyone who right now:
+Reports the total USDC balance (wallet + escrow) of every lender who is or
+has ever been one on the platform — "lender" means anyone who:
 
-  - has an active loan out (they've given a loan and it hasn't resolved yet), or
-  - has an open lending offer (any status: active or partiallyFilled)
+  - has an active loan out right now (given a loan, not yet resolved),
+  - has an open lending offer right now (any status: active or partiallyFilled), or
+  - appears as the lender on ANY resolved loan (repaid or defaulted) —
+    a past lender is included even with no current activity at all.
 
-i.e. anyone currently a lender in any form. For each, reports wallet USDC,
-escrow USDC, and the combined total — the free/redeployable capital a
-competitor could bring to bear, not just what's already committed.
+For each, reports wallet USDC, escrow USDC, and the combined total — the
+free/redeployable capital a competitor could bring to bear, not just what's
+already committed.
 
 Read-only: never signs or submits anything.
 
@@ -68,8 +70,11 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
     return items
 
 
-def fetch_current_lenders() -> set[str]:
-    """Union of: lenders with an active loan, and creators of any open lending offer."""
+def fetch_all_lenders() -> set[str]:
+    """Union of everyone who is or has ever been a lender: active-loan lenders,
+    open-lending-offer creators, and lenders from ALL resolved loan history
+    (repaid + defaulted) — so a past lender shows up even if they currently have
+    no active loan or open offer at all."""
     log.info("Fetching active loans …")
     active_loans = _fetch_all_pages("/loans/status/active")
     log.info("  → %d active loan(s)", len(active_loans))
@@ -84,6 +89,16 @@ def fetch_current_lenders() -> set[str]:
         )
     log.info("  → %d open lending offer(s)", len(open_offers))
     lenders |= {o["creator"] for o in open_offers if o.get("creator")}
+
+    log.info("Fetching repaid-loan history …")
+    repaid = _fetch_all_pages("/loans/status/repaid")
+    log.info("  → %d repaid loan(s)", len(repaid))
+    lenders |= {l["lender"] for l in repaid if l.get("lender")}
+
+    log.info("Fetching defaulted-loan history …")
+    defaulted = _fetch_all_pages("/loans/status/defaulted")
+    log.info("  → %d defaulted loan(s)", len(defaulted))
+    lenders |= {l["lender"] for l in defaulted if l.get("lender")}
 
     return lenders
 
@@ -137,7 +152,7 @@ def print_report(balances: list[LenderBalance], min_total: float, top: int) -> N
 
     log.info("")
     log.info("=" * 100)
-    log.info("Lender capital (wallet + escrow USDC), current active loans + open offers")
+    log.info("Lender capital (wallet + escrow USDC) — everyone who is or has ever been a lender")
     log.info("=" * 100)
     col = "{:<46}  {:>14}  {:>14}  {:>14}"
     log.info(col.format("lender", "wallet $", "escrow $", "total $"))
@@ -162,8 +177,8 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=1000, help="Limit the report to the top N rows by total (default: 1000, effectively all)")
     args = parser.parse_args()
 
-    lenders = fetch_current_lenders()
-    log.info("Distinct current lenders (active loan and/or open offer): %d", len(lenders))
+    lenders = fetch_all_lenders()
+    log.info("Distinct lenders (active loan, open offer, or resolved loan history): %d", len(lenders))
     balances = scan_balances(lenders)
     print_report(balances, args.min_total, args.top)
 

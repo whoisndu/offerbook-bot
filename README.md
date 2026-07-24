@@ -367,7 +367,7 @@ TELEGRAM_CHAT_ID    - your chat id (message your bot once, then check https://ap
 
 ## Lender capital scanner (`lender_capital_scan.py`)
 
-Reports wallet + escrow USDC for every wallet currently a lender in any form — anyone with an active loan out, and/or an open lending offer (any status). A one-shot report, not a watcher: useful for sizing up how much free/redeployable capital your competition actually has before you post a big offer.
+Reports wallet + escrow USDC for every wallet that is or has ever been a lender — anyone with an active loan out, an open lending offer (any status), or a lender on any resolved (repaid/defaulted) loan in the platform's full history, so a past lender with no current activity still shows up. A one-shot report, not a watcher: useful for sizing up how much free/redeployable capital your competition actually has before you post a big offer.
 
 ```bash
 # Everyone, sorted by total descending

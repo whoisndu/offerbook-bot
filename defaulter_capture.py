@@ -61,7 +61,8 @@ from defaulter_watch import (
     compute_late_repayer_stats,
     merge_target_borrowers,
     fetch_open_borrow_offers,
-    fetch_active_loans_as_borrower,
+    fetch_all_active_loans,
+    group_active_loans_by_borrower,
     _mint_from_asset,
     symbol_for,
 )
@@ -349,7 +350,8 @@ def get_actionable_pools(min_surplus: float) -> list[CapturePool]:
     target_addrs = {t["borrower"] for t in targets}
     by_borrower = {t["borrower"]: t for t in targets}
     open_offers_by_addr = fetch_open_borrow_offers(target_addrs)
-    active_loans_by_addr = fetch_active_loans_as_borrower(target_addrs)
+    all_active_loans = fetch_all_active_loans()
+    active_loans_by_addr = group_active_loans_by_borrower(all_active_loans, target_addrs)
 
     now = datetime.now(timezone.utc)
     pools: dict[tuple[str, int], list[str]] = defaultdict(list)

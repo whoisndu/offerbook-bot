@@ -61,7 +61,7 @@ A naïve arithmetic mean over APYs — even volume-weighted — can be dragged f
 
 Formally, let $(r_{(1)}, p_{(1)}), \dots, (r_{(n)}, p_{(n)})$ be the offers in $\mathcal{S}$ sorted so $r_{(1)} \leq \dots \leq r_{(n)}$, and let $W = \sum_i p_{(i)}$. Then:
 
-$$\tilde{r}_{vw}(\mathcal{S}) = r_{(j^{\ast})}, \qquad j^{\ast} = \min\left\{ j : \sum_{k=1}^{j} p_{(k)} \geq \frac{W}{2} \right\}, \qquad \mathcal{S} \neq \emptyset$$
+$$\tilde{r}_{vw}(\mathcal{S}) = r_{(j^{\ast})}, \qquad j^{\ast} = \min\left\lbrace j : \sum_{k=1}^{j} p_{(k)} \geq \frac{W}{2} \right\rbrace, \qquad \mathcal{S} \neq \emptyset$$
 
 Unlike a mean, one very large offer can only shift the median by contributing weight toward whichever side of the distribution it sits on — it can never single-handedly drag the benchmark toward its own extreme rate.
 

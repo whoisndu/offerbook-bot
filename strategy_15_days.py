@@ -9,8 +9,11 @@ Strategy:
   1. Fetch all active lending offers (from all pools/pairs).
   2. Fetch all active loans.
   3. For each unique (principalMint, collateralMint) pair that has open loans or
-     open lending offers, compute the mean APY of existing active lending offers.
-  4. Post a new lending offer at mean_apy * 0.90 (10% below mean) to be competitive.
+     open lending offers, compute the volume-weighted MEDIAN APY of existing
+     active lending offers — the price level where the largest cluster of real
+     market volume actually sits, not a mean (which one large outlier offer can
+     drag far from where borrowers are actually transacting).
+  4. Post a new lending offer at benchmark_apy * 0.88 (12% below benchmark) to be competitive.
   5. Enforce:
        - duration  <= 15 days (1,296,000 seconds)
        - LTV       <= 25%  (collateral must be ≥ 4× loan value at current prices)
@@ -63,7 +66,7 @@ SIGNING_MODE: str = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower(
 LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
 # Strategy parameters
-APY_DISCOUNT = 0.12          # 12% below market mean
+APY_DISCOUNT = 0.12          # undercut the market benchmark (volume-weighted median) by 12%
 MAX_DURATION_DAYS = 15
 MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 1 296 000
 OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term is still 15 days
@@ -269,6 +272,27 @@ class Loan:
         return (self.principal_mint, self.collateral_mint)
 
 
+def _volume_weighted_median(values: list[float], weights: list[float]) -> float | None:
+    """Volume-weighted median: the value at which cumulative weight first reaches
+    half of total weight — the price level where the largest cluster of real
+    market volume sits. Robust to a single large outlier value, unlike a
+    volume-weighted mean, which that one outlier can drag far from where most
+    trading actually happens."""
+    if not values:
+        return None
+    if not weights or len(weights) != len(values) or sum(weights) <= 0:
+        s = sorted(values)
+        return s[len(s) // 2]
+    pairs = sorted(zip(values, weights), key=lambda p: p[0])
+    half = sum(w for _, w in pairs) / 2
+    cumulative = 0.0
+    for value, weight in pairs:
+        cumulative += weight
+        if cumulative >= half:
+            return value
+    return pairs[-1][0]
+
+
 @dataclass
 class PairStats:
     """Aggregated stats for a (principalMint, collateralMint) pair."""
@@ -309,18 +333,16 @@ class PairStats:
     largest_offer_ltv: float | None = None
 
     @property
-    def mean_apy_bps(self) -> float | None:
-        # Prefer same-duration offers; fall back to global cross-duration mean.
-        # Volume-weighted so large offers dominate over small high-APY outliers.
+    def apy_benchmark_bps(self) -> float | None:
+        # Prefer same-duration offers; fall back to global cross-duration.
+        # Volume-weighted MEDIAN: the price level where the largest cluster
+        # of real market volume actually sits, not a mean (which one large
+        # outlier offer can drag far from where borrowers actually transact).
         apys = self.lending_apys if self.lending_apys else self.global_lending_apys
         amounts = self.lending_offer_amounts if self.lending_apys else self.global_lending_offer_amounts
         if not apys:
             return None
-        if amounts:
-            total = sum(amounts)
-            if total > 0:
-                return sum(apy * amt for apy, amt in zip(apys, amounts)) / total
-        return sum(apys) / len(apys)
+        return _volume_weighted_median(apys, amounts)
 
     @property
     def apy_source(self) -> str:
@@ -332,10 +354,10 @@ class PairStats:
 
     @property
     def target_apy_bps(self) -> int | None:
-        mean = self.mean_apy_bps
-        if mean is None:
+        benchmark = self.apy_benchmark_bps
+        if benchmark is None:
             return None
-        raw = mean * (1 - APY_DISCOUNT)
+        raw = benchmark * (1 - APY_DISCOUNT)
         return max(MIN_APY_BPS, round(raw))
 
     @property
@@ -362,15 +384,13 @@ class PairStats:
         return s[len(s) // 2]
 
     @property
-    def weighted_mean_ltv_usd(self) -> float | None:
-        """Principal-USD-weighted mean LTV across this token's own market offers/loans —
-        large offers dominate over small high-LTV fringe outliers."""
+    def ltv_benchmark_usd(self) -> float | None:
+        """Volume-weighted MEDIAN LTV across this token's own market offers/loans —
+        the LTV level where the largest cluster of real market volume sits, not
+        dragged toward a single large outlier offer the way a weighted mean would be."""
         if not self.offer_ltv_usds:
             return None
-        total_weight = sum(self.offer_ltv_weights_usd)
-        if total_weight > 0:
-            return sum(ltv * w for ltv, w in zip(self.offer_ltv_usds, self.offer_ltv_weights_usd)) / total_weight
-        return sum(self.offer_ltv_usds) / len(self.offer_ltv_usds)
+        return _volume_weighted_median(self.offer_ltv_usds, self.offer_ltv_weights_usd)
 
     @property
     def median_collateral_price_per_raw(self) -> float | None:
@@ -1131,7 +1151,7 @@ def main() -> None:
     log.info("Offerbook Competitive Lending Bot")
     log.info("Wallet  : %s", WALLET_PUBKEY)
     log.info("DRY RUN : %s", DRY_RUN)
-    log.info("Strategy: APY = market_mean × %.0f%%  |  LTV floor = %.0f%%, hard ceiling = %.0f%%  |  max duration = %d days",
+    log.info("Strategy: APY = market_benchmark × %.0f%%  |  LTV floor = %.0f%%, hard ceiling = %.0f%%  |  max duration = %d days",
              (1 - APY_DISCOUNT) * 100, FALLBACK_LTV * 100, HARD_LTV_CEILING * 100, MAX_DURATION_DAYS)
     log.info("=" * 60)
 
@@ -1213,10 +1233,10 @@ def main() -> None:
 
     for pair, ps in relevant_pairs.items():
         log.info(
-            "\nPair %s…/%s…  | loans=%d  mean_apy=%.0f bps [from %s]  target_apy=%s bps",
+            "\nPair %s…/%s…  | loans=%d  benchmark_apy=%.0f bps [from %s]  target_apy=%s bps",
             ps.principal_mint[:8], ps.collateral_mint[:8],
             ps.active_loan_count,
-            ps.mean_apy_bps or 0,
+            ps.apy_benchmark_bps or 0,
             ps.apy_source,
             ps.target_apy_bps or "N/A",
         )
@@ -1248,7 +1268,7 @@ def main() -> None:
                 collateral_mint=ps.collateral_mint,
                 current_prices=current_prices,
                 decimals_map=decimals_map,
-                market_weighted_ltv=ps.weighted_mean_ltv_usd,
+                market_weighted_ltv=ps.ltv_benchmark_usd,
                 market_sample_count=len(ps.offer_ltv_usds),
                 market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
                 largest_offer_ltv=ps.largest_offer_ltv,
@@ -1271,7 +1291,7 @@ def main() -> None:
             # will exceed the target — skip rather than create an undercollateralised offer.
             pool_price = ps.median_collateral_price_per_raw
             pair_max_ltv = effective_target_ltv(
-                ps.collateral_mint, ps.weighted_mean_ltv_usd, len(ps.offer_ltv_usds),
+                ps.collateral_mint, ps.ltv_benchmark_usd, len(ps.offer_ltv_usds),
                 sum(ps.offer_ltv_weights_usd), principal_usdc, ps.largest_offer_ltv,
             )
             if pool_price and pool_price > 0 and collateral_raw > 0:

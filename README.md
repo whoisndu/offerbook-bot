@@ -8,9 +8,9 @@ Three independent scripts — run whichever suits your risk appetite. Each offer
 
 | Script | Loan term | LTV floor (thin market data) | LTV hard ceiling | APY target |
 |---|---|---|---|---|
-| `strategy_3_days.py` | 3 days | **60%** | 75% | Mean + 10% |
-| `strategy_7_days.py` | 7 days | **45%** | 75% | Mean − 10% |
-| `strategy_15_days.py` | 15 days | **25%** | 75% | Mean − 12% |
+| `strategy_3_days.py` | 3 days | **60%** | 75% | Benchmark − 5% |
+| `strategy_7_days.py` | 7 days | **45%** | 75% | Benchmark − 10% |
+| `strategy_15_days.py` | 15 days | **25%** | 75% | Benchmark − 12% |
 
 LTV is no longer a single fixed ceiling — it's computed per collateral token from that token's own live market data, bounded by the floor and ceiling above. See [§4](#4-dynamic-ltv-target-and-safe-collateral-sizing) for the full rule.
 
@@ -18,7 +18,7 @@ LTV is no longer a single fixed ceiling — it's computed per collateral token f
 
 1. Fetch all active lending offers and loans from the Offerbook API
 2. Group by `(principalMint, collateralMint)` pair
-3. Compute the **volume-weighted mean APY** from live offers of the same duration — large offers carry more weight than small high-APY outliers. If no same-duration offers exist for a pair, fall back to the global mean across all durations. The log shows which source was used: `[from live offers (same duration)]` or `[from live offers (global)]`
+3. Compute the **volume-weighted median APY** from live offers of the same duration — the price level where the largest cluster of real market volume sits, not a mean (which one large outlier offer can drag far from where borrowers are actually transacting). If no same-duration offers exist for a pair, fall back to the global median across all durations. The log shows which source was used: `[from live offers (same duration)]` or `[from live offers (global)]`
 4. Fetch real-time collateral prices from **Jupiter Price API** (primary) with **DexScreener** as fallback
 5. For each pair, compute the token's **dynamic LTV target** (§4) from its own market data and current token age, then size `collateralAmount` to hit that target at **current prices** — not stale prices from other lenders' old offers. If no live price is available from either source, the pair is skipped entirely rather than sized off a stale pool-implied price (see below)
 6. **Cross-validate the live price** against the pool-implied price from existing loans. If the two differ enough that the offer's true LTV would exceed the dynamic target, skip the pair and log a warning (guards against bad price feeds)
@@ -49,17 +49,21 @@ This section formalises the pricing, risk, and allocation decisions made by the 
 | $\pi_c$ | Live USD price of the collateral token (from Jupiter / DexScreener) |
 | $\pi_p$ | Live USD price of the principal token (USDC, $\pi_p \approx 1$) |
 | $L_k$ | Dynamic LTV target for collateral token $k$ (§4) |
-| $\bar\ell_k$ | Volume-weighted mean LTV of token $k$'s own live market offers/loans |
+| $\tilde\ell_k$ | Volume-weighted median LTV of token $k$'s own live market offers/loans |
 | $\alpha_k \in [0,1]$ | Allocation fraction for collateral token $k$ |
 | $B$ | Combined lender budget: $B = B_{\text{wallet}} + B_{\text{escrow}}$ |
 
 ---
 
-### 1. Volume-Weighted Mean APY
+### 1. Volume-Weighted Median APY
 
-A naïve arithmetic mean over APYs is distorted by small, high-yield fringe offers. The bot instead computes a **volume-weighted mean** so that larger, more liquid offers dominate the benchmark:
+A naïve arithmetic mean over APYs — even volume-weighted — can be dragged far from where real trading volume actually sits by a single large outlier offer. The bot instead computes a **volume-weighted median**: sort offers by APY ascending, then accumulate principal-USD weight until it first reaches half of the total; the APY at that point is the benchmark, since it's the price level where the largest cluster of real market volume sits.
 
-$$\bar{r}_{vw}(\mathcal{S}) = \frac{\displaystyle\sum_{i \in \mathcal{S}} r_i \cdot p_i}{\displaystyle\sum_{i \in \mathcal{S}} p_i}, \qquad \mathcal{S} \neq \emptyset$$
+Formally, let $(r_{(1)}, p_{(1)}), \dots, (r_{(n)}, p_{(n)})$ be the offers in $\mathcal{S}$ sorted so $r_{(1)} \leq \dots \leq r_{(n)}$, and let $W = \sum_i p_{(i)}$. Then:
+
+$$\tilde{r}_{vw}(\mathcal{S}) = r_{(j^*)}, \qquad j^* = \min\left\{ j : \sum_{k=1}^{j} p_{(k)} \geq \frac{W}{2} \right\}, \qquad \mathcal{S} \neq \emptyset$$
+
+Unlike a mean, one very large offer can only shift the median by contributing weight toward whichever side of the distribution it sits on — it can never single-handedly drag the benchmark toward its own extreme rate.
 
 ---
 
@@ -67,7 +71,7 @@ $$\bar{r}_{vw}(\mathcal{S}) = \frac{\displaystyle\sum_{i \in \mathcal{S}} r_i \c
 
 Offers of different durations reflect different risk premia and should not be pooled blindly. The benchmark APY for strategy $d$ is:
 
-$$\bar{r}^{(d)} = \begin{cases} \bar{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\ \bar{r}_{vw}(\mathcal{O}) & \text{otherwise} \end{cases}$$
+$$\tilde{r}^{(d)} = \begin{cases} \tilde{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\ \tilde{r}_{vw}(\mathcal{O}) & \text{otherwise} \end{cases}$$
 
 The log records which branch was taken (`[from live offers (same duration)]` vs `[from live offers (global)]`).
 
@@ -77,21 +81,21 @@ The log records which branch was taken (`[from live offers (same duration)]` vs 
 
 Each strategy positions itself relative to the benchmark by applying a scalar adjustment $\delta$:
 
-$$r^* = \bar{r}^{(d)} \cdot (1 + \delta)$$
+$$r^* = \tilde{r}^{(d)} \cdot (1 + \delta)$$
 
 | Strategy | $d$ | $\delta$ | Rationale |
 |---|---|---|---|
-| `strategy_3_days.py` | 3 days | $+0.10$ | Short duration; higher yield acceptable |
+| `strategy_3_days.py` | 3 days | $-0.05$ | Shallower undercut than 7/15-day — this strategy's higher LTV floor already compensates for its risk, so it doesn't also need to price above market |
 | `strategy_7_days.py` | 7 days | $-0.10$ | Mid duration; slight undercut to attract flow |
 | `strategy_15_days.py` | 15 days | $-0.12$ | Long duration; deeper undercut offsets illiquidity |
 
 A hard floor $r^* \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
 
-**Largest-offer guardrail.** Let $i^* = \arg\max_{i \in \mathcal{O}} p_i$ be the pair's single largest live lending offer (any duration, excluding our own), with APY $r_{i^*}$ and LTV $\ell_{i^*}$. This is the offer a borrower comparison-shopping the pool is most likely to pick, and the volume-weighted mean can be skewed looser than what that specific offer actually accepts (e.g. dragged down by several small, thin offers). The final APY target is capped up, never down:
+**Largest-offer guardrail.** Let $i^* = \arg\max_{i \in \mathcal{O}} p_i$ be the pair's single largest live lending offer (any duration, excluding our own), with APY $r_{i^*}$ and LTV $\ell_{i^*}$. This is the offer a borrower comparison-shopping the pool is most likely to pick, and the volume-weighted median can still be skewed looser than what that specific offer actually accepts. The final APY target is capped up, never down:
 
 $$r^* \leftarrow \max(r^*,\ r_{i^*})$$
 
-This only ever raises the bar — never undercuts the market's most prominent participant — and applies purely as a safety guardrail, not a competitiveness driver; the volume-weighted mean from §1-§3 remains the primary target whenever it's already at least as conservative as $i^*$.
+This only ever raises the bar — never undercuts the market's most prominent participant — and applies purely as a safety guardrail, not a competitiveness driver; the volume-weighted median from §1-§3 remains the primary target whenever it's already at least as conservative as $i^*$.
 
 ---
 
@@ -101,15 +105,13 @@ The **loan-to-value ratio** of a proposed offer is:
 
 $$\text{LTV} = \frac{P \cdot \pi_p}{C \cdot \pi_c}$$
 
-Unlike a single fixed ceiling, the target LTV $L_k$ for collateral token $k$ is computed from **that token's own live market data** — every other lender's open offers/loans against the same token (always vs. USDC, the only principal Offerbook supports). Let $\mathcal{S}_k$ be that set, with per-entry LTV $\ell_i$ and principal-USD weight $p_i$; the volume-weighted market LTV is:
-
-$$\bar\ell_k = \frac{\sum_{i \in \mathcal{S}_k} \ell_i \, p_i}{\sum_{i \in \mathcal{S}_k} p_i}$$
+Unlike a single fixed ceiling, the target LTV $L_k$ for collateral token $k$ is computed from **that token's own live market data** — every other lender's open offers/loans against the same token (always vs. USDC, the only principal Offerbook supports). Let $\mathcal{S}_k$ be that set, with per-entry LTV $\ell_i$ and principal-USD weight $p_i$; the volume-weighted median market LTV $\tilde\ell_k$ is computed the same way as $\tilde{r}_{vw}$ in §1 (weighted by $p_i$ instead of over APYs), so a single large outlier LTV can't drag the benchmark away from where the bulk of market volume actually sits.
 
 "Enough data" to trust $\mathcal{S}_k$ means **either** $|\mathcal{S}_k| \geq 5$, **or** the total volume $V_k = \sum_{i \in \mathcal{S}_k} p_i$ is at least $2\times$ our own offer's principal $P$ — a few small dust offers shouldn't qualify, but one large, capital-backed offer can stand on its own even with fewer than 5 orders on the book (Offerbook's escrow model means posting a lending offer requires the lender to actually fund the principal, so a large offer costs real capital to fake). $L_k$ is then set by three rules, applied in order:
 
 1. **Not enough data** (neither condition above holds): fall back to the strategy's flat floor, $L_k = L_{\text{floor}}$ (60% / 45% / 25% — see the table above).
-2. **Young token** (enough data, and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \bar\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
-3. **Mature token** (enough data, and age $\geq$ 60 days): $L_k = \bar\ell_k / 0.9$ — the bot accepts 10% less collateral than the market average implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
+2. **Young token** (enough data, and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \tilde\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
+3. **Mature token** (enough data, and age $\geq$ 60 days): $L_k = \tilde\ell_k / 0.9$ — the bot accepts 10% less collateral than the market median implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
 
 **Largest-offer guardrail.** Using the same $i^*$ (the pair's single largest live offer) from §3, if its LTV $\ell_{i^*}$ is *more* conservative (lower) than whatever $L_k$ would otherwise be, the target is capped down to match it:
 

@@ -61,7 +61,7 @@ A naïve arithmetic mean over APYs — even volume-weighted — can be dragged f
 
 Formally, let $(r_{(1)}, p_{(1)}), \dots, (r_{(n)}, p_{(n)})$ be the offers in $\mathcal{S}$ sorted so $r_{(1)} \leq \dots \leq r_{(n)}$, and let $W = \sum_i p_{(i)}$. Then:
 
-$$\tilde{r}_{vw}(\mathcal{S}) = r_{(j^*)}, \qquad j^* = \min\left\{ j : \sum_{k=1}^{j} p_{(k)} \geq \frac{W}{2} \right\}, \qquad \mathcal{S} \neq \emptyset$$
+$$\tilde{r}_{vw}(\mathcal{S}) = r_{(j^{\ast})}, \qquad j^{\ast} = \min\left\{ j : \sum_{k=1}^{j} p_{(k)} \geq \frac{W}{2} \right\}, \qquad \mathcal{S} \neq \emptyset$$
 
 Unlike a mean, one very large offer can only shift the median by contributing weight toward whichever side of the distribution it sits on — it can never single-handedly drag the benchmark toward its own extreme rate.
 
@@ -81,7 +81,7 @@ The log records which branch was taken (`[from live offers (same duration)]` vs 
 
 Each strategy positions itself relative to the benchmark by applying a scalar adjustment $\delta$:
 
-$$r^* = \tilde{r}^{(d)} \cdot (1 + \delta)$$
+$$r^{\ast} = \tilde{r}^{(d)} \cdot (1 + \delta)$$
 
 | Strategy | $d$ | $\delta$ | Rationale |
 |---|---|---|---|
@@ -89,13 +89,13 @@ $$r^* = \tilde{r}^{(d)} \cdot (1 + \delta)$$
 | `strategy_7_days.py` | 7 days | $-0.10$ | Mid duration; slight undercut to attract flow |
 | `strategy_15_days.py` | 15 days | $-0.12$ | Long duration; deeper undercut offsets illiquidity |
 
-A hard floor $r^* \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
+A hard floor $r^{\ast} \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
 
-**Largest-offer guardrail.** Let $i^* = \arg\max_{i \in \mathcal{O}} p_i$ be the pair's single largest live lending offer (any duration, excluding our own), with APY $r_{i^*}$ and LTV $\ell_{i^*}$. This is the offer a borrower comparison-shopping the pool is most likely to pick, and the volume-weighted median can still be skewed looser than what that specific offer actually accepts. The final APY target is capped up, never down:
+**Largest-offer guardrail.** Let $i^{\ast} = \arg\max_{i \in \mathcal{O}} p_i$ be the pair's single largest live lending offer (any duration, excluding our own), with APY $r_{i^{\ast}}$ and LTV $\ell_{i^{\ast}}$. This is the offer a borrower comparison-shopping the pool is most likely to pick, and the volume-weighted median can still be skewed looser than what that specific offer actually accepts. The final APY target is capped up, never down:
 
-$$r^* \leftarrow \max(r^*,\ r_{i^*})$$
+$$r^{\ast} \leftarrow \max(r^{\ast},\ r_{i^{\ast}})$$
 
-This only ever raises the bar — never undercuts the market's most prominent participant — and applies purely as a safety guardrail, not a competitiveness driver; the volume-weighted median from §1-§3 remains the primary target whenever it's already at least as conservative as $i^*$.
+This only ever raises the bar — never undercuts the market's most prominent participant — and applies purely as a safety guardrail, not a competitiveness driver; the volume-weighted median from §1-§3 remains the primary target whenever it's already at least as conservative as $i^{\ast}$.
 
 ---
 
@@ -113,9 +113,9 @@ Unlike a single fixed ceiling, the target LTV $L_k$ for collateral token $k$ is 
 2. **Young token** (enough data, and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \tilde\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
 3. **Mature token** (enough data, and age $\geq$ 60 days): $L_k = \tilde\ell_k / 0.9$ — the bot accepts 10% less collateral than the market median implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
 
-**Largest-offer guardrail.** Using the same $i^*$ (the pair's single largest live offer) from §3, if its LTV $\ell_{i^*}$ is *more* conservative (lower) than whatever $L_k$ would otherwise be, the target is capped down to match it:
+**Largest-offer guardrail.** Using the same $i^{\ast}$ (the pair's single largest live offer) from §3, if its LTV $\ell_{i^{\ast}}$ is *more* conservative (lower) than whatever $L_k$ would otherwise be, the target is capped down to match it:
 
-$$L_k \leftarrow \min(L_k,\ \ell_{i^*})$$
+$$L_k \leftarrow \min(L_k,\ \ell_{i^{\ast}})$$
 
 This can only make the result safer, never looser — it guards against the volume-weighted benchmark being skewed by several small, thin offers into a target more permissive than what the market's most prominent participant actually accepts.
 

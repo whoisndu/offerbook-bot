@@ -60,20 +60,20 @@ allocations:
   J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn: 1.0
 
   # bbSOL (Bybit staked SOL)
-  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 0.7
+  Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B: 1.0
 
   # bnSOL (Binance staked SOL)
-  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 0.7
+  BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85: 1.0
 
   # ===========================================================================
   # TIER 3 — Major DeFi / well-known tokens  (50% allocation)
   # ===========================================================================
 
   # JUP (Jupiter governance token)
-  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 0.9
+  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 1.0
 
   # JLP (Jupiter Liquidity Pool token)
-  4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R: 0.9
+  4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R: 1.0
 
   # BONK
   DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: 1.0
@@ -130,10 +130,10 @@ allocations:
   J6pQQ3FAcJQeWPPGppWRb4nM8jU3wLyYbRrLh7feMfvd: 0.0
 
   # SPX — SPX6900 (Wormhole)  (ltv ~40%)
-  J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr: 0.6
+  J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr: 0.8
 
   # (ltv ~33%)  — NEET
-  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 0.9
+  Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump: 1.0
 
   # ZEREBRO — zerebro  (ltv ~36%)
   8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn: 0.5
@@ -142,7 +142,7 @@ allocations:
   KMNo3nJsBXfcpJTVhZcXLW7RmTwTt4GVFE7suUBo9sS: 0.0
 
   # $WIF — dogwifhat  (ltv ~55%)
-  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 0.9
+  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 1.0
 
   # aura — aura  (ltv ~44%)
   DtR4D9FtVoTX2569gaL837ZgrB6wNjj6tkmnX9Rdk9B2: 0.6
@@ -178,10 +178,10 @@ allocations:
   ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82: 0.3
 
   # (ltv ~43%)  — pump.fun utility token
-  pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn: 0.0
+  pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn: 0.5
 
   # SKR — Seeker  (ltv ~23%)
-  SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3: 0.0
+  SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3: 0.3
 
   # POPCAT — Popcat  (ltv ~53%)
   7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr: 1.0
@@ -287,7 +287,7 @@ allocations:
   ALaBcBiKBxCmUP2hcvfWz4EmfVL9BuUqKh5FozaYr7Xd: 0.0
 
   # JTO — JITO  (ltv ~45%)
-  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: 0.6
+  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: 0.8
 
   # ZEX — Zeta  (ltv ~47%)
   ZEXy1pqteRu3n13kdyh4LwPQknkFk3GzmMYMuNadWPo: 0.0
@@ -302,7 +302,7 @@ allocations:
   Tqj8yFmagrg7oorpQkVGYR52r96RFTamvWfth9bpump: 0.6
 
   # MET — Meteora  (ltv ~52%)
-  METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL: 0.0
+  METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL: 0.5
 
   # HOODx — Robinhood xStock  (ltv ~53%)
   XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg: 0.5
@@ -332,7 +332,7 @@ allocations:
   4PX31xRA1BaAyb2Js45ZKYp92VGWGp47yWeVs5CGVKbf: 0.0
 
   # MEW — cat in a dogs world  (ltv ~56%)
-  MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5: 0.0
+  MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5: 0.1
 
   # CRCLx — Circle xStock  (ltv ~56%)
   XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1: 0.4
@@ -380,7 +380,7 @@ allocations:
   EozVEAxxCsk3uXp5RLBarQ1wbnuow1VRRvkPmuCY4YuV: 0.0
 
   # SV151 — Scarlet & Violet 151  (ltv ~65%)
-  SV151D5pjygAKA8aJJcKzm4wFnRX5G92Fye94jQJk7g: 0.0
+  SV151D5pjygAKA8aJJcKzm4wFnRX5G92Fye94jQJk7g: 0.3
 
   # FWOG — FWOG  (ltv ~61%)
   A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump: 0.6
@@ -389,7 +389,7 @@ allocations:
   CTHU9e1X9k2dLCQm6axswzpWwRVG8tKsGpbmdrGuvoN5: 0.0
 
   # JLP — Jupiter Perps  (ltv ~60%)
-  27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4: 0.3
+  27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4: 1.0
 
   # (ltv ~68%)  — unknown token
   Fajqu1RDuzt5Rr7nEWDyyjXD6ErEy2oxmjTweAcAC5xb: 0.0
@@ -587,7 +587,7 @@ allocations:
   Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg: 0.3
 
   # AAPLx — Apple xStock  (ltv ~76%)
-  XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp: 0.0
+  XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp: 0.3
 
   # xBTC — OKX Wrapped BTC  (ltv ~78%)
   CtzPWv73Sn1dMGVU3ZtLv9yWSyUAanBni19YWDaznnkn: 0.8

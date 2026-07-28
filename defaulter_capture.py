@@ -4,7 +4,7 @@ Offerbook Defaulter Capture — Competitive Offers for Watchlisted Borrowers
 Reacts to actionable entries from defaulter_watch.py (a watchlisted borrower
 has an open borrow request right now, or an active loan expiring within 24h)
 by posting a competitive lending offer into that same collateral pool —
-sized from allocation_config.yaml exactly like the strategy_*.py scripts, and
+sized from allocation_config.yaml exactly like the strategy.py scripts, and
 priced to modestly beat (not wildly outbid) the single largest live offer
 already in that pool (excluding our own), since that's the offer a borrower
 comparison-shopping the pool is actually most likely to pick — not some
@@ -12,7 +12,7 @@ average of everything listed, including small offers they'd never consider:
 
   - APY: undercut the largest offer's APY by APY_UNDERCUT.
   - LTV: a small edge above the largest offer's LTV, capped by the same
-    effective_target_ltv() safety ceiling used in strategy_*.py (young/
+    effective_target_ltv() safety ceiling used in strategy.py (young/
     mature-token rules, 75% hard ceiling) — historical profitability on
     other loans never overrides this cap.
   - Duration: matches the largest offer's own duration, since that's the
@@ -63,12 +63,13 @@ from defaulter_watch import (
     fetch_open_borrow_offers,
     fetch_all_active_loans,
     group_active_loans_by_borrower,
-    _mint_from_asset,
     symbol_for,
 )
+import offerbook_common as _common
+from offerbook_common import _mint_from_asset
 
 # ---------------------------------------------------------------------------
-# Configuration — same environment variables as strategy_*.py
+# Configuration — same environment variables as strategy.py
 # ---------------------------------------------------------------------------
 
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
@@ -98,7 +99,7 @@ PAGE_SIZE = 100
 APY_UNDERCUT = 0.05          # 5% below the largest live offer's APY
 LTV_EDGE_PTS = 0.02          # 2 percentage points above the largest live offer's LTV
 
-# Same effective_target_ltv() constants as strategy_*.py — this is the safety
+# Same effective_target_ltv() constants as strategy.py — this is the safety
 # ceiling that always applies, regardless of how attractive a target borrower
 # looks historically.
 YOUNG_TOKEN_AGE_DAYS = 60
@@ -110,10 +111,10 @@ HARD_LTV_CEILING = 0.75
 
 
 def fallback_ltv_for_duration(duration_secs: int) -> float:
-    """Matches strategy_3/7/15_days.py's FALLBACK_LTV, generalized to any duration."""
+    """Matches strategy.py's DURATION_CONFIGS fallback_ltv, generalized to any duration."""
     days = duration_secs / 86400
     if days <= 3:
-        return 0.60
+        return 0.65
     if days <= 7:
         return 0.45
     return 0.25
@@ -126,24 +127,10 @@ JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "")
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
-KNOWN_DECIMALS: dict[str, int] = {
-    "So11111111111111111111111111111111111111112": 9,
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": 9,
-    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": 9,
-    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": 9,
-    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": 9,
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": 6,
-    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": 6,
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": 5,
-    "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": 6,
-    "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump": 6,
-    "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": 9,
-    "TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx": 6,
-    USDC_MINT: 6,
-}
+KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 
 # ---------------------------------------------------------------------------
-# Allocation config — identical loader to strategy_*.py
+# Allocation config — identical loader to strategy.py
 # ---------------------------------------------------------------------------
 
 def _load_allocation_config(path: str) -> dict[str, float]:
@@ -186,36 +173,15 @@ SESSION.headers.update({"Content-Type": "application/json"})
 # ---------------------------------------------------------------------------
 
 def _get(endpoint: str, params: dict | None = None) -> dict:
-    resp = SESSION.get(f"{API_BASE}{endpoint}", params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    return _common.api_get(SESSION, API_BASE, endpoint, params)
 
 
 def _post_tx(endpoint: str, payload: dict) -> dict:
-    resp = SESSION.post(f"{TX_API_BASE}{endpoint}", json=payload, timeout=30)
-    if not resp.ok:
-        try:
-            detail = resp.json().get("message", resp.text)
-        except Exception:
-            detail = resp.text or "(empty)"
-        resp.reason = detail
-        resp.raise_for_status()
-    return resp.json()
+    return _common.post_tx(SESSION, TX_API_BASE, endpoint, payload)
 
 
 def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
-    params = dict(params or {})
-    params["limit"] = PAGE_SIZE
-    params["offset"] = 0
-    items: list[dict] = []
-    while True:
-        data = _get(endpoint, params)
-        items.extend(data.get("data", []))
-        if not data.get("pagination", {}).get("hasMore", False):
-            break
-        params["offset"] += PAGE_SIZE
-        time.sleep(0.15)
-    return items
+    return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE)
 
 
 def fetch_wallet_token_balance(mint: str) -> int:
@@ -309,7 +275,7 @@ def effective_target_ltv(
     our_offer_usdc: float,
     fallback_ltv: float,
 ) -> float:
-    """Identical rule to strategy_*.py's effective_target_ltv(), parameterized by fallback_ltv."""
+    """Identical rule to strategy.py's effective_target_ltv(), parameterized by fallback_ltv."""
     has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
     has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
 
@@ -433,7 +399,7 @@ def compute_competitive_terms(pool: CapturePool, our_offer_usdc: float) -> dict[
     against for the same borrower.
 
     LTV is still bounded by effective_target_ltv() (the same safety ceiling
-    strategy_*.py uses) computed from the whole pool's volume-weighted mean —
+    strategy.py uses) computed from the whole pool's volume-weighted median —
     beating the largest offer never overrides this cap.
     """
     offers = fetch_pool_offers(pool.collateral_mint)
@@ -446,20 +412,21 @@ def compute_competitive_terms(pool: CapturePool, our_offer_usdc: float) -> dict[
     largest_apy_bps = largest.get("apy", 0)
     largest_ltv = _offer_ltv(largest)
 
-    # Safety ceiling still comes from the whole pool's volume-weighted mean LTV,
-    # same as every other script — beating the largest offer never bypasses this.
+    # Safety ceiling still comes from the whole pool's volume-weighted MEDIAN LTV,
+    # same as strategy.py — beating the largest offer never bypasses this. Median,
+    # not mean: robust to a single large outlier offer dragging the benchmark.
     ltvs, weights = [], []
     for o in offers:
         ltv = _offer_ltv(o)
         if ltv is not None:
             ltvs.append(ltv)
             weights.append(_principal_usd(o))
-    weighted_mean_ltv = sum(l * w for l, w in zip(ltvs, weights)) / sum(weights) if weights else None
+    weighted_median_ltv = _common._volume_weighted_median(ltvs, weights)
     sample_count = len(ltvs)
     total_volume = sum(weights)
     fallback = fallback_ltv_for_duration(target_duration)
     safety_ceiling = effective_target_ltv(
-        pool.collateral_mint, weighted_mean_ltv, sample_count, total_volume, our_offer_usdc, fallback,
+        pool.collateral_mint, weighted_median_ltv, sample_count, total_volume, our_offer_usdc, fallback,
     )
 
     target_ltv = min(largest_ltv + LTV_EDGE_PTS, safety_ceiling) if largest_ltv is not None else safety_ceiling
@@ -481,61 +448,21 @@ def compute_competitive_terms(pool: CapturePool, our_offer_usdc: float) -> dict[
 # Signer
 # ---------------------------------------------------------------------------
 
-_ledger_signer = None
-
-
-def _get_ledger_signer():
-    global _ledger_signer
-    if _ledger_signer is not None:
-        return _ledger_signer
-    try:
-        from ledger_signer import LedgerSigner
-    except ImportError:
-        log.error("Missing dependencies: pip install ledgerblue hidapi base58")
-        sys.exit(1)
-    _ledger_signer = LedgerSigner(path=LEDGER_PATH)
-    return _ledger_signer
-
-
 def resolve_signer_wallet() -> str:
+    """Thin wrapper: delegates to offerbook_common, updates this module's WALLET_PUBKEY."""
     global WALLET_PUBKEY
-    if SIGNING_MODE == "ledger":
-        from ledger_signer import LedgerError
-        try:
-            device_pubkey = _get_ledger_signer().get_pubkey()
-        except LedgerError as exc:
-            log.error(str(exc))
-            sys.exit(1)
-        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
-            log.warning(
-                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
-                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
-            )
-        WALLET_PUBKEY = device_pubkey
+    WALLET_PUBKEY = _common.resolve_signer_wallet(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH)
     return WALLET_PUBKEY
 
 
 def confirm_signing_mode(skip_prompt: bool) -> None:
-    label = "LEDGER (hardware wallet)" if SIGNING_MODE == "ledger" else "PRIVATE KEY (.env hot wallet)"
-    log.info("=" * 60)
-    log.info("  Signing mode : %s", label)
-    log.info("  Wallet       : %s", WALLET_PUBKEY)
-    if SIGNING_MODE == "ledger":
-        log.info("  Derivation   : %s", LEDGER_PATH)
-    log.info("  Dry run      : %s", DRY_RUN)
-    log.info("=" * 60)
-    if skip_prompt:
-        return
-    choice = input("Continue with this signing mode? [y/N] ").strip().lower()
-    if choice not in ("y", "yes"):
-        log.info("Aborted by user.")
-        sys.exit(0)
+    _common.confirm_signing_mode(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH, DRY_RUN, skip_prompt)
 
 
 def sign_and_send_transaction(tx_b64: str) -> str:
     if SIGNING_MODE == "ledger":
         from ledger_signer import LedgerError
-        signer = _get_ledger_signer()
+        signer = _common.get_ledger_signer(LEDGER_PATH)
         log.info("  Awaiting approval on Ledger device …")
         try:
             signed_b64 = signer.sign_transaction(tx_b64, expected_signer=WALLET_PUBKEY)
@@ -622,10 +549,7 @@ def main() -> None:
         description="Post competitive lending offers into collateral pools where a watchlisted "
                     "borrower is actionable right now (open request, or a loan expiring within 24h)."
     )
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--ledger", action="store_const", dest="signing_mode", const="ledger")
-    mode_group.add_argument("--private-key", action="store_const", dest="signing_mode", const="private_key")
-    parser.add_argument("--yes", "-y", action="store_true", help="Skip the signing-mode confirmation prompt")
+    _common.add_signing_args(parser)
     parser.add_argument(
         "--min-surplus", type=float, default=0.0,
         help="Same threshold as defaulter_watch.py — only act on borrowers with total historical "
@@ -633,11 +557,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.signing_mode:
-        SIGNING_MODE = args.signing_mode
-    if SIGNING_MODE not in ("ledger", "private_key"):
-        log.error("Invalid signing mode %r — must be 'ledger' or 'private_key'", SIGNING_MODE)
-        sys.exit(1)
+    SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, SIGNING_MODE)
     if SIGNING_MODE == "private_key" and not PRIVATE_KEY_B58:
         log.error("OFFERBOOK_PRIVATE_KEY not set in .env — required for --private-key mode.")
         sys.exit(1)

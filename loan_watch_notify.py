@@ -32,6 +32,8 @@ from pathlib import Path
 
 import requests
 
+import offerbook_common as _common
+
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "")
@@ -46,31 +48,7 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 # derivable from the loan record itself, so known tokens get an exact
 # decimals figure and anything else falls back to whatever Jupiter's price
 # response reports (jupiter_decimals) for that mint.
-KNOWN_DECIMALS: dict[str, int] = {
-    "So11111111111111111111111111111111111111112": 9,
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": 9,
-    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": 9,
-    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": 9,
-    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": 9,
-    "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B": 9,
-    "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85": 9,
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": 6,
-    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": 6,
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": 5,
-    "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux": 8,
-    "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7": 6,
-    "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst": 5,
-    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij": 8,
-    "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk": 6,
-    "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh": 9,
-    "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn": 6,
-    "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC": 9,
-    "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": 6,
-    "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump": 6,
-    "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": 8,
-    "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": 9,
-    USDC_MINT: 6,
-}
+KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
 SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
@@ -80,18 +58,7 @@ SESSION = requests.Session()
 
 
 def _fetch_all_pages(endpoint: str) -> list[dict]:
-    items: list[dict] = []
-    params = {"limit": PAGE_SIZE, "offset": 0}
-    while True:
-        resp = SESSION.get(f"{API_BASE}{endpoint}", params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        items.extend(data.get("data", []))
-        if not data.get("pagination", {}).get("hasMore", False):
-            break
-        params["offset"] += PAGE_SIZE
-        time.sleep(0.1)
-    return items
+    return _common.fetch_all_pages(SESSION, API_BASE, endpoint, None, PAGE_SIZE, sleep_secs=0.1)
 
 
 def _parse(ts: str) -> datetime:

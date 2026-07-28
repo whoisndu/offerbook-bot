@@ -4,13 +4,15 @@ An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol 
 
 ## Strategies
 
-Three independent scripts — run whichever suits your risk appetite. Each offer listing expires after **24 hours** and is re-posted on the next run.
+One script, `strategy.py`, covering three calibrated loan durations — it prompts for which one(s) to run (or accepts `--days`), and can run more than one in the same invocation (e.g. `--days 3,7`). Each offer listing expires after **24 hours** and is re-posted on the next run.
 
-| Script | Loan term | LTV floor (thin market data) | LTV hard ceiling | APY target |
-|---|---|---|---|---|
-| `strategy_3_days.py` | 3 days | **60%** | 75% | Benchmark − 5% |
-| `strategy_7_days.py` | 7 days | **45%** | 75% | Benchmark − 10% |
-| `strategy_15_days.py` | 15 days | **25%** | 75% | Benchmark − 12% |
+| Duration | LTV floor (thin market data) | LTV hard ceiling | APY target |
+|---|---|---|---|
+| 3 days | **65%** | 75% | Benchmark − 5% |
+| 7 days | **45%** | 75% | Benchmark − 10% |
+| 15 days | **25%** | 75% | Benchmark − 12% |
+
+Only these three durations are supported. A shorter (e.g. 1-day) tier was deliberately left out — an unvalidated, looser LTV floor at very short durations increases exposure to rug risk, so a new tier only gets added once its own LTV/discount are explicitly chosen and calibrated, same as these three were.
 
 LTV is no longer a single fixed ceiling — it's computed per collateral token from that token's own live market data, bounded by the floor and ceiling above. See [§4](#4-dynamic-ltv-target-and-safe-collateral-sizing) for the full rule.
 
@@ -83,11 +85,11 @@ Each strategy positions itself relative to the benchmark by applying a scalar ad
 
 $$r^{\ast} = \tilde{r}^{(d)} \cdot (1 + \delta)$$
 
-| Strategy | $d$ | $\delta$ | Rationale |
+| Duration | $d$ | $\delta$ | Rationale |
 |---|---|---|---|
-| `strategy_3_days.py` | 3 days | $-0.05$ | Shallower undercut than 7/15-day — this strategy's higher LTV floor already compensates for its risk, so it doesn't also need to price above market |
-| `strategy_7_days.py` | 7 days | $-0.10$ | Mid duration; slight undercut to attract flow |
-| `strategy_15_days.py` | 15 days | $-0.12$ | Long duration; deeper undercut offsets illiquidity |
+| 3 days | 3 days | $-0.05$ | Shallower undercut than 7/15-day — this strategy's higher LTV floor already compensates for its risk, so it doesn't also need to price above market |
+| 7 days | 7 days | $-0.10$ | Mid duration; slight undercut to attract flow |
+| 15 days | 15 days | $-0.12$ | Long duration; deeper undercut offsets illiquidity |
 
 A hard floor $r^{\ast} \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
 
@@ -109,7 +111,7 @@ Unlike a single fixed ceiling, the target LTV $L_k$ for collateral token $k$ is 
 
 "Enough data" to trust $\mathcal{S}_k$ means **either** $|\mathcal{S}_k| \geq 5$, **or** the total volume $V_k = \sum_{i \in \mathcal{S}_k} p_i$ is at least $2\times$ our own offer's principal $P$ — a few small dust offers shouldn't qualify, but one large, capital-backed offer can stand on its own even with fewer than 5 orders on the book (Offerbook's escrow model means posting a lending offer requires the lender to actually fund the principal, so a large offer costs real capital to fake). $L_k$ is then set by three rules, applied in order:
 
-1. **Not enough data** (neither condition above holds): fall back to the strategy's flat floor, $L_k = L_{\text{floor}}$ (60% / 45% / 25% — see the table above).
+1. **Not enough data** (neither condition above holds): fall back to the strategy's flat floor, $L_k = L_{\text{floor}}$ (65% / 45% / 25% — see the table above).
 2. **Young token** (enough data, and the token's earliest known trading pool is under 60 days old, or its age can't be determined at all — treated as young, fail-safe): $L_k = \tilde\ell_k - 0.05$, i.e. 5 points more conservative than the token's own market.
 3. **Mature token** (enough data, and age $\geq$ 60 days): $L_k = \tilde\ell_k / 0.9$ — the bot accepts 10% less collateral than the market median implies, making its offer more attractive to borrowers than the going rate for tokens with an established track record.
 
@@ -234,7 +236,7 @@ Exit code is `1` if any LTV violations are found, `0` otherwise — safe to use 
 
 ```bash
 python cancel_offers.py --days all
-python strategy_3_days.py && python strategy_7_days.py && python strategy_15_days.py
+python strategy.py --days 3,7,15 --yes
 python verify_offers.py   # non-zero exit = something is wrong
 ```
 
@@ -285,10 +287,10 @@ It also surfaces first-time borrowers who have no resolved default/late-repay hi
 
 ## Automated capture (`defaulter_capture.py`)
 
-Reacts to the actionable conditions from `defaulter_watch.py` by posting a competitive lending offer into that same collateral pool — sized from `allocation_config.yaml` exactly like the strategy scripts, not a special override. Pricing targets the single largest live offer already in the pool (excluding our own) — the offer a borrower comparison-shopping the pool is actually most likely to pick, not a pool-wide average — and is bounded, not a race to win at any cost:
+Reacts to the actionable conditions from `defaulter_watch.py` by posting a competitive lending offer into that same collateral pool — sized from `allocation_config.yaml` exactly like `strategy.py`, not a special override. Pricing targets the single largest live offer already in the pool (excluding our own) — the offer a borrower comparison-shopping the pool is actually most likely to pick, not a pool-wide average — and is bounded, not a race to win at any cost:
 
 - **APY**: undercuts the largest offer's APY by a small, fixed margin.
-- **LTV**: a small edge above the largest offer's LTV, capped by the same `effective_target_ltv()` safety ceiling used in the strategy scripts (§4) — a borrower's historical profitability never overrides this cap.
+- **LTV**: a small edge above the largest offer's LTV, capped by the same `effective_target_ltv()` safety ceiling used in `strategy.py` (§4) — a borrower's historical profitability never overrides this cap.
 - **Duration**: matches the largest offer's own duration, since that's the specific listing being targeted.
 
 A collateral not listed in `allocation_config.yaml` (or listed at 0%) is skipped, same as a normal strategy run.
@@ -391,6 +393,19 @@ Also shows **last seen**: the most recent `createdAt`/`updatedAt` across all of 
 
 Read-only, no signing. Exit code is always `0` — this is an informational report, not a pass/fail check.
 
+## Shared code (`offerbook_common.py`)
+
+Logic that used to be copy-pasted across scripts now lives in one place and gets imported, not duplicated:
+
+- **Ledger signing** — `get_ledger_signer()`, `resolve_signer_wallet()`, `confirm_signing_mode()`. Used by `strategy.py`, `cancel_offers.py`, `defaulter_capture.py`, `create_targeted_offers.py` (via `defaulter_capture.py`), and `verify_offers.py` (read-only wallet resolution only, never signs).
+- **HTTP client + pagination** — `api_get()`, `post_tx()`, `fetch_all_pages()`. Used by every script that talks to the Offerbook API.
+- **CLI signing flags** — `add_signing_args()` / `resolve_signing_mode()` add and validate the `--ledger`/`--private-key`/`--yes` flags shared by every signing-capable script.
+- **`KNOWN_DECIMALS` / `KNOWN_SYMBOLS`** — the canonical token → decimals / display-symbol tables (24 tokens). Every script that needs either imports these instead of keeping its own copy, so a token added here is immediately recognized everywhere (`strategy.py`, `verify_offers.py`, `underwater.py`, `defaulter_capture.py`, `defaulter_watch.py`, `soon_to_expire.py`, `loan_watch_notify.py`).
+- **`_volume_weighted_median()`** — the same volume-weighted-median helper `strategy.py`, `defaulter_capture.py`, and `verify_offers.py` all use for LTV/APY benchmarking (§1, §4), so all three price and risk-check offers off the exact same statistic.
+- **`_mint_from_asset()`** — extracts a mint address from an OfferAsset, used anywhere offer/loan JSON needs parsing.
+
+Each script that's itself imported elsewhere for these helpers (e.g. `create_targeted_offers.py` calling `defaulter_capture.resolve_signer_wallet()`) keeps a thin same-signature wrapper around the shared function, so nothing calling into it had to change.
+
 ## Setup
 
 ### 1. Install dependencies
@@ -425,14 +440,17 @@ ALLOCATION_CONFIG=path/to/allocation_config.yaml
 
 ```bash
 # Safe preview — no transactions submitted (Ledger signing by default, see below)
-DRY_RUN=true python strategy_7_days.py
+DRY_RUN=true python strategy.py --days 7
 
-# Live — cancel first, then run all three strategies
+# Live — cancel first, then run all three durations in one invocation
 python cancel_offers.py --days all
-python strategy_3_days.py && python strategy_7_days.py && python strategy_15_days.py
+python strategy.py --days 3,7,15
+
+# Omit --days to be prompted interactively instead
+python strategy.py
 
 # Prefer the hot wallet key instead of the Ledger?
-python strategy_7_days.py --private-key
+python strategy.py --days 7 --private-key
 ```
 
 ## Environment variables
@@ -447,13 +465,13 @@ python strategy_7_days.py --private-key
 | `SOLANA_RPC` | No | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
 | `MAX_OFFER_PRINCIPAL_USDC` | No | `0` | Per-offer USDC cap (0 = full allocation) |
 | `ALLOCATION_CONFIG` | No | `allocation_config.yaml` | Path to allocation config file |
-| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py` and the strategy scripts |
+| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py`, `strategy.py`, and `defaulter_capture.py` |
 | `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing |
 
 ## Signing modes
 
-Every script (`cancel_offers.py`, `strategy_3_days.py`, `strategy_7_days.py`,
-`strategy_15_days.py`) supports two signing modes — **Ledger is the default**:
+Every script (`cancel_offers.py`, `strategy.py`) supports two signing modes —
+**Ledger is the default**:
 
 - `--ledger` (default): signs via a Ledger hardware wallet over USB. Requires
   the Solana app open on-device and blind signing enabled (Offerbook's
@@ -478,21 +496,22 @@ Read it before pressing the button.
 python cancel_offers.py                 # Ledger signing (default), interactive
 python cancel_offers.py --private-key   # hot wallet signing
 python cancel_offers.py --ledger --days 7 --yes
-python strategy_7_days.py --private-key --yes
+python strategy.py --days 7 --private-key --yes
 ```
 
 ## Testing against a single collateral
 
-All three strategy scripts accept `--collateral <SYMBOL|mint>` to scope a run
-to one collateral pair instead of every allocated market — useful for testing
+`strategy.py` accepts `--collateral <SYMBOL|mint>` to scope a run to one
+collateral pair instead of every allocated market — useful for testing
 signing or sizing changes without touching the rest of your allocation. Omit
 it and every pair in `allocation_config.yaml` is processed as usual.
 
 ```bash
-python strategy_3_days.py --collateral HYPE --yes
-python strategy_7_days.py --collateral HYPE --yes
-python strategy_15_days.py --collateral HYPE --yes
-MAX_OFFER_PRINCIPAL_USDC=50 python strategy_3_days.py --collateral HYPE --yes
+python strategy.py --days 3 --collateral HYPE --yes
+python strategy.py --days 7 --collateral HYPE --yes
+python strategy.py --days 15 --collateral HYPE --yes
+python strategy.py --days 3,7 --collateral HYPE --yes
+MAX_OFFER_PRINCIPAL_USDC=50 python strategy.py --days 3 --collateral HYPE --yes
 ```
 
 Note: with a single pair selected, the full per-pair allocation budget

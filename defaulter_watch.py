@@ -53,6 +53,9 @@ import requests
 import yaml
 from dotenv import load_dotenv
 
+import offerbook_common as _common
+from offerbook_common import _mint_from_asset  # noqa: F401 — re-exported for defaulter_capture.py
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -69,21 +72,7 @@ PAGE_SIZE = 100
 # the public strategy code.
 DEFAULTER_CONFIG_PATH = Path(__file__).parent / "defaulter_config.yaml"
 
-KNOWN_SYMBOLS: dict[str, str] = {
-    "So11111111111111111111111111111111111111112": "SOL",
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "mSOL",
-    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": "bSOL",
-    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": "JupSOL",
-    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": "jitoSOL",
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP",
-    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": "JLP",
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
-    "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": "USELESS",
-    "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump": "NEET",
-    "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": "HYPE",
-    "TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx": "TUNA",
-    USDC_MINT: "USDC",
-}
+KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -103,24 +92,7 @@ SESSION = requests.Session()
 # ---------------------------------------------------------------------------
 
 def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
-    params = dict(params or {})
-    params["limit"] = PAGE_SIZE
-    params["offset"] = 0
-    items: list[dict] = []
-    while True:
-        resp = SESSION.get(f"{API_BASE}{endpoint}", params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        items.extend(data.get("data", []))
-        if not data.get("pagination", {}).get("hasMore", False):
-            break
-        params["offset"] += PAGE_SIZE
-        time.sleep(0.15)
-    return items
-
-
-def _mint_from_asset(asset: dict) -> str:
-    return asset.get("mint") or asset.get("data", {}).get("mint") or asset.get("data", {}).get("asset") or ""
+    return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE)
 
 
 def symbol_for(mint: str) -> str:

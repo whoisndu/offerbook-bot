@@ -4,7 +4,7 @@ Offerbook Post-Placement Sanity Check
 Run this after placing orders to verify that every live offer has:
   - LTV within the dynamic per-token target the strategy would compute right now
     (using fresh on-chain prices and fresh market data — mirrors effective_target_ltv()
-    in strategy_3_days.py / strategy_7_days.py / strategy_15_days.py)
+    in strategy.py)
   - APY above the 10 bps floor
   - Correct duration for the chosen strategy
   - Non-dust principal amount
@@ -34,6 +34,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import offerbook_common as _common
+from offerbook_common import _mint_from_asset
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -42,7 +45,7 @@ API_BASE        = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/
 SOLANA_RPC      = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 WALLET_PUBKEY   = os.getenv("OFFERBOOK_WALLET", "")
 
-# "ledger" or "private_key" — Ledger is the default signing mode, matching strategy_*.py.
+# "ledger" or "private_key" — Ledger is the default signing mode, matching strategy.py.
 SIGNING_MODE: str = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
 LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
@@ -58,13 +61,13 @@ PAGE_SIZE     = 100
 # ---------------------------------------------------------------------------
 # Per-strategy constants
 # ---------------------------------------------------------------------------
-# Mirrors effective_target_ltv() in strategy_3_days.py / strategy_7_days.py /
-# strategy_15_days.py — see those files (and README §4) for the full rule.
+# Mirrors effective_target_ltv() in strategy.py — see that file (and README §4)
+# for the full rule.
 # Only fallback_ltv (the thin-market-data floor) differs by strategy; the
 # rest of the formula is shared.
 
 STRATEGY_PARAMS: dict[int, dict] = {
-    3:  {"fallback_ltv": 0.60, "duration_secs": 3  * 86400},
+    3:  {"fallback_ltv": 0.65, "duration_secs": 3  * 86400},
     7:  {"fallback_ltv": 0.45, "duration_secs": 7  * 86400},
     15: {"fallback_ltv": 0.25, "duration_secs": 15 * 86400},
 }
@@ -76,31 +79,7 @@ YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's
 MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
 HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
 
-KNOWN_DECIMALS: dict[str, int] = {
-    "So11111111111111111111111111111111111111112":   9,  # wSOL
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": 9,  # mSOL
-    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": 9,  # bSOL
-    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": 9,  # JupSOL
-    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn":9,  # jitoSOL
-    "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B":9,  # bbSOL
-    "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85": 9,  # bnSOL
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": 6,  # JUP
-    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R":6,  # JLP
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263":5,  # BONK
-    "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux": 8,  # HNT
-    "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7": 6,  # NOS
-    "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst":  5,  # WEN
-    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij":  8,  # cbBTC
-    "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk": 6,  # kyKYROS
-    "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh": 9,  # stKE
-    "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn":  6,  # PUMP
-    "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC": 9,  # SMRT
-    "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": 6,  # USELESS
-    "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump": 6,  # NEET
-    "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": 8,  # ZEC
-    "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": 9,  # HYPE
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,  # USDC
-}
+KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -121,27 +100,8 @@ SESSION = requests.Session()
 SESSION.headers.update({"Content-Type": "application/json"})
 
 
-def _get(endpoint: str, params: dict | None = None) -> dict:
-    url = f"{API_BASE}{endpoint}"
-    resp = SESSION.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-
 def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
-    params = dict(params or {})
-    params["limit"] = PAGE_SIZE
-    params["offset"] = 0
-    items: list[dict] = []
-    while True:
-        data = _get(endpoint, params)
-        page = data.get("data", [])
-        items.extend(page)
-        if not data.get("pagination", {}).get("hasMore", False):
-            break
-        params["offset"] += PAGE_SIZE
-        time.sleep(0.15)
-    return items
+    return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE)
 
 # ---------------------------------------------------------------------------
 # Price helpers
@@ -191,7 +151,7 @@ def fetch_current_prices(mints: list[str]) -> tuple[dict[str, float], dict[str, 
     return prices, jupiter_decimals
 
 # ---------------------------------------------------------------------------
-# Dynamic LTV target — mirrors effective_target_ltv() in strategy_*.py
+# Dynamic LTV target — mirrors effective_target_ltv() in strategy.py
 # ---------------------------------------------------------------------------
 
 _token_age_cache: dict[str, float | None] = {}
@@ -216,12 +176,23 @@ def _token_age_days(mint: str) -> float | None:
 
 def fetch_market_ltv_stats(
     collateral_mints: set[str], raw_offers: list[dict], raw_loans: list[dict]
-) -> dict[str, tuple[float | None, int, float]]:
+) -> dict[str, tuple[float | None, int, float, float | None]]:
     """
-    For each collateral mint, return (volume-weighted-mean LTV, sample count, total
-    volume USD) computed from ALL active lending offers + active loans market-wide
-    (every lender, not just us) — the same data source strategy_*.py's
-    PairStats.weighted_mean_ltv_usd / offer_ltv_weights_usd draw from.
+    For each collateral mint, return (volume-weighted-median LTV, sample count,
+    total volume USD, largest live offer's LTV) computed from ALL active lending
+    offers + active loans market-wide (every lender, not just us) — the same
+    data source strategy.py's PairStats draws from.
+
+    Median, not mean: robust to a single large outlier offer dragging the
+    benchmark, matching strategy.py's ltv_benchmark_usd.
+
+    largest_offer_ltv is the LTV of the single largest (by principal USD) live
+    OFFER for that mint — loans are excluded here, same as strategy.py's
+    largest_offer_ltv, since a borrower comparison-shopping the pool is
+    choosing between current listings, not past loans. Used to cap the target
+    down (never loosen it) the same way effective_target_ltv() below does, so
+    this check reflects the exact same safety ceiling strategy.py would apply
+    if run right now.
 
     Takes already-fetched market data (raw_offers from fetch_all_lending_offers(),
     raw_loans from /loans/status/active) so callers can fetch once per run and
@@ -229,6 +200,8 @@ def fetch_market_ltv_stats(
     """
     ltvs: dict[str, list[float]] = defaultdict(list)
     weights: dict[str, list[float]] = defaultdict(list)
+    largest_principal_usd: dict[str, float] = defaultdict(float)
+    largest_offer_ltv: dict[str, float] = {}
 
     for r in raw_offers:
         cmint = r.get("collateralMint") or _mint_from_asset(r.get("collateral", {}))
@@ -237,8 +210,12 @@ def fetch_market_ltv_stats(
         meta = r.get("metadata") or {}
         p_usd, c_usd = meta.get("principalAmountUsd"), meta.get("collateralAmountUsd")
         if p_usd and c_usd and c_usd > 0:
-            ltvs[cmint].append(p_usd / c_usd)
+            ltv = p_usd / c_usd
+            ltvs[cmint].append(ltv)
             weights[cmint].append(p_usd)
+            if p_usd > largest_principal_usd[cmint]:
+                largest_principal_usd[cmint] = p_usd
+                largest_offer_ltv[cmint] = ltv
 
     for r in raw_loans:
         cmint = r.get("collateralMint") or _mint_from_asset(r.get("collateral", {}))
@@ -250,15 +227,14 @@ def fetch_market_ltv_stats(
             ltvs[cmint].append(p_usd / c_usd)
             weights[cmint].append(p_usd)
 
-    stats: dict[str, tuple[float | None, int, float]] = {}
+    stats: dict[str, tuple[float | None, int, float, float | None]] = {}
     for mint in collateral_mints:
         vals, wts = ltvs.get(mint, []), weights.get(mint, [])
         if not vals:
-            stats[mint] = (None, 0, 0.0)
+            stats[mint] = (None, 0, 0.0, None)
             continue
-        total_w = sum(wts)
-        weighted_mean = sum(v * w for v, w in zip(vals, wts)) / total_w if total_w > 0 else sum(vals) / len(vals)
-        stats[mint] = (weighted_mean, len(vals), total_w)
+        median_ltv = _common._volume_weighted_median(vals, wts)
+        stats[mint] = (median_ltv, len(vals), sum(wts), largest_offer_ltv.get(mint))
     return stats
 
 
@@ -269,23 +245,31 @@ def effective_target_ltv(
     market_sample_count: int,
     market_total_volume_usd: float = 0.0,
     our_offer_usdc: float = 0.0,
+    largest_offer_ltv: float | None = None,
 ) -> float:
-    """Recomputes the same dynamic LTV target the strategy scripts use — see
-    effective_target_ltv() in strategy_*.py and README §4 for the full rule.
+    """Recomputes the same dynamic LTV target strategy.py uses — see
+    effective_target_ltv() in strategy.py and README §4 for the full rule.
     "Enough data" means EITHER >= MIN_MARKET_SAMPLES orders OR market volume
     >= MARKET_VOLUME_MULTIPLIER x our_offer_usdc (our_offer_usdc must be > 0
-    for the volume path to apply)."""
+    for the volume path to apply). largest_offer_ltv, when known, caps the
+    result down (never loosens it) to the pair's single largest live offer's
+    LTV — same guardrail strategy.py applies, guarding against the
+    weighted-median benchmark being looser than what the market's most
+    prominent participant actually accepts."""
     has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
     has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
 
     if not market_weighted_ltv or not has_enough_data:
-        return min(fallback_ltv, HARD_LTV_CEILING)
-
-    age_days = _token_age_days(collateral_mint)
-    if age_days is not None and age_days >= YOUNG_TOKEN_AGE_DAYS:
-        target = market_weighted_ltv / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT)
+        target = fallback_ltv
     else:
-        target = market_weighted_ltv - YOUNG_TOKEN_DISCOUNT
+        age_days = _token_age_days(collateral_mint)
+        if age_days is not None and age_days >= YOUNG_TOKEN_AGE_DAYS:
+            target = market_weighted_ltv / (1 - MATURE_TOKEN_COLLATERAL_DISCOUNT)
+        else:
+            target = market_weighted_ltv - YOUNG_TOKEN_DISCOUNT
+
+    if largest_offer_ltv is not None:
+        target = min(target, largest_offer_ltv)
 
     return max(min(target, HARD_LTV_CEILING), 0.05)
 
@@ -293,35 +277,15 @@ def effective_target_ltv(
 # Offer fetching
 # ---------------------------------------------------------------------------
 
-def _mint_from_asset(asset: dict) -> str:
-    return asset.get("mint") or asset.get("data", {}).get("mint") or asset.get("data", {}).get("asset") or ""
-
-
 def resolve_signer_wallet() -> str:
     """
-    Resolve WALLET_PUBKEY for the active signing mode. For Ledger (the default),
-    the device is the source of truth (overrides/fills in OFFERBOOK_WALLET) — matches
-    resolve_signer_wallet() in strategy_*.py so this checks the same wallet they sign
-    offers from. Read-only: only queries the device's pubkey, never signs anything.
+    Resolve WALLET_PUBKEY for the active signing mode — matches
+    resolve_signer_wallet() in strategy.py so this checks the same wallet it
+    signs offers from. Read-only: only queries the device's pubkey, never signs
+    anything. Thin wrapper: delegates to offerbook_common.
     """
     global WALLET_PUBKEY
-    if SIGNING_MODE == "ledger":
-        try:
-            from ledger_signer import LedgerError, LedgerSigner
-        except ImportError:
-            log.error("Missing dependencies: pip install ledgerblue hidapi base58")
-            sys.exit(1)
-        try:
-            device_pubkey = LedgerSigner(path=LEDGER_PATH).get_pubkey()
-        except LedgerError as exc:
-            log.error(str(exc))
-            sys.exit(1)
-        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
-            log.warning(
-                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
-                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
-            )
-        WALLET_PUBKEY = device_pubkey
+    WALLET_PUBKEY = _common.resolve_signer_wallet(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH)
     return WALLET_PUBKEY
 
 
@@ -364,7 +328,7 @@ def check_strategy(
     all_offers: list[dict],
     live_prices: dict[str, float],
     decimals_map: dict[str, int],
-    market_ltv_stats: dict[str, tuple[float | None, int, float]],
+    market_ltv_stats: dict[str, tuple[float | None, int, float, float | None]],
 ) -> tuple[int, int, int]:
     """
     Verify all live offers for the given strategy duration.
@@ -429,12 +393,12 @@ def check_strategy(
         vol_usdc: float | None = None
 
         principal_usdc = principal_raw / 10 ** USDC_DECIMALS
-        market_weighted_ltv, market_sample_count, market_total_volume_usd = market_ltv_stats.get(
-            collateral_mint, (None, 0, 0.0)
+        market_weighted_ltv, market_sample_count, market_total_volume_usd, largest_offer_ltv = market_ltv_stats.get(
+            collateral_mint, (None, 0, 0.0, None)
         )
         target_ltv = effective_target_ltv(
             collateral_mint, fallback_ltv, market_weighted_ltv, market_sample_count,
-            market_total_volume_usd, principal_usdc,
+            market_total_volume_usd, principal_usdc, largest_offer_ltv,
         )
 
         if collateral_price and decimals is not None and collateral_raw > 0:

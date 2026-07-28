@@ -46,6 +46,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+import offerbook_common as _common
+
 load_dotenv()
 
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
@@ -67,20 +69,7 @@ SESSION = requests.Session()
 
 
 def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
-    params = dict(params or {})
-    params["limit"] = PAGE_SIZE
-    params["offset"] = 0
-    items: list[dict] = []
-    while True:
-        resp = SESSION.get(f"{API_BASE}{endpoint}", params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        items.extend(data.get("data", []))
-        if not data.get("pagination", {}).get("hasMore", False):
-            break
-        params["offset"] += PAGE_SIZE
-        time.sleep(0.1)
-    return items
+    return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE, sleep_secs=0.1)
 
 
 def _parse_ts(ts: str | None) -> datetime | None:

@@ -1,11 +1,21 @@
 """
-Offerbook Competitive Lending Bot — 15-Day Strategy
+Offerbook Competitive Lending Bot — Multi-Duration Strategy
 ====================================================
-Loan term : 15 days  |   Max LTV : 25%   |   Offer listing expires : 24 h
-Collateral must be worth ≥ 4× the loan at current prices.
-Lower LTV compensates for longer exposure to price movement.
+Runs the same competitive-lending strategy across one or more calibrated loan
+durations in a single invocation. Supported durations, each with its own
+market-calibrated risk profile:
 
-Strategy:
+  Days   LTV floor (thin market data)   Collateral ratio   Undercut vs benchmark
+  3      65%                            ~1.54x              5%
+  7      45%                            ~2.22x              10%
+  15     25%                            ~4x                 12%
+
+Shorter duration -> higher LTV tolerated (less exposure to price movement /
+default over that window) and a shallower undercut (the higher LTV floor
+already compensates for the risk, so the price doesn't also need to drop
+below market). LTV hard ceiling (75%) is shared across all durations.
+
+Strategy (run independently, once per selected duration):
   1. Fetch all active lending offers (from all pools/pairs).
   2. Fetch all active loans.
   3. For each unique (principalMint, collateralMint) pair that has open loans or
@@ -13,16 +23,23 @@ Strategy:
      active lending offers — the price level where the largest cluster of real
      market volume actually sits, not a mean (which one large outlier offer can
      drag far from where borrowers are actually transacting).
-  4. Post a new lending offer at benchmark_apy * 0.88 (12% below benchmark) to be competitive.
+  4. Post a new lending offer at benchmark_apy * (1 - discount) to be
+     competitive, where the discount is set by the selected duration (see
+     table above).
   5. Enforce:
-       - duration  <= 15 days (1,296,000 seconds)
-       - LTV       <= 25%  (collateral must be ≥ 4× loan value at current prices)
+       - duration  <= the selected duration
+       - LTV       <= the selected duration's LTV floor, dynamically adjusted
+         per-token (see effective_target_ltv()), always capped by
+         HARD_LTV_CEILING
 
 Usage:
   pip install requests solders base58
   export OFFERBOOK_WALLET=<your-base58-wallet-pubkey>
-  export OFFERBOOK_PRIVATE_KEY=<your-base58-private-key>   # for signing txns
-  python strategy_15_days.py
+  export OFFERBOOK_PRIVATE_KEY=<your-base58-private-key>   # for --private-key signing
+  python strategy.py                    # prompts: "Enter loan duration in days (3, 7, or 15 ...)"
+  python strategy.py --days 7           # run only the 7-day strategy, no prompt
+  python strategy.py --days 3,7         # run the 3-day and 7-day strategies back to back
+  python strategy.py --collateral HYPE  # only create an offer for this collateral
 
 Notes:
   - The Offerbook transaction API returns a base64-encoded Solana transaction.
@@ -31,6 +48,11 @@ Notes:
   - APY is stored in basis points (1% = 100 bps).  LTV uses the USD metadata
     values the API enriches; if USD values are absent we fall back to a raw
     token-amount ratio (same token pair assumed to be same price units).
+  - Only the three durations above are supported. Deliberately no dynamic or
+    extrapolated duration (e.g. a hypothetical 1-day tier): an unvalidated,
+    looser LTV floor at very short durations would increase exposure to rug
+    risk, so new tiers are only added once their own LTV/discount have been
+    explicitly chosen and calibrated, the same way these three were.
 """
 from __future__ import annotations
 
@@ -50,6 +72,9 @@ from typing import Any
 import requests
 import yaml  # pip install pyyaml
 
+import offerbook_common as _common
+from offerbook_common import _mint_from_asset
+
 # ---------------------------------------------------------------------------
 # Configuration – edit here or override via environment variables
 # ---------------------------------------------------------------------------
@@ -65,15 +90,73 @@ PRIVATE_KEY_B58: str = os.getenv("OFFERBOOK_PRIVATE_KEY", "")  # base58 private 
 SIGNING_MODE: str = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
 LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
-# Strategy parameters
-APY_DISCOUNT = 0.12          # undercut the market benchmark (volume-weighted median) by 12%
-MAX_DURATION_DAYS = 15
-MAX_DURATION_SECS = MAX_DURATION_DAYS * 24 * 60 * 60   # 1 296 000
-OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term is still 15 days
+# Strategy parameters that vary by loan duration. Only these three durations
+# are supported — see the module docstring for why a 1-day tier isn't here.
+DURATION_CONFIGS: dict[int, dict[str, float]] = {
+    3:  {"apy_discount": 0.05, "fallback_ltv": 0.65},
+    7:  {"apy_discount": 0.10, "fallback_ltv": 0.45},
+    15: {"apy_discount": 0.12, "fallback_ltv": 0.25},
+}
+
+# Populated per-run by _apply_duration_config() below, once per selected
+# duration, before that duration's strategy logic runs.
+APY_DISCOUNT: float = 0.0
+MAX_DURATION_DAYS: int = 0
+MAX_DURATION_SECS: int = 0
+FALLBACK_LTV: float = 0.0
+
+OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing always expires in 24 h, regardless of loan term
+
+
+def _apply_duration_config(days: int) -> None:
+    """Set the module-level duration-dependent strategy constants for `days`."""
+    global APY_DISCOUNT, MAX_DURATION_DAYS, MAX_DURATION_SECS, FALLBACK_LTV
+    cfg = DURATION_CONFIGS[days]
+    APY_DISCOUNT = cfg["apy_discount"]
+    MAX_DURATION_DAYS = days
+    MAX_DURATION_SECS = days * 24 * 60 * 60
+    FALLBACK_LTV = cfg["fallback_ltv"]
+
+
+def _parse_duration_selection(raw: str) -> list[int] | None:
+    """
+    Parse a comma-separated duration string like "7" or "3,7" into a
+    validated, de-duplicated list of ints, preserving input order.
+    Returns None if the string is empty or any token isn't a supported
+    duration (see DURATION_CONFIGS) — callers should treat that as invalid
+    input, not silently drop the bad token.
+    """
+    days: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if not token.isdigit() or int(token) not in DURATION_CONFIGS:
+            return None
+        d = int(token)
+        if d not in days:
+            days.append(d)
+    return days or None
+
+
+def prompt_for_durations() -> list[int]:
+    """Interactively ask which duration(s) to run, re-prompting on bad input."""
+    supported = ", ".join(str(d) for d in DURATION_CONFIGS)
+    while True:
+        raw = input(
+            f'Enter loan duration in days ({supported}; comma-separated for '
+            f'multiple, e.g. "3,7"): '
+        ).strip()
+        parsed = _parse_duration_selection(raw)
+        if parsed:
+            return parsed
+        print(f"  Invalid input — enter one or more of: {supported} (comma-separated)")
+
 
 # LTV target is computed per-token from that token's own market data (see
 # effective_target_ltv() below) rather than a single fixed ceiling:
-#   - Not enough data to trust the token's own market → use FALLBACK_LTV.
+#   - Not enough data to trust the token's own market → use FALLBACK_LTV
+#     (set per-duration above via DURATION_CONFIGS).
 #     "Enough data" means EITHER >= MIN_MARKET_SAMPLES offers/loans, OR total
 #     market volume >= MARKET_VOLUME_MULTIPLIER x our own offer size — a few
 #     small dust offers don't count, but one large, capital-backed offer can
@@ -85,14 +168,13 @@ OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24 h; loan term
 #     MATURE_TOKEN_COLLATERAL_DISCOUNT less collateral than the market average
 #     to be more attractive to borrowers.
 # HARD_LTV_CEILING always applies on top, regardless of which branch produced
-# the target.
-FALLBACK_LTV = 0.25                        # used when there's not enough market data for the token
+# the target, and regardless of duration.
 YOUNG_TOKEN_AGE_DAYS = 60
 MIN_MARKET_SAMPLES = 5
 MARKET_VOLUME_MULTIPLIER = 2.0             # OR: market volume >= this x our own offer size
 YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's own market LTV
 MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
-HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
+HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what, regardless of duration
 
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
@@ -118,33 +200,10 @@ DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
 # Decimals for collateral tokens.  Needed to convert Jupiter's per-whole-token
 # price into a per-raw-unit price that the Offerbook API uses.
-# Add any token you trade here.  Unknown tokens fall back to a stale implied
-# price inferred from offer metadata (less accurate, but better than nothing).
-KNOWN_DECIMALS: dict[str, int] = {
-    "So11111111111111111111111111111111111111112":   9,  # wSOL
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": 9,  # mSOL
-    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": 9,  # bSOL
-    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": 9,  # JupSOL
-    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn":9,  # jitoSOL
-    "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B":9,  # bbSOL
-    "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85": 9,  # bnSOL
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": 6,  # JUP
-    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R":6,  # JLP
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263":5,  # BONK
-    "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux": 8,  # HNT
-    "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7": 6,  # NOS
-    "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst":  5,  # WEN
-    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij":  8,  # cbBTC
-    "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk": 6,  # kyKYROS
-    "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh": 9,  # stKE
-    "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn":  6,  # PUMP
-    "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC": 9,  # SMRT
-    "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": 6,  # USELESS
-    "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump": 6,  # NEET
-    "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": 8,  # ZEC
-    "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": 9,  # HYPE
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,  # USDC
-}
+# Canonical table lives in offerbook_common.py — add any new token there, not
+# here. Unknown tokens fall back to a stale implied price inferred from offer
+# metadata (less accurate, but better than nothing).
+KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 
 # Symbol -> mint, for the --collateral CLI filter (accepts either).
 SYMBOL_TO_MINT: dict[str, str] = {
@@ -272,25 +331,7 @@ class Loan:
         return (self.principal_mint, self.collateral_mint)
 
 
-def _volume_weighted_median(values: list[float], weights: list[float]) -> float | None:
-    """Volume-weighted median: the value at which cumulative weight first reaches
-    half of total weight — the price level where the largest cluster of real
-    market volume sits. Robust to a single large outlier value, unlike a
-    volume-weighted mean, which that one outlier can drag far from where most
-    trading actually happens."""
-    if not values:
-        return None
-    if not weights or len(weights) != len(values) or sum(weights) <= 0:
-        s = sorted(values)
-        return s[len(s) // 2]
-    pairs = sorted(zip(values, weights), key=lambda p: p[0])
-    half = sum(w for _, w in pairs) / 2
-    cumulative = 0.0
-    for value, weight in pairs:
-        cumulative += weight
-        if cumulative >= half:
-            return value
-    return pairs[-1][0]
+_volume_weighted_median = _common._volume_weighted_median
 
 
 @dataclass
@@ -468,52 +509,20 @@ def fetch_available_balance(mint: str, decimals: int) -> tuple[int, int, int]:
 
 
 def _get(endpoint: str, params: dict | None = None) -> dict:
-    url = f"{API_BASE}{endpoint}"
-    resp = SESSION.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    return _common.api_get(SESSION, API_BASE, endpoint, params)
 
 
 def _post_tx(endpoint: str, payload: dict) -> dict:
-    url = f"{TX_API_BASE}{endpoint}"
-    resp = SESSION.post(url, json=payload, timeout=30)
-    if not resp.ok:
-        # Read body before raise_for_status consumes it
-        try:
-            detail = resp.json().get("message", resp.text)
-        except Exception:
-            detail = resp.text or "(empty)"
-        resp.reason = detail  # attach to the exception message
-        resp.raise_for_status()
-    return resp.json()
+    return _common.post_tx(SESSION, TX_API_BASE, endpoint, payload)
 
 
 def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
-    """Auto-paginate through all pages of a paginated endpoint."""
-    params = dict(params or {})
-    params["limit"] = PAGE_SIZE
-    params["offset"] = 0
-    items: list[dict] = []
-    while True:
-        data = _get(endpoint, params)
-        page = data.get("data", [])
-        items.extend(page)
-        pagination = data.get("pagination", {})
-        if not pagination.get("hasMore", False):
-            break
-        params["offset"] += PAGE_SIZE
-        time.sleep(0.15)   # be polite to the API
-    return items
+    return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE)
 
 
 # ---------------------------------------------------------------------------
 # Fetch helpers
 # ---------------------------------------------------------------------------
-
-def _mint_from_asset(asset: dict) -> str:
-    """Extract mint address from an OfferAsset (direct mint field or legacy nested data field)."""
-    return asset.get("mint") or asset.get("data", {}).get("mint") or asset.get("data", {}).get("asset") or ""
-
 
 def _parse_offer(raw: dict) -> Offer:
     meta = raw.get("metadata") or {}
@@ -927,61 +936,15 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
 # Signer (lazy — only needed when DRY_RUN=false)
 # ---------------------------------------------------------------------------
 
-_ledger_signer = None
-
-
-def _get_ledger_signer():
-    global _ledger_signer
-    if _ledger_signer is not None:
-        return _ledger_signer
-    try:
-        from ledger_signer import LedgerSigner
-    except ImportError:
-        log.error("Missing dependencies: pip install ledgerblue hidapi base58")
-        sys.exit(1)
-    _ledger_signer = LedgerSigner(path=LEDGER_PATH)
-    return _ledger_signer
-
-
 def resolve_signer_wallet() -> str:
-    """
-    Resolve WALLET_PUBKEY for the active signing mode. For Ledger, the device
-    is the source of truth (overrides/fills in OFFERBOOK_WALLET).
-    """
+    """Thin wrapper: delegates to offerbook_common, updates this module's WALLET_PUBKEY."""
     global WALLET_PUBKEY
-    if SIGNING_MODE == "ledger":
-        from ledger_signer import LedgerError
-
-        try:
-            signer = _get_ledger_signer()
-            device_pubkey = signer.get_pubkey()
-        except LedgerError as exc:
-            log.error(str(exc))
-            sys.exit(1)
-        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
-            log.warning(
-                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
-                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
-            )
-        WALLET_PUBKEY = device_pubkey
+    WALLET_PUBKEY = _common.resolve_signer_wallet(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH)
     return WALLET_PUBKEY
 
 
 def confirm_signing_mode(skip_prompt: bool) -> None:
-    label = "LEDGER (hardware wallet)" if SIGNING_MODE == "ledger" else "PRIVATE KEY (.env hot wallet)"
-    log.info("=" * 60)
-    log.info("  Signing mode : %s", label)
-    log.info("  Wallet       : %s", WALLET_PUBKEY)
-    if SIGNING_MODE == "ledger":
-        log.info("  Derivation   : %s", LEDGER_PATH)
-    log.info("  Dry run      : %s", DRY_RUN)
-    log.info("=" * 60)
-    if skip_prompt:
-        return
-    choice = input("Continue with this signing mode? [y/N] ").strip().lower()
-    if choice not in ("y", "yes"):
-        log.info("Aborted by user.")
-        sys.exit(0)
+    _common.confirm_signing_mode(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH, DRY_RUN, skip_prompt)
 
 # ---------------------------------------------------------------------------
 # Transaction submission
@@ -997,7 +960,7 @@ def sign_and_send_transaction(tx_b64: str) -> str:
     if SIGNING_MODE == "ledger":
         from ledger_signer import LedgerError
 
-        signer = _get_ledger_signer()
+        signer = _common.get_ledger_signer(LEDGER_PATH)
         log.info("  Awaiting approval on Ledger device …")
         try:
             signed_b64 = signer.sign_transaction(tx_b64, expected_signer=WALLET_PUBKEY)
@@ -1105,23 +1068,17 @@ def main() -> None:
     global SIGNING_MODE, WALLET_PUBKEY
 
     parser = argparse.ArgumentParser(description="Offerbook competitive lending strategy")
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--ledger", action="store_const", dest="signing_mode", const="ledger",
-        help="Sign with a Ledger hardware wallet (default)",
-    )
-    mode_group.add_argument(
-        "--private-key", action="store_const", dest="signing_mode", const="private_key",
-        help="Sign with OFFERBOOK_PRIVATE_KEY from .env",
-    )
-    parser.add_argument(
-        "--yes", "-y", action="store_true",
-        help="Skip the signing-mode confirmation prompt",
-    )
+    _common.add_signing_args(parser)
     parser.add_argument(
         "--collateral", default=None,
         help="Only create an offer for this collateral (symbol like HYPE, or a mint address). "
              "Omit to run the full strategy across every allocated pair.",
+    )
+    parser.add_argument(
+        "--days", default=None,
+        help='Loan duration(s) to run, in days, e.g. "7" or "3,7". Must be one or more '
+             'of: ' + ", ".join(str(d) for d in DURATION_CONFIGS) + '. '
+             'Omit to be prompted interactively.',
     )
     args = parser.parse_args()
 
@@ -1129,11 +1086,18 @@ def main() -> None:
     if args.collateral:
         collateral_filter = SYMBOL_TO_MINT.get(args.collateral.upper(), args.collateral)
 
-    if args.signing_mode:
-        SIGNING_MODE = args.signing_mode
-    if SIGNING_MODE not in ("ledger", "private_key"):
-        log.error("Invalid signing mode %r — must be 'ledger' or 'private_key'", SIGNING_MODE)
-        sys.exit(1)
+    if args.days:
+        selected_days = _parse_duration_selection(args.days)
+        if not selected_days:
+            log.error(
+                "Invalid --days value %r — must be one or more of: %s (comma-separated)",
+                args.days, ", ".join(str(d) for d in DURATION_CONFIGS),
+            )
+            sys.exit(1)
+    else:
+        selected_days = prompt_for_durations()
+
+    SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, SIGNING_MODE)
 
     if SIGNING_MODE == "private_key":
         if not WALLET_PUBKEY:
@@ -1149,15 +1113,18 @@ def main() -> None:
 
     log.info("=" * 60)
     log.info("Offerbook Competitive Lending Bot")
-    log.info("Wallet  : %s", WALLET_PUBKEY)
-    log.info("DRY RUN : %s", DRY_RUN)
-    log.info("Strategy: APY = market_benchmark × %.0f%%  |  LTV floor = %.0f%%, hard ceiling = %.0f%%  |  max duration = %d days",
-             (1 - APY_DISCOUNT) * 100, FALLBACK_LTV * 100, HARD_LTV_CEILING * 100, MAX_DURATION_DAYS)
+    log.info("Wallet    : %s", WALLET_PUBKEY)
+    log.info("DRY RUN   : %s", DRY_RUN)
+    log.info("Durations : %s day(s)", ", ".join(str(d) for d in selected_days))
     log.info("=" * 60)
 
     # 1. Fetch USDC balance (wallet + escrow) before doing anything.
     # topup:"minimum" draws only the shortfall from wallet, so the full
-    # combined balance (wallet + escrow) is available as budget.
+    # combined balance (wallet + escrow) is available as budget. This single
+    # snapshot is reused for every selected duration below — offers across
+    # durations, like offers across collateral pairs, intentionally draw on
+    # the same shared escrow/wallet pool (rehypothecation), since only one
+    # offer actually gets filled per unit of capital.
     try:
         _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
     except Exception as exc:
@@ -1168,174 +1135,201 @@ def main() -> None:
         log.info("Per-offer USDC cap  : %d USDC  (MAX_OFFER_PRINCIPAL_USDC)", MAX_OFFER_PRINCIPAL_USDC)
     log.info("=" * 60)
 
-    # 2. Fetch market data
+    # 2. Fetch market data once — duration only changes which offers count as
+    # "same duration" vs "global" fallback when aggregating pair stats below,
+    # not what needs fetching, so there's no need to re-fetch per duration.
     lending_offers = fetch_active_lending_offers()
     active_loans = fetch_active_loans()
 
-    # 3. Aggregate pair statistics
-    pair_stats = build_pair_stats(lending_offers, active_loans, MAX_DURATION_SECS)
-    log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
+    grand_successes = grand_skipped = grand_errors = 0
+    grand_usdc_committed_raw = 0
 
-    # 4. Only include pairs that have at least one live lending offer to benchmark APY against
-    relevant_pairs = {
-        pair: ps
-        for pair, ps in pair_stats.items()
-        if ps.lending_apys or ps.global_lending_apys
-    }
-    log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
+    for days in selected_days:
+        _apply_duration_config(days)
 
-    if collateral_filter:
-        relevant_pairs = {
-            pair: ps for pair, ps in relevant_pairs.items() if pair[1] == collateral_filter
-        }
-        log.info("Filtered to collateral %s: %d pair(s)", args.collateral, len(relevant_pairs))
-        if not relevant_pairs:
-            log.error("No benchmarkable pair found for collateral %s (%s) — nothing to do.",
-                      args.collateral, collateral_filter)
-            return
-
-    # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
-    pair_offer_params: dict = {}
-    pair_budgets_raw: dict = {}
-
-    for pair, ps in relevant_pairs.items():
-        params = compute_offer_params(ps)
-        if params is None:
-            continue
-        pair_offer_params[pair] = params
-
-        if usdc_available_raw is not None and params["principalMint"] == USDC_MINT:
-            fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
-            pair_budgets_raw[pair] = int(usdc_available_raw * fraction)
-
-    log.info("=" * 60)
-    log.info("Allocation config: %s", _CONFIG_PATH)
-    for pair, budget_raw in pair_budgets_raw.items():
-        ps = relevant_pairs[pair]
-        fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
-        log.info("  %s…  →  %.0f%%  =  %.2f USDC",
-                 ps.collateral_mint[:8], fraction * 100, budget_raw / 10**USDC_DECIMALS)
-    log.info("=" * 60)
-
-    # 5b. Fetch real-time prices for every collateral mint we're going to offer on.
-    #     These are used to compute collateralAmount so that LTV matches
-    #     effective_target_ltv() at current market prices — NOT at whatever stale
-    #     price market offers were created with.
-    collateral_mints = list({relevant_pairs[p].collateral_mint for p in pair_offer_params})
-    current_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
-    decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
-
-    # 6. Build and submit offers
-    successes = 0
-    skipped = 0
-    errors = 0
-    usdc_committed_raw = 0
-
-    for pair, ps in relevant_pairs.items():
+        log.info("\n" + "#" * 60)
+        log.info("# %d-DAY STRATEGY", days)
         log.info(
-            "\nPair %s…/%s…  | loans=%d  benchmark_apy=%.0f bps [from %s]  target_apy=%s bps",
-            ps.principal_mint[:8], ps.collateral_mint[:8],
-            ps.active_loan_count,
-            ps.apy_benchmark_bps or 0,
-            ps.apy_source,
-            ps.target_apy_bps or "N/A",
+            "# APY = market_benchmark × %.0f%%  |  LTV floor = %.0f%%, hard ceiling = %.0f%%  |  duration = %d days",
+            (1 - APY_DISCOUNT) * 100, FALLBACK_LTV * 100, HARD_LTV_CEILING * 100, MAX_DURATION_DAYS,
         )
+        log.info("#" * 60)
 
-        offer_params = pair_offer_params.get(pair)
-        if offer_params is None:
-            skipped += 1
-            continue
+        # 3. Aggregate pair statistics for this duration
+        pair_stats = build_pair_stats(lending_offers, active_loans, MAX_DURATION_SECS)
+        log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
 
-        if usdc_available_raw is not None and offer_params["principalMint"] == USDC_MINT:
-            pair_budget_raw = pair_budgets_raw.get(pair, 0)
+        # 4. Only include pairs that have at least one live lending offer to benchmark APY against
+        relevant_pairs = {
+            pair: ps
+            for pair, ps in pair_stats.items()
+            if ps.lending_apys or ps.global_lending_apys
+        }
+        log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
 
-            if pair_budget_raw <= 1000:
-                log.info("  Skipping – allocation too small (%.2f USDC)",
-                         pair_budget_raw / 10**USDC_DECIMALS)
+        if collateral_filter:
+            relevant_pairs = {
+                pair: ps for pair, ps in relevant_pairs.items() if pair[1] == collateral_filter
+            }
+            log.info("Filtered to collateral %s: %d pair(s)", args.collateral, len(relevant_pairs))
+            if not relevant_pairs:
+                log.error("No benchmarkable pair found for collateral %s (%s) — nothing to do.",
+                          args.collateral, collateral_filter)
+                continue
+
+        # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
+        pair_offer_params: dict = {}
+        pair_budgets_raw: dict = {}
+
+        for pair, ps in relevant_pairs.items():
+            params = compute_offer_params(ps)
+            if params is None:
+                continue
+            pair_offer_params[pair] = params
+
+            if usdc_available_raw is not None and params["principalMint"] == USDC_MINT:
+                fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+                pair_budgets_raw[pair] = int(usdc_available_raw * fraction)
+
+        log.info("=" * 60)
+        log.info("Allocation config: %s", _CONFIG_PATH)
+        for pair, budget_raw in pair_budgets_raw.items():
+            ps = relevant_pairs[pair]
+            fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+            log.info("  %s…  →  %.0f%%  =  %.2f USDC",
+                     ps.collateral_mint[:8], fraction * 100, budget_raw / 10**USDC_DECIMALS)
+        log.info("=" * 60)
+
+        # 5b. Fetch real-time prices for every collateral mint we're going to offer on.
+        #     These are used to compute collateralAmount so that LTV matches
+        #     effective_target_ltv() at current market prices — NOT at whatever stale
+        #     price market offers were created with.
+        collateral_mints = list({relevant_pairs[p].collateral_mint for p in pair_offer_params})
+        current_prices, jupiter_decimals = fetch_current_prices(collateral_mints)
+        decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
+
+        # 6. Build and submit offers
+        successes = 0
+        skipped = 0
+        errors = 0
+        usdc_committed_raw = 0
+
+        for pair, ps in relevant_pairs.items():
+            log.info(
+                "\nPair %s…/%s…  | loans=%d  benchmark_apy=%.0f bps [from %s]  target_apy=%s bps",
+                ps.principal_mint[:8], ps.collateral_mint[:8],
+                ps.active_loan_count,
+                ps.apy_benchmark_bps or 0,
+                ps.apy_source,
+                ps.target_apy_bps or "N/A",
+            )
+
+            offer_params = pair_offer_params.get(pair)
+            if offer_params is None:
                 skipped += 1
                 continue
 
-            # Always offer the full allocation budget (not the market median).
-            # allowPartialFill=True means borrowers can take any fraction of it.
-            offer_params["principalAmount"] = pair_budget_raw
+            if usdc_available_raw is not None and offer_params["principalMint"] == USDC_MINT:
+                pair_budget_raw = pair_budgets_raw.get(pair, 0)
 
-            # Compute collateral required so that LTV = effective_target_ltv() at current
-            # prices. This is the critical fix: we do NOT copy collateralAmount from other
-            # lenders' offers because those offers may have been created when token
-            # prices were very different.
-            collateral_raw = safe_collateral_amount(
-                principal_raw=pair_budget_raw,
-                collateral_mint=ps.collateral_mint,
-                current_prices=current_prices,
-                decimals_map=decimals_map,
-                market_weighted_ltv=ps.ltv_benchmark_usd,
-                market_sample_count=len(ps.offer_ltv_usds),
-                market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
-                largest_offer_ltv=ps.largest_offer_ltv,
-            )
+                if pair_budget_raw <= 1000:
+                    log.info("  Skipping – allocation too small (%.2f USDC)",
+                             pair_budget_raw / 10**USDC_DECIMALS)
+                    skipped += 1
+                    continue
 
-            if collateral_raw is None:
-                log.warning(
-                    "  %s: no usable live price (Jupiter + DexScreener both failed, or "
-                    "decimals unknown) — skipping to avoid sizing off a stale price",
-                    ps.collateral_mint[:8],
+                # Always offer the full allocation budget (not the market median).
+                # allowPartialFill=True means borrowers can take any fraction of it.
+                offer_params["principalAmount"] = pair_budget_raw
+
+                # Compute collateral required so that LTV = effective_target_ltv() at current
+                # prices. This is the critical fix: we do NOT copy collateralAmount from other
+                # lenders' offers because those offers may have been created when token
+                # prices were very different.
+                collateral_raw = safe_collateral_amount(
+                    principal_raw=pair_budget_raw,
+                    collateral_mint=ps.collateral_mint,
+                    current_prices=current_prices,
+                    decimals_map=decimals_map,
+                    market_weighted_ltv=ps.ltv_benchmark_usd,
+                    market_sample_count=len(ps.offer_ltv_usds),
+                    market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
+                    largest_offer_ltv=ps.largest_offer_ltv,
                 )
-                skipped += 1
-                continue
 
-            principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
-
-            # Cross-validate the live price against the pool-implied price from existing
-            # loans/offers. If the price feed is wrong (e.g. DexScreener returning 5000×
-            # the real price), collateral_raw will be far too low and our offer's true LTV
-            # will exceed the target — skip rather than create an undercollateralised offer.
-            pool_price = ps.median_collateral_price_per_raw
-            pair_max_ltv = effective_target_ltv(
-                ps.collateral_mint, ps.ltv_benchmark_usd, len(ps.offer_ltv_usds),
-                sum(ps.offer_ltv_weights_usd), principal_usdc, ps.largest_offer_ltv,
-            )
-            if pool_price and pool_price > 0 and collateral_raw > 0:
-                ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)
-                if ltv_at_pool_price > pair_max_ltv * 2.0:
+                if collateral_raw is None:
                     log.warning(
-                        "  %s: skipping — live price requires %.4g tokens but pool-implied "
-                        "price gives LTV %.0f%% (2× limit %.0f%%) — likely bad price feed",
-                        ps.collateral_mint[:8], collateral_raw,
-                        ltv_at_pool_price * 100, pair_max_ltv * 100,
+                        "  %s: no usable live price (Jupiter + DexScreener both failed, or "
+                        "decimals unknown) — skipping to avoid sizing off a stale price",
+                        ps.collateral_mint[:8],
                     )
                     skipped += 1
                     continue
 
-            offer_params["collateralAmount"] = collateral_raw
-            offer_params["minFillAmount"] = max(1001, pair_budget_raw // 100)
+                principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
 
-            collateral_price = current_prices.get(ps.collateral_mint)
-            decimals = decimals_map.get(ps.collateral_mint)
-            if collateral_price and decimals is not None:
-                collateral_usdc = collateral_raw / (10 ** decimals) * collateral_price
-                actual_ltv = principal_usdc / collateral_usdc if collateral_usdc else 0
-                log.info(
-                    "  Sizing: %.2f USDC / %.4g tokens (collateral ~$%.2f)  →  LTV %.1f%%",
-                    principal_usdc,
-                    collateral_raw / (10 ** decimals),
-                    collateral_usdc,
-                    actual_ltv * 100,
+                # Cross-validate the live price against the pool-implied price from existing
+                # loans/offers. If the price feed is wrong (e.g. DexScreener returning 5000×
+                # the real price), collateral_raw will be far too low and our offer's true LTV
+                # will exceed the target — skip rather than create an undercollateralised offer.
+                pool_price = ps.median_collateral_price_per_raw
+                pair_max_ltv = effective_target_ltv(
+                    ps.collateral_mint, ps.ltv_benchmark_usd, len(ps.offer_ltv_usds),
+                    sum(ps.offer_ltv_weights_usd), principal_usdc, ps.largest_offer_ltv,
                 )
+                if pool_price and pool_price > 0 and collateral_raw > 0:
+                    ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)
+                    if ltv_at_pool_price > pair_max_ltv * 2.0:
+                        log.warning(
+                            "  %s: skipping — live price requires %.4g tokens but pool-implied "
+                            "price gives LTV %.0f%% (2× limit %.0f%%) — likely bad price feed",
+                            ps.collateral_mint[:8], collateral_raw,
+                            ltv_at_pool_price * 100, pair_max_ltv * 100,
+                        )
+                        skipped += 1
+                        continue
 
-        ok = create_offer(offer_params)
-        if ok:
-            successes += 1
-            if offer_params["principalMint"] == USDC_MINT:
-                usdc_committed_raw += offer_params["principalAmount"]
-        else:
-            errors += 1
+                offer_params["collateralAmount"] = collateral_raw
+                offer_params["minFillAmount"] = max(1001, pair_budget_raw // 100)
 
-        time.sleep(0.5)
+                collateral_price = current_prices.get(ps.collateral_mint)
+                decimals = decimals_map.get(ps.collateral_mint)
+                if collateral_price and decimals is not None:
+                    collateral_usdc = collateral_raw / (10 ** decimals) * collateral_price
+                    actual_ltv = principal_usdc / collateral_usdc if collateral_usdc else 0
+                    log.info(
+                        "  Sizing: %.2f USDC / %.4g tokens (collateral ~$%.2f)  →  LTV %.1f%%",
+                        principal_usdc,
+                        collateral_raw / (10 ** decimals),
+                        collateral_usdc,
+                        actual_ltv * 100,
+                    )
+
+            ok = create_offer(offer_params)
+            if ok:
+                successes += 1
+                if offer_params["principalMint"] == USDC_MINT:
+                    usdc_committed_raw += offer_params["principalAmount"]
+            else:
+                errors += 1
+
+            time.sleep(0.5)
+
+        log.info("\n" + "-" * 60)
+        log.info("%d-day done.  Created=%d  Skipped=%d  Errors=%d", days, successes, skipped, errors)
+        if usdc_committed_raw:
+            log.info("USDC committed (%d-day): %.6f USDC", days, usdc_committed_raw / 10**USDC_DECIMALS)
+        log.info("-" * 60)
+
+        grand_successes += successes
+        grand_skipped += skipped
+        grand_errors += errors
+        grand_usdc_committed_raw += usdc_committed_raw
 
     log.info("\n" + "=" * 60)
-    log.info("Done.  Created=%d  Skipped=%d  Errors=%d", successes, skipped, errors)
-    if usdc_committed_raw:
-        log.info("USDC committed this run: %.6f USDC", usdc_committed_raw / 10**USDC_DECIMALS)
+    log.info("All durations done.  Created=%d  Skipped=%d  Errors=%d", grand_successes, grand_skipped, grand_errors)
+    if grand_usdc_committed_raw:
+        log.info("Total USDC committed this run: %.6f USDC", grand_usdc_committed_raw / 10**USDC_DECIMALS)
     log.info("=" * 60)
 
 

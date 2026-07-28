@@ -28,6 +28,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import offerbook_common as _common
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -40,31 +42,8 @@ DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PAGE_SIZE = 100
 
-KNOWN_DECIMALS: dict[str, tuple[int, str]] = {
-    "So11111111111111111111111111111111111111112": (9, "SOL"),
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": (9, "mSOL"),
-    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": (9, "bSOL"),
-    "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v": (9, "JupSOL"),
-    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": (9, "jitoSOL"),
-    "Bybit2vBJGhPF52GBdNaQfUJ6ZpThSgHBobjWZpLPb4B": (9, "bbSOL"),
-    "BNso1VUJnh4zcfpZa6986Ea66P6TCp59hvtNJ8b1X85": (9, "bnSOL"),
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": (6, "JUP"),
-    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": (6, "JLP"),
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": (5, "BONK"),
-    "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux": (8, "HNT"),
-    "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7": (6, "NOS"),
-    "WENWENvqNAA8883GttHGFApfgzGLtzHain8QxAwYQst": (5, "WEN"),
-    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij": (8, "cbBTC"),
-    "kyKYFGGhy5YAg6Yotedj7ZtByUBepsraT4BFkF3Uxmk": (6, "kyKYROS"),
-    "stke7uu3fXHsGqKVVjKnkmj65LRPVrqr4bLG2SJg7rh": (9, "stKE"),
-    "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn": (6, "PUMP"),
-    "5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC": (9, "SMRT"),
-    "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": (6, "USELESS"),
-    "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump": (6, "NEET"),
-    "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": (8, "ZEC"),
-    "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": (9, "HYPE"),
-    USDC_MINT: (6, "USDC"),
-}
+KNOWN_DECIMALS = _common.KNOWN_DECIMALS
+KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -163,7 +142,8 @@ def fetch_prices(mints: set[str]) -> tuple[dict[str, float], dict[str, int]]:
 
 def fmt_amount(mint: str | None, raw: int, decimals_map: dict[str, int]) -> str:
     if mint and mint in KNOWN_DECIMALS:
-        dec, sym = KNOWN_DECIMALS[mint]
+        dec = KNOWN_DECIMALS[mint]
+        sym = KNOWN_SYMBOLS.get(mint, mint)
         return f"{raw / 10**dec:,.4f} {sym}"
     if mint and mint in decimals_map:
         return f"{raw / 10**decimals_map[mint]:,.4f} ({mint[:6]}…{mint[-4:]})"
@@ -176,7 +156,7 @@ def usd_value(mint: str | None, raw: int, prices: dict[str, float], decimals_map
     if not mint:
         return None
     if mint in KNOWN_DECIMALS:
-        dec = KNOWN_DECIMALS[mint][0]
+        dec = KNOWN_DECIMALS[mint]
     elif mint in decimals_map:
         dec = decimals_map[mint]
     else:

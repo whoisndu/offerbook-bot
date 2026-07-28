@@ -39,6 +39,8 @@ from typing import Any
 
 import requests
 
+import offerbook_common as _common
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -92,29 +94,17 @@ SESSION.headers["Content-Type"] = "application/json"
 
 
 def _get(path: str, **params) -> Any:
-    resp = SESSION.get(f"{API_BASE}{path}", params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    return _common.api_get(SESSION, API_BASE, path, params)
 
 
 def _post_tx(endpoint: str, payload: dict) -> dict:
-    url = f"{TX_API_BASE}{endpoint}"
-    resp = SESSION.post(url, json=payload, timeout=30)
-    if not resp.ok:
-        try:
-            detail = resp.json().get("message", resp.text)
-        except Exception:
-            detail = resp.text or "(empty)"
-        resp.reason = detail
-        resp.raise_for_status()
-    return resp.json()
+    return _common.post_tx(SESSION, TX_API_BASE, endpoint, payload)
 
 # ---------------------------------------------------------------------------
 # Signer (lazy — only needed when DRY_RUN=false)
 # ---------------------------------------------------------------------------
 
 _keypair = None
-_ledger_signer = None
 
 
 def _get_keypair():
@@ -131,61 +121,15 @@ def _get_keypair():
     return _keypair
 
 
-def _get_ledger_signer():
-    global _ledger_signer
-    if _ledger_signer is not None:
-        return _ledger_signer
-    try:
-        from ledger_signer import LedgerSigner
-    except ImportError:
-        log.error("Missing dependencies: pip install ledgerblue hidapi base58")
-        sys.exit(1)
-    _ledger_signer = LedgerSigner(path=LEDGER_PATH)
-    return _ledger_signer
-
-
 def resolve_signer_wallet() -> str:
-    """
-    Resolve WALLET_PUBKEY for the active signing mode. For Ledger, the device
-    is the source of truth (overrides/fills in OFFERBOOK_WALLET). For
-    private-key mode, OFFERBOOK_WALLET is used as-is (the on-chain program
-    validates that the signer matches).
-    """
+    """Thin wrapper: delegates to offerbook_common, updates this module's WALLET_PUBKEY."""
     global WALLET_PUBKEY
-    if SIGNING_MODE == "ledger":
-        from ledger_signer import LedgerError
-
-        try:
-            signer = _get_ledger_signer()
-            device_pubkey = signer.get_pubkey()
-        except LedgerError as exc:
-            log.error(str(exc))
-            sys.exit(1)
-        if WALLET_PUBKEY and WALLET_PUBKEY != device_pubkey:
-            log.warning(
-                "OFFERBOOK_WALLET (%s) does not match the Ledger address (%s) at path %s — using the Ledger address.",
-                WALLET_PUBKEY, device_pubkey, LEDGER_PATH,
-            )
-        WALLET_PUBKEY = device_pubkey
+    WALLET_PUBKEY = _common.resolve_signer_wallet(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH)
     return WALLET_PUBKEY
 
 
 def confirm_signing_mode(skip_prompt: bool) -> None:
-    label = "LEDGER (hardware wallet)" if SIGNING_MODE == "ledger" else "PRIVATE KEY (.env hot wallet)"
-    print()
-    print("=" * 70)
-    print(f"  Signing mode : {label}")
-    print(f"  Wallet       : {WALLET_PUBKEY}")
-    if SIGNING_MODE == "ledger":
-        print(f"  Derivation   : {LEDGER_PATH}")
-    print(f"  Dry run      : {DRY_RUN}")
-    print("=" * 70)
-    if skip_prompt:
-        return
-    choice = input("Continue with this signing mode? [y/N] ").strip().lower()
-    if choice not in ("y", "yes"):
-        log.info("Aborted by user.")
-        sys.exit(0)
+    _common.confirm_signing_mode(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH, DRY_RUN, skip_prompt)
 
 # ---------------------------------------------------------------------------
 # Strategy selection prompt
@@ -305,7 +249,7 @@ def _sign_and_send(tx_b64: str) -> str:
     if SIGNING_MODE == "ledger":
         from ledger_signer import LedgerError
 
-        signer = _get_ledger_signer()
+        signer = _common.get_ledger_signer(LEDGER_PATH)
         log.info("  Awaiting approval on Ledger device …")
         try:
             signed_b64 = signer.sign_transaction(tx_b64, expected_signer=WALLET_PUBKEY)
@@ -395,26 +339,10 @@ def main() -> None:
         action="store_true",
         help="Withdraw funds back to wallet after cancellation (default: leave in escrow)",
     )
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--ledger", action="store_const", dest="signing_mode", const="ledger",
-        help="Sign with a Ledger hardware wallet (default)",
-    )
-    mode_group.add_argument(
-        "--private-key", action="store_const", dest="signing_mode", const="private_key",
-        help="Sign with OFFERBOOK_PRIVATE_KEY from .env",
-    )
-    parser.add_argument(
-        "--yes", "-y", action="store_true",
-        help="Skip the signing-mode confirmation prompt",
-    )
+    _common.add_signing_args(parser)
     args = parser.parse_args()
 
-    if args.signing_mode:
-        SIGNING_MODE = args.signing_mode
-    if SIGNING_MODE not in ("ledger", "private_key"):
-        log.error("Invalid signing mode %r — must be 'ledger' or 'private_key'", SIGNING_MODE)
-        sys.exit(1)
+    SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, SIGNING_MODE)
 
     if SIGNING_MODE == "private_key":
         if not WALLET_PUBKEY:

@@ -99,7 +99,7 @@ allocations:
   # (ltv ~16%)  — unknown token
   HNg5PYJmtqcmzXrv6S9zP1CDKk5BgDuyFBxbvNaDvCN: 0.0
 
-  # AVICI — Avici  (ltv unknown)
+  # AVICI — Avici  (ltv ~22%)
   BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta: 0.5
 
   # UFD — Unicorn Fart Dust  (ltv ~24%)
@@ -114,7 +114,7 @@ allocations:
   # UMBRA — Umbra  (ltv unknown)
   PRVT6TB7uss3FrUd2D9xs2zqDBsa3GbMJMwCQsgmeta: 0.2
 
-  # GOAT — Goatseus Maximus  (ltv unknown)
+  # GOAT — Goatseus Maximus  (ltv ~46%)
   CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump: 0.6
 
   # Pnut — Peanut the Squirrel  (ltv ~26%)
@@ -123,7 +123,7 @@ allocations:
   # Buttcoin — Buttcoin  (ltv ~41%)
   Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump: 0.2
 
-  # DOOD — Doodles  (ltv unknown)
+  # DOOD — Doodles  (ltv ~24%)
   DvjbEsdca43oQcw2h3HW1CT7N3x5vRcr3QrvTUHnXvgV: 0.0
 
   # 2Z — DoubleZero  (ltv ~43%)
@@ -150,7 +150,7 @@ allocations:
   # TUNA — DefiTuna  (ltv unknown)
   TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx: 0.0
 
-  # jellyjelly — jelly-my-jelly  (ltv unknown)
+  # jellyjelly — jelly-my-jelly  (ltv ~44%)
   FeR8VBqNRSUD5NtXAj2n3j1dAHkZHfyDktKuLXD4pump: 0.2
 
   # VINE — Vine Coin  (ltv ~35%)
@@ -174,7 +174,7 @@ allocations:
   # PENGU — Pudgy Penguins  (ltv ~57%)
   2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv: 1.0
 
-  # BOME — BOOK OF MEME  (ltv unknown)
+  # BOME — BOOK OF MEME  (ltv ~43%)
   ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82: 0.3
 
   # (ltv ~43%)  — pump.fun utility token
@@ -591,4 +591,23 @@ allocations:
 
   # xBTC — OKX Wrapped BTC  (ltv ~78%)
   CtzPWv73Sn1dMGVU3ZtLv9yWSyUAanBni19YWDaznnkn: 0.8
+
+  # ---------------------------------------------------------------------------
+  # Newly discovered tokens (allocation defaults to 0.0 — set your % to enable)
+  # ---------------------------------------------------------------------------
+
+  # EPIK — TEH EPIK DUCK  (ltv ~36%)
+  3BgwJ8b7b9hHX4sgfZ2KJhv9496CoVfsMK2YePevsBRw: 0.0
+
+  # GP — Graphite  (ltv ~53%)
+  31k88G5Mq7ptbRDf3AM13HAq6wRQHXHikR8hik7wPygk: 0.0
+
+  # ZMB — ZMB 0382  (ltv ~57%)
+  D7wmuoCMGJkTCJG77seFCCNasWdDhaTjHRVh5AkApcvB: 0.0
+
+  # stSLX — Solstice stSLX  (ltv ~72%)
+  GxHksENo754dKj6kv5d2z7ey9KwE7YSRYgRCtoFYd2yq: 0.0
+
+  # STRCx — Strategy PP Variable xStock  (ltv ~72%)
+  Xs78JED6PFZxWc2wCEPspZW9kL3Se5J7L5TChKgsidH: 0.0
 default: 0.0

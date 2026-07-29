@@ -179,6 +179,8 @@ HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what, reg
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 
+WALLET_BUFFER_USDC = 100.0   # always leave at least this much USDC unallocated
+
 DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
 PAGE_SIZE = 100              # items per API page
@@ -1127,6 +1129,10 @@ def main() -> None:
     # offer actually gets filled per unit of capital.
     try:
         _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
+        buffer_raw = int(WALLET_BUFFER_USDC * 10 ** USDC_DECIMALS)
+        usdc_available_raw = max(0, usdc_available_raw - buffer_raw)
+        log.info("USDC available for allocation (after $%.2f buffer): %.2f",
+                 WALLET_BUFFER_USDC, usdc_available_raw / 10 ** USDC_DECIMALS)
     except Exception as exc:
         log.warning("Could not fetch USDC balance: %s  (proceeding anyway)", exc)
         usdc_available_raw = None

@@ -12,10 +12,12 @@ gap (a stretch with zero loans open) is labeled with its length in days
 directly on the chart, so both are easy to eyeball without reading the
 console output.
 
-If --borrower is omitted, automatically finds and uses the largest borrower
-(by total USD principal) for the given collateral.
+If --collateral/--borrower are omitted, prompts interactively for them
+(blank borrower answer auto-picks the largest borrower by total USD
+principal for that collateral).
 
 Usage:
+  python borrower_loan_timeline.py                      # prompts: "Enter collateral symbol ..."
   python borrower_loan_timeline.py --collateral USELESS
   python borrower_loan_timeline.py --collateral USELESS --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ
   python borrower_loan_timeline.py --collateral USELESS --output ~/Desktop/chart.png
@@ -248,29 +250,49 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
     log.info("Saved chart to %s", output_path)
 
 
+def prompt_for_collateral() -> str:
+    """Interactively ask for a collateral symbol or mint, re-prompting on empty input."""
+    while True:
+        raw = input("Enter collateral symbol (e.g. USELESS) or mint address: ").strip()
+        if raw:
+            return raw
+        print("  Please enter a collateral symbol or mint address.")
+
+
+def prompt_for_borrower() -> str | None:
+    """Interactively ask for a borrower address; blank means auto-pick the largest."""
+    raw = input("Enter borrower address (leave blank to auto-pick the largest borrower): ").strip()
+    return raw or None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--collateral", required=True, help="Collateral symbol (e.g. USELESS) or mint address")
-    parser.add_argument("--borrower", default=None, help="Borrower wallet address. Omit to auto-pick the largest borrower.")
+    parser.add_argument("--collateral", default=None, help="Collateral symbol (e.g. USELESS) or mint address. Omit to be prompted.")
+    parser.add_argument("--borrower", default=None, help="Borrower wallet address. Omit to be prompted (blank there auto-picks the largest borrower).")
     parser.add_argument("--output", default=None, help="PNG output path. Defaults to ./borrower_timeline_<borrower8>.png")
     args = parser.parse_args()
 
-    collateral_mint = SYMBOL_TO_MINT.get(args.collateral.upper(), args.collateral)
+    collateral_arg = args.collateral or prompt_for_collateral()
+    # --borrower wasn't passed on the command line at all → ask interactively
+    # (blank answer there means "auto-pick the largest borrower").
+    borrower_arg = args.borrower if "--borrower" in sys.argv else prompt_for_borrower()
+
+    collateral_mint = SYMBOL_TO_MINT.get(collateral_arg.upper(), collateral_arg)
     collateral_symbol = KNOWN_SYMBOLS.get(collateral_mint, collateral_mint[:8] + "…")
 
     log.info("Fetching loan history for collateral %s (%s)…", collateral_symbol, collateral_mint[:8])
     all_loans = fetch_loans_for_collateral(collateral_mint)
     if not all_loans:
-        log.error("No loans found for collateral %s — check the mint/symbol.", args.collateral)
+        log.error("No loans found for collateral %s — check the mint/symbol.", collateral_arg)
         sys.exit(1)
 
-    borrower = args.borrower or find_largest_borrower(all_loans)
-    if not args.borrower:
-        log.info("No --borrower given — auto-selected largest borrower: %s", borrower)
+    borrower = borrower_arg or find_largest_borrower(all_loans)
+    if not borrower_arg:
+        log.info("No borrower given — auto-selected largest borrower: %s", borrower)
 
     loans = [l for l in all_loans if l.get("borrower") == borrower]
     if not loans:
-        log.error("No loans found for borrower %s on collateral %s.", borrower, args.collateral)
+        log.error("No loans found for borrower %s on collateral %s.", borrower, collateral_arg)
         sys.exit(1)
 
     now = datetime.now(timezone.utc)

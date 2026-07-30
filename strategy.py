@@ -53,6 +53,9 @@ Notes:
     looser LTV floor at very short durations would increase exposure to rug
     risk, so new tiers are only added once their own LTV/discount have been
     explicitly chosen and calibrated, the same way these three were.
+  - Each pair's principal is rounded down to the nearest ROUND_STEP_USDC
+    (falling back to ROUND_SMALL_STEP_USDC for pairs whose allocation is
+    under one full step), so offer sizes read as round figures.
 """
 from __future__ import annotations
 
@@ -180,6 +183,9 @@ MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floo
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 
 WALLET_BUFFER_USDC = 100.0   # always leave at least this much USDC unallocated
+
+ROUND_STEP_USDC = 500.0        # round each pair's principal down to the nearest $500...
+ROUND_SMALL_STEP_USDC = 100.0  # ...or nearest $100 if the pair's budget is under one $500 step
 
 DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
@@ -1237,6 +1243,9 @@ def main() -> None:
 
             if usdc_available_raw is not None and offer_params["principalMint"] == USDC_MINT:
                 pair_budget_raw = pair_budgets_raw.get(pair, 0)
+                pair_budget_raw = _common.round_principal_raw(
+                    pair_budget_raw, USDC_DECIMALS, ROUND_STEP_USDC, ROUND_SMALL_STEP_USDC,
+                )
 
                 if pair_budget_raw <= 1000:
                     log.info("  Skipping – allocation too small (%.2f USDC)",

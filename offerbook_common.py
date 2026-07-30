@@ -90,6 +90,26 @@ def _mint_from_asset(asset: dict) -> str:
     return asset.get("mint") or asset.get("data", {}).get("mint") or asset.get("data", {}).get("asset") or ""
 
 
+def round_principal_raw(amount_raw: int, decimals: int, step: float, small_step: float) -> int:
+    """
+    Round `amount_raw` (raw token units) DOWN to a round whole-dollar figure,
+    so offer sizes read like 11,500.00 rather than 11,800.35. Rounds down
+    only — never up past the actual available balance.
+
+    Uses `step` (e.g. $500) once the amount is at least one full step; below
+    that, falls back to the finer `small_step` (e.g. $100) so small amounts
+    aren't rounded away to zero. All-integer math (no float amount) to avoid
+    rounding drift.
+    """
+    scale = 10 ** decimals
+    step_raw = int(step * scale)
+    small_step_raw = int(small_step * scale)
+    use_step_raw = step_raw if amount_raw >= step_raw else small_step_raw
+    if use_step_raw <= 0:
+        return amount_raw
+    return (amount_raw // use_step_raw) * use_step_raw
+
+
 def _volume_weighted_median(values: list[float], weights: list[float]) -> float | None:
     """Volume-weighted median: the value at which cumulative weight first reaches
     half of total weight — the price level where the largest cluster of real

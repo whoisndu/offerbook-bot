@@ -22,10 +22,18 @@ Strategy (run independently, once per selected duration):
   1. Fetch all active lending offers (from all pools/pairs).
   2. Fetch all active loans.
   3. For each unique (principalMint, collateralMint) pair that has open loans or
-     open lending offers, compute the volume-weighted MEDIAN APY of existing
-     active lending offers — the price level where the largest cluster of real
-     market volume actually sits, not a mean (which one large outlier offer can
-     drag far from where borrowers are actually transacting).
+     open lending offers, compute the volume-weighted MEDIAN APY (and LTV) of
+     existing active lending offers — the price level where the largest
+     cluster of real market volume actually sits, not a mean (which one large
+     outlier offer can drag far from where borrowers are actually
+     transacting). Our own offers/loans are always excluded from this
+     benchmark — otherwise, once we have a live offer in a pair, it counts as
+     "the market" for computing our own next target, which can snowball (our
+     large offer skews the benchmark toward itself, next run targets even
+     further that way). We also prefer competing offers within
+     SIZE_BAND_MIN..SIZE_BAND_MAX x our own intended offer size, falling back
+     to the full (self-excluded) set if none qualify — a lender an order of
+     magnitude smaller or larger than us isn't a realistic comparison.
   4. Post a new lending offer at benchmark_apy * (1 - discount) to be
      competitive, where the discount is set by the selected duration (see
      table above).
@@ -346,9 +354,6 @@ class Loan:
         return (self.principal_mint, self.collateral_mint)
 
 
-_volume_weighted_median = _common._volume_weighted_median
-
-
 @dataclass
 class PairStats:
     """Aggregated stats for a (principalMint, collateralMint) pair."""
@@ -388,17 +393,19 @@ class PairStats:
     largest_offer_apy_bps: int | None = None
     largest_offer_ltv: float | None = None
 
-    @property
-    def apy_benchmark_bps(self) -> float | None:
+    def apy_benchmark_bps(self, our_offer_usdc: float | None = None) -> tuple[float | None, bool]:
         # Prefer same-duration offers; fall back to global cross-duration.
         # Volume-weighted MEDIAN: the price level where the largest cluster
         # of real market volume actually sits, not a mean (which one large
         # outlier offer can drag far from where borrowers actually transact).
+        # Also prefers offers within SIZE_BAND_MIN..SIZE_BAND_MAX x
+        # our_offer_usdc, since a lender far smaller/larger than us isn't a
+        # realistic comparison — falls back to the full set if none qualify.
         apys = self.lending_apys if self.lending_apys else self.global_lending_apys
         amounts = self.lending_offer_amounts if self.lending_apys else self.global_lending_offer_amounts
         if not apys:
-            return None
-        return _volume_weighted_median(apys, amounts)
+            return None, False
+        return _common.size_filtered_volume_weighted_median(apys, amounts, our_offer_usdc)
 
     @property
     def apy_source(self) -> str:
@@ -408,9 +415,8 @@ class PairStats:
             return "live offers (global)"
         return "none"
 
-    @property
-    def target_apy_bps(self) -> int | None:
-        benchmark = self.apy_benchmark_bps
+    def target_apy_bps(self, our_offer_usdc: float | None = None) -> int | None:
+        benchmark, _ = self.apy_benchmark_bps(our_offer_usdc)
         if benchmark is None:
             return None
         raw = benchmark * (1 - APY_DISCOUNT)
@@ -439,14 +445,15 @@ class PairStats:
         s = sorted(self.offer_ltv_usds)
         return s[len(s) // 2]
 
-    @property
-    def ltv_benchmark_usd(self) -> float | None:
+    def ltv_benchmark_usd(self, our_offer_usdc: float | None = None) -> tuple[float | None, bool]:
         """Volume-weighted MEDIAN LTV across this token's own market offers/loans —
         the LTV level where the largest cluster of real market volume sits, not
-        dragged toward a single large outlier offer the way a weighted mean would be."""
+        dragged toward a single large outlier offer the way a weighted mean would be.
+        Also prefers offers within SIZE_BAND_MIN..SIZE_BAND_MAX x our_offer_usdc
+        (see apy_benchmark_bps), falling back to the full set if none qualify."""
         if not self.offer_ltv_usds:
-            return None
-        return _volume_weighted_median(self.offer_ltv_usds, self.offer_ltv_weights_usd)
+            return None, False
+        return _common.size_filtered_volume_weighted_median(self.offer_ltv_usds, self.offer_ltv_weights_usd, our_offer_usdc)
 
     @property
     def median_collateral_price_per_raw(self) -> float | None:
@@ -806,8 +813,20 @@ def build_pair_stats(
     lending_offers: list[Offer],
     active_loans: list[Loan],
     duration_secs: int,
+    exclude_wallet: str | None = None,
 ) -> dict[tuple[str, str], PairStats]:
-    """Aggregate per-pair statistics from offers and loans."""
+    """
+    Aggregate per-pair statistics from offers and loans.
+
+    exclude_wallet, when given, drops our own offers (by creator) and our own
+    loans (by lender) from every benchmark-driving field — otherwise, once we
+    have a live offer of our own in a pair, it counts as "market data" for
+    computing our *next* target, which can create a feedback loop (our own
+    large offer skews the volume-weighted benchmark toward itself, then the
+    next run targets even further in that direction). active_loan_count still
+    counts every active loan regardless of lender — it's just informational
+    context in the run log, not a benchmark input.
+    """
     stats: dict[tuple[str, str], PairStats] = {}
 
     def get_or_create(pair: tuple[str, str]) -> PairStats:
@@ -819,6 +838,8 @@ def build_pair_stats(
         return stats[pair]
 
     for offer in lending_offers:
+        if exclude_wallet and offer.creator == exclude_wallet:
+            continue
         ps = get_or_create(offer.pair)
         ps.global_lending_apys.append(offer.apy)
         ps.global_lending_offer_amounts.append(offer.principal_amount)
@@ -842,6 +863,8 @@ def build_pair_stats(
     for loan in active_loans:
         ps = get_or_create(loan.pair)
         ps.active_loan_count += 1
+        if exclude_wallet and loan.lender == exclude_wallet:
+            continue
         if loan.apy > 0:
             ps.loan_apys.append(loan.apy)
         if loan.principal_amount > 0:
@@ -857,7 +880,17 @@ def build_pair_stats(
     return stats
 
 
-def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
+def our_offer_usdc_for(collateral_mint: str, usdc_available_raw: int | None) -> float | None:
+    """Our intended USDC principal for this collateral, derived purely from
+    the allocation config and available balance — known before any market
+    data is fetched, so it can be used to size-filter market benchmarks."""
+    if usdc_available_raw is None:
+        return None
+    fraction = ALLOCATION_CONFIG.get(collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+    return usdc_available_raw / 10 ** USDC_DECIMALS * fraction
+
+
+def compute_offer_params(ps: PairStats, our_offer_usdc: float | None = None) -> dict[str, Any] | None:
     """
     Compute the parameters for a new lending offer on a given pair.
     Returns None if we cannot or should not create an offer.
@@ -866,7 +899,7 @@ def compute_offer_params(ps: PairStats) -> dict[str, Any] | None:
         log.debug("Skipping pair with empty mint address")
         return None
 
-    target_apy = ps.target_apy_bps
+    target_apy = ps.target_apy_bps(our_offer_usdc)
     if target_apy is None:
         log.debug("Skipping %s/%s – no market APY reference", ps.principal_mint[:8], ps.collateral_mint[:8])
         return None
@@ -1175,7 +1208,7 @@ def main() -> None:
         log.info("#" * 60)
 
         # 3. Aggregate pair statistics for this duration
-        pair_stats = build_pair_stats(lending_offers, active_loans, MAX_DURATION_SECS)
+        pair_stats = build_pair_stats(lending_offers, active_loans, MAX_DURATION_SECS, exclude_wallet=WALLET_PUBKEY)
         log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
 
         # 4. Only include pairs that have at least one live lending offer to benchmark APY against
@@ -1216,7 +1249,8 @@ def main() -> None:
         pair_budgets_raw: dict = {}
 
         for pair, ps in relevant_pairs.items():
-            params = compute_offer_params(ps)
+            our_offer_usdc = our_offer_usdc_for(ps.collateral_mint, usdc_available_raw)
+            params = compute_offer_params(ps, our_offer_usdc)
             if params is None:
                 continue
             pair_offer_params[pair] = params
@@ -1249,13 +1283,16 @@ def main() -> None:
         usdc_committed_raw = 0
 
         for pair, ps in relevant_pairs.items():
+            our_offer_usdc = our_offer_usdc_for(ps.collateral_mint, usdc_available_raw)
+            apy_benchmark, apy_used_size_filter = ps.apy_benchmark_bps(our_offer_usdc)
             log.info(
-                "\nPair %s…/%s…  | loans=%d  benchmark_apy=%.0f bps [from %s]  target_apy=%s bps",
+                "\nPair %s…/%s…  | loans=%d  benchmark_apy=%.0f bps [from %s%s]  target_apy=%s bps",
                 ps.principal_mint[:8], ps.collateral_mint[:8],
                 ps.active_loan_count,
-                ps.apy_benchmark_bps or 0,
+                apy_benchmark or 0,
                 ps.apy_source,
-                ps.target_apy_bps or "N/A",
+                ", 0.5x-2x our size" if apy_used_size_filter else "",
+                ps.target_apy_bps(our_offer_usdc) or "N/A",
             )
 
             offer_params = pair_offer_params.get(pair)
@@ -1278,6 +1315,11 @@ def main() -> None:
                 # Always offer the full allocation budget (not the market median).
                 # allowPartialFill=True means borrowers can take any fraction of it.
                 offer_params["principalAmount"] = pair_budget_raw
+                principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
+
+                ltv_benchmark, ltv_used_size_filter = ps.ltv_benchmark_usd(principal_usdc)
+                if ltv_used_size_filter:
+                    log.info("  LTV benchmark: using offers within 0.5x-2x our size (%.2f USDC)", principal_usdc)
 
                 # Compute collateral required so that LTV = effective_target_ltv() at current
                 # prices. This is the critical fix: we do NOT copy collateralAmount from other
@@ -1288,7 +1330,7 @@ def main() -> None:
                     collateral_mint=ps.collateral_mint,
                     current_prices=current_prices,
                     decimals_map=decimals_map,
-                    market_weighted_ltv=ps.ltv_benchmark_usd,
+                    market_weighted_ltv=ltv_benchmark,
                     market_sample_count=len(ps.offer_ltv_usds),
                     market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
                     largest_offer_ltv=ps.largest_offer_ltv,
@@ -1303,15 +1345,13 @@ def main() -> None:
                     skipped += 1
                     continue
 
-                principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
-
                 # Cross-validate the live price against the pool-implied price from existing
                 # loans/offers. If the price feed is wrong (e.g. DexScreener returning 5000×
                 # the real price), collateral_raw will be far too low and our offer's true LTV
                 # will exceed the target — skip rather than create an undercollateralised offer.
                 pool_price = ps.median_collateral_price_per_raw
                 pair_max_ltv = effective_target_ltv(
-                    ps.collateral_mint, ps.ltv_benchmark_usd, len(ps.offer_ltv_usds),
+                    ps.collateral_mint, ltv_benchmark, len(ps.offer_ltv_usds),
                     sum(ps.offer_ltv_weights_usd), principal_usdc, ps.largest_offer_ltv,
                 )
                 if pool_price and pool_price > 0 and collateral_raw > 0:

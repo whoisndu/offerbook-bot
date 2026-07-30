@@ -131,6 +131,30 @@ def _volume_weighted_median(values: list[float], weights: list[float]) -> float 
     return pairs[-1][0]
 
 
+SIZE_BAND_MIN = 0.5  # when comparing against other live offers to set our own
+SIZE_BAND_MAX = 2.0  # terms, prefer ones within 0.5x-2x our own offer size —
+                      # an order far smaller or larger than ours isn't a
+                      # realistic comparison for a borrower shopping our size.
+
+
+def size_filtered_volume_weighted_median(
+    values: list[float], weights: list[float], our_size: float | None,
+    size_min: float = SIZE_BAND_MIN, size_max: float = SIZE_BAND_MAX,
+) -> tuple[float | None, bool]:
+    """Volume-weighted median restricted to entries whose weight (size) falls
+    within size_min..size_max x our_size. Falls back to the full unfiltered
+    set if nothing qualifies (or our_size is unknown/zero), so callers are
+    never left without a benchmark. Returns (median, used_size_filter)."""
+    if not values:
+        return None, False
+    if our_size and our_size > 0:
+        filtered = [(v, w) for v, w in zip(values, weights) if size_min * our_size <= w <= size_max * our_size]
+        if filtered:
+            fv, fw = zip(*filtered)
+            return _volume_weighted_median(list(fv), list(fw)), True
+    return _volume_weighted_median(values, weights), False
+
+
 # Canonical decimals/symbol tables for every collateral token this bot has
 # ever traded or watched. This is the union of what used to be six separately
 # maintained copies (some subsets, some with extra tokens) — see each mint's

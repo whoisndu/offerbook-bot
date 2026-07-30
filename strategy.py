@@ -56,6 +56,9 @@ Notes:
   - Each pair's principal is rounded down to the nearest ROUND_STEP_USDC
     (falling back to ROUND_SMALL_STEP_USDC for pairs whose allocation is
     under one full step), so offer sizes read as round figures.
+  - If we already have a live (active/partiallyFilled) offer of ours for a
+    pair at the exact same duration, that pair is skipped this run rather
+    than stacking another offer on top of it.
 """
 from __future__ import annotations
 
@@ -1189,6 +1192,21 @@ def main() -> None:
                           args.collateral, collateral_filter)
                 continue
 
+        # 4b. Skip any pair where we already have a live (active/partiallyFilled)
+        # offer of ours at this exact duration — avoids stacking duplicate offers
+        # on top of each other on repeated runs.
+        own_open_pairs = {
+            o.pair for o in lending_offers
+            if o.creator == WALLET_PUBKEY and o.duration == MAX_DURATION_SECS
+        }
+        already_open_count = sum(1 for pair in relevant_pairs if pair in own_open_pairs)
+        if already_open_count:
+            relevant_pairs = {
+                pair: ps for pair, ps in relevant_pairs.items() if pair not in own_open_pairs
+            }
+            log.info("Skipping %d pair(s) with an existing open %d-day offer of ours already live",
+                      already_open_count, MAX_DURATION_DAYS)
+
         # 5. Compute offer params (APY, duration, etc.) and allocation budgets.
         pair_offer_params: dict = {}
         pair_budgets_raw: dict = {}
@@ -1222,7 +1240,7 @@ def main() -> None:
 
         # 6. Build and submit offers
         successes = 0
-        skipped = 0
+        skipped = already_open_count
         errors = 0
         usdc_committed_raw = 0
 

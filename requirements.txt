@@ -9,6 +9,7 @@ idna==3.18
 jsonalias==0.1.1
 ledgerblue==0.1.58
 libusb1==3.4.0
+matplotlib==3.11.1
 ndeflib==0.3.3
 nfcpy==1.0.4
 pillow==12.3.0

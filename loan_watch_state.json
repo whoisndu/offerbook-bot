@@ -1,1 +1,8 @@
-{}
+{
+  "AAdgyUYsmwwWrZtsxfmq4pUxFMbUJKN7om6pHvsgwQnn": {
+    "borrower": "5P467oz5SLokknTxXPxazCNi65MpkQpqYkaSHYmKBYVm",
+    "expiredAt": "2026-07-30T08:32:08Z",
+    "lender": "CxzmfgADE45SktN2uCwDjB2PSNg7qgTQm4GM1xtYK4er",
+    "principal_usd": 9.99917340518372
+  }
+}

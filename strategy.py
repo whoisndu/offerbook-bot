@@ -6,6 +6,7 @@ durations in a single invocation. Supported durations, each with its own
 market-calibrated risk profile:
 
   Days   LTV floor (thin market data)   Collateral ratio   Undercut vs benchmark
+  1      70%                            ~1.43x              5%
   3      65%                            ~1.54x              5%
   7      45%                            ~2.22x              10%
   15     25%                            ~4x                 12%
@@ -13,7 +14,9 @@ market-calibrated risk profile:
 Shorter duration -> higher LTV tolerated (less exposure to price movement /
 default over that window) and a shallower undercut (the higher LTV floor
 already compensates for the risk, so the price doesn't also need to drop
-below market). LTV hard ceiling (75%) is shared across all durations.
+below market). LTV hard ceiling (75%) is shared across all durations; the
+1-day tier's 70% floor deliberately leaves a small buffer under that ceiling
+rather than sitting exactly on it.
 
 Strategy (run independently, once per selected duration):
   1. Fetch all active lending offers (from all pools/pairs).
@@ -36,7 +39,7 @@ Usage:
   pip install requests solders base58
   export OFFERBOOK_WALLET=<your-base58-wallet-pubkey>
   export OFFERBOOK_PRIVATE_KEY=<your-base58-private-key>   # for --private-key signing
-  python strategy.py                    # prompts: "Enter loan duration in days (3, 7, or 15 ...)"
+  python strategy.py                    # prompts: "Enter loan duration in days (1, 3, 7, or 15 ...)"
   python strategy.py --days 7           # run only the 7-day strategy, no prompt
   python strategy.py --days 3,7         # run the 3-day and 7-day strategies back to back
   python strategy.py --collateral HYPE  # only create an offer for this collateral
@@ -48,11 +51,11 @@ Notes:
   - APY is stored in basis points (1% = 100 bps).  LTV uses the USD metadata
     values the API enriches; if USD values are absent we fall back to a raw
     token-amount ratio (same token pair assumed to be same price units).
-  - Only the three durations above are supported. Deliberately no dynamic or
-    extrapolated duration (e.g. a hypothetical 1-day tier): an unvalidated,
-    looser LTV floor at very short durations would increase exposure to rug
-    risk, so new tiers are only added once their own LTV/discount have been
-    explicitly chosen and calibrated, the same way these three were.
+  - Only the four durations above are supported. Deliberately no dynamic or
+    extrapolated duration beyond them: an unvalidated LTV floor at an
+    uncalibrated duration would increase exposure to rug risk, so new tiers
+    are only added once their own LTV/discount have been explicitly chosen
+    and calibrated, the same way these four were.
   - Each pair's principal is rounded down to the nearest ROUND_STEP_USDC
     (falling back to ROUND_SMALL_STEP_USDC for pairs whose allocation is
     under one full step), so offer sizes read as round figures.
@@ -96,9 +99,10 @@ PRIVATE_KEY_B58: str = os.getenv("OFFERBOOK_PRIVATE_KEY", "")  # base58 private 
 SIGNING_MODE: str = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
 LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
-# Strategy parameters that vary by loan duration. Only these three durations
-# are supported — see the module docstring for why a 1-day tier isn't here.
+# Strategy parameters that vary by loan duration. Only these four durations
+# are supported — see the module docstring for why.
 DURATION_CONFIGS: dict[int, dict[str, float]] = {
+    1:  {"apy_discount": 0.05, "fallback_ltv": 0.70},
     3:  {"apy_discount": 0.05, "fallback_ltv": 0.65},
     7:  {"apy_discount": 0.10, "fallback_ltv": 0.45},
     15: {"apy_discount": 0.12, "fallback_ltv": 0.25},

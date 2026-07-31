@@ -393,10 +393,13 @@ class PairStats:
 
     # The single largest live lending offer for this pair (any duration), by
     # principal USD — a borrower comparison-shopping the pool is most likely
-    # to pick this one. Used as an extra safety guardrail (never a driver of
-    # aggressiveness): our own target can be tightened toward this offer's
-    # terms if they're more conservative than the weighted-mean-derived
-    # target, but never loosened past it.
+    # to pick this one. largest_offer_ltv is used as an LTV safety guardrail
+    # (never a driver of aggressiveness): our own LTV target can be tightened
+    # toward this offer's LTV if it's more conservative than the
+    # weighted-median-derived target, but never loosened past it.
+    # largest_offer_apy_bps is tracked here too but is NOT used to guardrail
+    # APY — see best_apy_bps()/compute_offer_params() for how APY instead
+    # competes against the cheapest comparable offer, not the largest one.
     largest_offer_principal_usd: float = 0.0
     largest_offer_apy_bps: int | None = None
     largest_offer_ltv: float | None = None
@@ -414,6 +417,27 @@ class PairStats:
         if not apys:
             return None, False
         return _common.size_filtered_volume_weighted_median(apys, amounts, our_offer_usdc)
+
+    def best_apy_bps(self, our_offer_usdc: float | None = None) -> tuple[int | None, bool]:
+        """Cheapest (lowest) APY among comparable competing offers — same
+        selection as apy_benchmark_bps (same-duration preferred, falling back
+        to all-duration; SIZE_BAND_MIN..SIZE_BAND_MAX x our_offer_usdc
+        preferred, falling back to the full set), but the minimum instead of
+        the volume-weighted median. Used so our own APY competes with the
+        cheapest comparable offer instead of being anchored to whichever
+        offer happens to be largest. Returns (best_apy_bps, used_size_filter)."""
+        apys = self.lending_apys if self.lending_apys else self.global_lending_apys
+        amounts = self.lending_offer_amounts if self.lending_apys else self.global_lending_offer_amounts
+        if not apys:
+            return None, False
+        if our_offer_usdc and our_offer_usdc > 0:
+            filtered = [
+                a for a, w in zip(apys, amounts)
+                if _common.SIZE_BAND_MIN * our_offer_usdc <= w <= _common.SIZE_BAND_MAX * our_offer_usdc
+            ]
+            if filtered:
+                return min(filtered), True
+        return min(apys), False
 
     @property
     def apy_source(self) -> str:
@@ -928,11 +952,18 @@ def compute_offer_params(ps: PairStats, our_offer_usdc: float | None = None) -> 
         log.debug("Skipping %s/%s – no market APY reference", ps.principal_mint[:8], ps.collateral_mint[:8])
         return None
 
-    # Guardrail: never undercut the single largest live offer's APY, even if
-    # the weighted-mean target would otherwise be lower — that offer is the
-    # one a borrower comparison-shopping the pool is most likely to pick.
-    if ps.largest_offer_apy_bps is not None:
-        target_apy = max(target_apy, ps.largest_offer_apy_bps)
+    # Compete to be the cheapest, or at least on par with the cheapest: cap
+    # our target down to the lowest APY among comparable competing offers
+    # (same duration preferred, size-band preferred — see best_apy_bps), so
+    # we're never pricier than the best real offer a borrower could actually
+    # pick instead. This replaced a guardrail that floored us UP to the
+    # single largest live offer's APY regardless of duration/size — which
+    # worked against being competitive (e.g. it forced a 40% APY floor onto
+    # every duration because one large offer happened to charge 40%, even
+    # when same-duration, similarly-sized competitors charged as little as 17%).
+    best_apy, _ = ps.best_apy_bps(our_offer_usdc)
+    if best_apy is not None:
+        target_apy = min(target_apy, best_apy)
 
     # Size the offer: use the median principal amount from existing offers
     principal_amount = ps.median_principal_amount

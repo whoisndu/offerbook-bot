@@ -10,11 +10,12 @@ Run this after placing orders to verify that every live offer has:
   - Non-dust principal amount
 
 Usage:
-  python verify_offers.py --days 7        # check 7-day strategy offers
-  python verify_offers.py --days 3        # check 3-day strategy offers
-  python verify_offers.py --days 15       # check 15-day strategy offers
-  python verify_offers.py --days all      # check all three strategies
-  python verify_offers.py                 # same as --days all
+  python verify_offers.py                 # interactive strategy prompt
+  python verify_offers.py --days 7        # skip prompt, check 7-day strategy offers
+  python verify_offers.py --days 3        # skip prompt, check 3-day strategy offers
+  python verify_offers.py --days 1        # skip prompt, check 1-day strategy offers
+  python verify_offers.py --days 15       # skip prompt, check 15-day strategy offers
+  python verify_offers.py --days all      # skip prompt, check every strategy
 
 Exit codes:
   0 — all offers passed (or only warnings)
@@ -67,6 +68,7 @@ PAGE_SIZE     = 100
 # rest of the formula is shared.
 
 STRATEGY_PARAMS: dict[int, dict] = {
+    1:  {"fallback_ltv": 0.70, "duration_secs": 1  * 86400},
     3:  {"fallback_ltv": 0.65, "duration_secs": 3  * 86400},
     7:  {"fallback_ltv": 0.45, "duration_secs": 7  * 86400},
     15: {"fallback_ltv": 0.25, "duration_secs": 15 * 86400},
@@ -175,66 +177,97 @@ def _token_age_days(mint: str) -> float | None:
 
 
 def fetch_market_ltv_stats(
-    collateral_mints: set[str], raw_offers: list[dict], raw_loans: list[dict]
-) -> dict[str, tuple[float | None, int, float, float | None]]:
+    collateral_mints: set[str], raw_offers: list[dict], raw_loans: list[dict],
+    durations: list[int], exclude_wallet: str | None = None,
+) -> dict[tuple[str, int], tuple[float | None, int, float, float | None, bool]]:
     """
-    For each collateral mint, return (volume-weighted-median LTV, sample count,
-    total volume USD, largest live offer's LTV) computed from ALL active lending
-    offers + active loans market-wide (every lender, not just us) — the same
-    data source strategy.py's PairStats draws from.
+    For each (collateral_mint, duration_secs) pair, return (volume-weighted-
+    median LTV, sample count, total volume USD, largest live offer's LTV,
+    used_same_duration) computed from active lending offers + active loans
+    market-wide — the same data source strategy.py's PairStats draws from.
+
+    Prefers same-duration offers/loans, falling back to all-duration data only
+    if there's none at that exact duration — mirrors strategy.py's
+    ltv_benchmark_stats(), since LTV is at least as duration-sensitive as APY
+    (DURATION_CONFIGS' fallback_ltv spans 70% at 1 day down to 25% at 15 days).
+
+    exclude_wallet drops our own offers (by creator) and loans (by lender) —
+    otherwise our own live offer counts as "the market" when checking itself,
+    same feedback-loop risk strategy.py's build_pair_stats(exclude_wallet=...)
+    guards against.
 
     Median, not mean: robust to a single large outlier offer dragging the
-    benchmark, matching strategy.py's ltv_benchmark_usd.
+    benchmark.
 
     largest_offer_ltv is the LTV of the single largest (by principal USD) live
-    OFFER for that mint — loans are excluded here, same as strategy.py's
-    largest_offer_ltv, since a borrower comparison-shopping the pool is
-    choosing between current listings, not past loans. Used to cap the target
-    down (never loosen it) the same way effective_target_ltv() below does, so
-    this check reflects the exact same safety ceiling strategy.py would apply
-    if run right now.
+    OFFER for that mint (any duration) — loans are excluded here, same as
+    strategy.py's largest_offer_ltv, since a borrower comparison-shopping the
+    pool is choosing between current listings, not past loans. Used to cap the
+    target down (never loosen it) the same way effective_target_ltv() below
+    does, so this check reflects the exact same safety ceiling strategy.py
+    would apply if run right now.
 
     Takes already-fetched market data (raw_offers from fetch_all_lending_offers(),
     raw_loans from /loans/status/active) so callers can fetch once per run and
     reuse across every strategy checked, rather than refetching per duration.
     """
-    ltvs: dict[str, list[float]] = defaultdict(list)
-    weights: dict[str, list[float]] = defaultdict(list)
+    ltvs_by_dur: dict[tuple[str, int], list[float]] = defaultdict(list)
+    weights_by_dur: dict[tuple[str, int], list[float]] = defaultdict(list)
+    ltvs_global: dict[str, list[float]] = defaultdict(list)
+    weights_global: dict[str, list[float]] = defaultdict(list)
     largest_principal_usd: dict[str, float] = defaultdict(float)
     largest_offer_ltv: dict[str, float] = {}
 
     for r in raw_offers:
+        if exclude_wallet and r.get("creator") == exclude_wallet:
+            continue
         cmint = r.get("collateralMint") or _mint_from_asset(r.get("collateral", {}))
         if cmint not in collateral_mints:
             continue
+        dur = r.get("duration")
         meta = r.get("metadata") or {}
         p_usd, c_usd = meta.get("principalAmountUsd"), meta.get("collateralAmountUsd")
         if p_usd and c_usd and c_usd > 0:
             ltv = p_usd / c_usd
-            ltvs[cmint].append(ltv)
-            weights[cmint].append(p_usd)
+            ltvs_global[cmint].append(ltv)
+            weights_global[cmint].append(p_usd)
+            if dur is not None:
+                ltvs_by_dur[(cmint, dur)].append(ltv)
+                weights_by_dur[(cmint, dur)].append(p_usd)
             if p_usd > largest_principal_usd[cmint]:
                 largest_principal_usd[cmint] = p_usd
                 largest_offer_ltv[cmint] = ltv
 
     for r in raw_loans:
+        if exclude_wallet and r.get("lender") == exclude_wallet:
+            continue
         cmint = r.get("collateralMint") or _mint_from_asset(r.get("collateral", {}))
         if cmint not in collateral_mints:
             continue
+        dur = r.get("duration")
         meta = r.get("metadata") or {}
         p_usd, c_usd = meta.get("startPrincipalAmountUsd"), meta.get("startCollateralAmountUsd")
         if p_usd and c_usd and c_usd > 0:
-            ltvs[cmint].append(p_usd / c_usd)
-            weights[cmint].append(p_usd)
+            ltv = p_usd / c_usd
+            ltvs_global[cmint].append(ltv)
+            weights_global[cmint].append(p_usd)
+            if dur is not None:
+                ltvs_by_dur[(cmint, dur)].append(ltv)
+                weights_by_dur[(cmint, dur)].append(p_usd)
 
-    stats: dict[str, tuple[float | None, int, float, float | None]] = {}
+    stats: dict[tuple[str, int], tuple[float | None, int, float, float | None, bool]] = {}
     for mint in collateral_mints:
-        vals, wts = ltvs.get(mint, []), weights.get(mint, [])
-        if not vals:
-            stats[mint] = (None, 0, 0.0, None)
-            continue
-        median_ltv = _common._volume_weighted_median(vals, wts)
-        stats[mint] = (median_ltv, len(vals), sum(wts), largest_offer_ltv.get(mint))
+        for dur_sec in durations:
+            key = (mint, dur_sec)
+            if ltvs_by_dur.get(key):
+                vals, wts, used_same_duration = ltvs_by_dur[key], weights_by_dur[key], True
+            else:
+                vals, wts, used_same_duration = ltvs_global.get(mint, []), weights_global.get(mint, []), False
+            if not vals:
+                stats[key] = (None, 0, 0.0, largest_offer_ltv.get(mint), used_same_duration)
+                continue
+            median_ltv = _common._volume_weighted_median(vals, wts)
+            stats[key] = (median_ltv, len(vals), sum(wts), largest_offer_ltv.get(mint), used_same_duration)
     return stats
 
 
@@ -272,6 +305,29 @@ def effective_target_ltv(
         target = min(target, largest_offer_ltv)
 
     return max(min(target, HARD_LTV_CEILING), 0.05)
+
+# ---------------------------------------------------------------------------
+# Strategy selection prompt
+# ---------------------------------------------------------------------------
+
+def prompt_days() -> str:
+    """
+    Interactively ask which strategy to verify, mirroring cancel_offers.py's
+    prompt_strategy(). Returns one of STRATEGY_PARAMS' keys (as a string) or 'all'.
+    """
+    print()
+    print("Which strategy do you want to verify?")
+    print()
+    for days, params in STRATEGY_PARAMS.items():
+        print(f"  [{days:3d}]  {days}-day strategy  ({params['fallback_ltv']*100:.0f}% max LTV, {params['duration_secs']} s duration)")
+    print(f"  [all]  ALL strategies  (every duration above)")
+    print()
+    valid = {str(d) for d in STRATEGY_PARAMS} | {"all"}
+    while True:
+        choice = input("Choice: ").strip().lower()
+        if choice in valid:
+            return choice
+        print(f"  Please enter {', '.join(str(d) for d in STRATEGY_PARAMS)}, or all")
 
 # ---------------------------------------------------------------------------
 # Offer fetching
@@ -328,7 +384,7 @@ def check_strategy(
     all_offers: list[dict],
     live_prices: dict[str, float],
     decimals_map: dict[str, int],
-    market_ltv_stats: dict[str, tuple[float | None, int, float, float | None]],
+    market_ltv_stats: dict[tuple[str, int], tuple[float | None, int, float, float | None, bool]],
 ) -> tuple[int, int, int]:
     """
     Verify all live offers for the given strategy duration.
@@ -393,8 +449,8 @@ def check_strategy(
         vol_usdc: float | None = None
 
         principal_usdc = principal_raw / 10 ** USDC_DECIMALS
-        market_weighted_ltv, market_sample_count, market_total_volume_usd, largest_offer_ltv = market_ltv_stats.get(
-            collateral_mint, (None, 0, 0.0, None)
+        market_weighted_ltv, market_sample_count, market_total_volume_usd, largest_offer_ltv, used_same_duration = market_ltv_stats.get(
+            (collateral_mint, dur_sec), (None, 0, 0.0, None, False)
         )
         target_ltv = effective_target_ltv(
             collateral_mint, fallback_ltv, market_weighted_ltv, market_sample_count,
@@ -462,9 +518,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Verify live Offerbook lending offers.")
     parser.add_argument(
         "--days",
-        default="all",
-        choices=["3", "7", "15", "all"],
-        help="Which strategy to check (default: all)",
+        default=None,
+        choices=["1", "3", "7", "15", "all"],
+        help="Which strategy to check (1, 3, 7, 15, or all). Omit to be prompted interactively.",
     )
     args = parser.parse_args()
 
@@ -476,7 +532,8 @@ def main() -> None:
     log.info("Offerbook Offer Sanity Check")
     log.info("Wallet : %s  (%s)", WALLET_PUBKEY, SIGNING_MODE)
 
-    strategies = [3, 7, 15] if args.days == "all" else [int(args.days)]
+    days_choice = args.days if args.days else prompt_days()
+    strategies = list(STRATEGY_PARAMS) if days_choice == "all" else [int(days_choice)]
 
     # Fetch market-wide data once and reuse across every strategy checked below,
     # instead of refetching independently per duration.
@@ -497,7 +554,10 @@ def main() -> None:
     decimals_map = {**jupiter_decimals, **KNOWN_DECIMALS}  # KNOWN_DECIMALS (curated) wins on conflict
 
     log.info("Computing market-wide LTV data for %d collateral token(s) …", len(collateral_mints))
-    market_ltv_stats = fetch_market_ltv_stats(set(collateral_mints), all_offers, all_loans)
+    duration_secs_list = [STRATEGY_PARAMS[d]["duration_secs"] for d in strategies]
+    market_ltv_stats = fetch_market_ltv_stats(
+        set(collateral_mints), all_offers, all_loans, duration_secs_list, exclude_wallet=WALLET_PUBKEY,
+    )
 
     total_fail = 0
     for days in strategies:

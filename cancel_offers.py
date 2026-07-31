@@ -1,8 +1,8 @@
 """
 Offerbook Kill Switch — Cancel Open Offers
 ==========================================
-Asks which strategy to cancel (3-day, 7-day, 15-day, or all), then fetches
-and cancels matching offers in batches.
+Asks which strategy to cancel (1-day, 3-day, 7-day, 15-day, or all), then
+fetches and cancels matching offers in batches.
 
 Handles "underfunded" offers (orphaned on-chain PDAs that the API won't list)
 by scanning on-chain accounts directly via getProgramAccounts.
@@ -61,6 +61,7 @@ PAGE_SIZE  = 100
 
 # Duration in seconds for each strategy — used to filter offers by type.
 STRATEGIES: dict[str, int | None] = {
+    "1":   1  * 24 * 60 * 60,   # 86 400
     "3":   3  * 24 * 60 * 60,   # 259 200
     "7":   7  * 24 * 60 * 60,   # 604 800
     "15":  15 * 24 * 60 * 60,   # 1 296 000
@@ -68,6 +69,7 @@ STRATEGIES: dict[str, int | None] = {
 }
 
 STRATEGY_LABELS = {
+    "1":   "1-day  strategy  (70% max LTV, 86 400 s duration)",
     "3":   "3-day  strategy  (65% max LTV, 259 200 s duration)",
     "7":   "7-day  strategy  (45% max LTV, 604 800 s duration)",
     "15":  "15-day strategy  (25% max LTV, 1 296 000 s duration)",
@@ -150,7 +152,7 @@ def prompt_strategy() -> str:
         choice = input("Choice: ").strip().lower()
         if choice in STRATEGIES:
             return choice
-        print("  Please enter 3, 7, 15, or all")
+        print("  Please enter 1, 3, 7, 15, or all")
 
 # ---------------------------------------------------------------------------
 # Fetch offers
@@ -330,9 +332,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cancel Offerbook lending offers by strategy")
     parser.add_argument(
         "--days",
-        choices=["3", "7", "15", "all"],
+        choices=["1", "3", "7", "15", "all"],
         default=None,
-        help="Strategy to cancel (3, 7, 15, or all). Omit to be prompted interactively.",
+        help="Strategy to cancel (1, 3, 7, 15, or all). Omit to be prompted interactively.",
     )
     parser.add_argument(
         "--withdraw",

@@ -370,7 +370,15 @@ class PairStats:
     offer_principal_amounts: list[int] = field(default_factory=list)
     offer_collateral_amounts: list[int] = field(default_factory=list)
 
-    # USD LTV values (principal_usd / collateral_usd) from market offers
+    # USD LTV values (principal_usd / collateral_usd) from market offers/loans
+    # at this EXACT duration — preferred benchmark source, since LTV is at
+    # least as duration-sensitive as APY (see DURATION_CONFIGS' fallback_ltv,
+    # which spans 70% at 1 day down to 25% at 15 days).
+    ltv_usds: list[float] = field(default_factory=list)
+    ltv_weights_usd: list[float] = field(default_factory=list)
+
+    # USD LTV values across ALL durations — fallback when same-duration data
+    # is too thin (or empty).
     offer_ltv_usds: list[float] = field(default_factory=list)
     # principal_usd weight for each entry in offer_ltv_usds (same index), for volume-weighting
     offer_ltv_weights_usd: list[float] = field(default_factory=list)
@@ -440,20 +448,30 @@ class PairStats:
 
     @property
     def median_ltv_usd(self) -> float | None:
-        if not self.offer_ltv_usds:
+        source = self.ltv_usds if self.ltv_usds else self.offer_ltv_usds
+        if not source:
             return None
-        s = sorted(self.offer_ltv_usds)
+        s = sorted(source)
         return s[len(s) // 2]
 
-    def ltv_benchmark_usd(self, our_offer_usdc: float | None = None) -> tuple[float | None, bool]:
+    def ltv_benchmark_stats(self, our_offer_usdc: float | None = None) -> tuple[float | None, int, float, bool]:
         """Volume-weighted MEDIAN LTV across this token's own market offers/loans —
         the LTV level where the largest cluster of real market volume sits, not
         dragged toward a single large outlier offer the way a weighted mean would be.
-        Also prefers offers within SIZE_BAND_MIN..SIZE_BAND_MAX x our_offer_usdc
-        (see apy_benchmark_bps), falling back to the full set if none qualify."""
-        if not self.offer_ltv_usds:
-            return None, False
-        return _common.size_filtered_volume_weighted_median(self.offer_ltv_usds, self.offer_ltv_weights_usd, our_offer_usdc)
+        Prefers same-duration offers/loans, falling back to all-duration data
+        only if there's none at this exact duration (mirrors apy_benchmark_bps).
+        Also prefers offers within SIZE_BAND_MIN..SIZE_BAND_MAX x our_offer_usdc,
+        falling back to the full set if none qualify.
+        Returns (median_ltv, sample_count, total_volume_usd, used_size_filter) —
+        sample_count/total_volume_usd reflect whichever set (same-duration or
+        global) actually produced the median, for effective_target_ltv()'s
+        data-sufficiency check."""
+        ltvs = self.ltv_usds if self.ltv_usds else self.offer_ltv_usds
+        weights = self.ltv_weights_usd if self.ltv_usds else self.offer_ltv_weights_usd
+        if not ltvs:
+            return None, 0, 0.0, False
+        median, used_filter = _common.size_filtered_volume_weighted_median(ltvs, weights, our_offer_usdc)
+        return median, len(ltvs), sum(weights), used_filter
 
     @property
     def median_collateral_price_per_raw(self) -> float | None:
@@ -853,6 +871,9 @@ def build_pair_stats(
         if offer.ltv is not None:
             ps.offer_ltv_usds.append(offer.ltv)
             ps.offer_ltv_weights_usd.append(offer.principal_usd or 0)
+            if offer.duration == duration_secs:
+                ps.ltv_usds.append(offer.ltv)
+                ps.ltv_weights_usd.append(offer.principal_usd or 0)
         if offer.collateral_usd and offer.collateral_amount > 0:
             ps.offer_collateral_prices_per_raw.append(offer.collateral_usd / offer.collateral_amount)
         if offer.principal_usd and offer.principal_usd > ps.largest_offer_principal_usd:
@@ -874,6 +895,9 @@ def build_pair_stats(
         if loan.ltv is not None:
             ps.offer_ltv_usds.append(loan.ltv)
             ps.offer_ltv_weights_usd.append(loan.principal_usd or 0)
+            if loan.duration == duration_secs:
+                ps.ltv_usds.append(loan.ltv)
+                ps.ltv_weights_usd.append(loan.principal_usd or 0)
         if loan.collateral_usd and loan.collateral_amount > 0:
             ps.offer_collateral_prices_per_raw.append(loan.collateral_usd / loan.collateral_amount)
 
@@ -1317,9 +1341,11 @@ def main() -> None:
                 offer_params["principalAmount"] = pair_budget_raw
                 principal_usdc = pair_budget_raw / 10 ** USDC_DECIMALS
 
-                ltv_benchmark, ltv_used_size_filter = ps.ltv_benchmark_usd(principal_usdc)
+                ltv_benchmark, ltv_sample_count, ltv_total_volume, ltv_used_size_filter = ps.ltv_benchmark_stats(principal_usdc)
+                ltv_source = "same duration" if ps.ltv_usds else ("global" if ps.offer_ltv_usds else "none")
                 if ltv_used_size_filter:
-                    log.info("  LTV benchmark: using offers within 0.5x-2x our size (%.2f USDC)", principal_usdc)
+                    log.info("  LTV benchmark: using offers within 0.5x-2x our size (%.2f USDC), source=%s",
+                             principal_usdc, ltv_source)
 
                 # Compute collateral required so that LTV = effective_target_ltv() at current
                 # prices. This is the critical fix: we do NOT copy collateralAmount from other
@@ -1331,8 +1357,8 @@ def main() -> None:
                     current_prices=current_prices,
                     decimals_map=decimals_map,
                     market_weighted_ltv=ltv_benchmark,
-                    market_sample_count=len(ps.offer_ltv_usds),
-                    market_total_volume_usd=sum(ps.offer_ltv_weights_usd),
+                    market_sample_count=ltv_sample_count,
+                    market_total_volume_usd=ltv_total_volume,
                     largest_offer_ltv=ps.largest_offer_ltv,
                 )
 
@@ -1351,8 +1377,8 @@ def main() -> None:
                 # will exceed the target — skip rather than create an undercollateralised offer.
                 pool_price = ps.median_collateral_price_per_raw
                 pair_max_ltv = effective_target_ltv(
-                    ps.collateral_mint, ltv_benchmark, len(ps.offer_ltv_usds),
-                    sum(ps.offer_ltv_weights_usd), principal_usdc, ps.largest_offer_ltv,
+                    ps.collateral_mint, ltv_benchmark, ltv_sample_count,
+                    ltv_total_volume, principal_usdc, ps.largest_offer_ltv,
                 )
                 if pool_price and pool_price > 0 and collateral_raw > 0:
                     ltv_at_pool_price = principal_usdc / (collateral_raw * pool_price)

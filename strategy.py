@@ -194,6 +194,18 @@ YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's
 MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
 HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what, regardless of duration
 
+# The 15-day tier carries more price-movement/default exposure over its
+# longer window than any other duration, so — on top of whatever the normal
+# young/mature-token target computation and largest_offer_ltv guardrail
+# already produce — it always requires LONG_DURATION_COLLATERAL_PREMIUM x
+# more collateral than that result would otherwise imply (i.e. the final
+# target is divided by this factor). Dynamic rather than a fixed ceiling: it
+# scales with whatever the pool's own typical LTV actually is right now,
+# rather than pinning 15-day to one hardcoded number regardless of market
+# conditions.
+LONG_DURATION_COLLATERAL_PREMIUM = 1.25
+LONG_DURATION_PREMIUM_DAYS = 15            # duration tier(s) >= this get the premium
+
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 
@@ -795,6 +807,13 @@ def effective_target_ltv(
     safer, never more aggressive, guarding against the weighted-mean benchmark
     being looser than what the market's most prominent participant actually
     accepts (e.g. because it's skewed by several small, thin offers).
+
+    For the 15-day+ tier (see LONG_DURATION_PREMIUM_DAYS), the result is then
+    additionally tightened by dividing by LONG_DURATION_COLLATERAL_PREMIUM —
+    that duration's extra price-movement/default exposure over its longer
+    window means it should always require more collateral than the pool's
+    typical LTV implies, scaling with whatever that typical LTV actually is
+    rather than a fixed number.
     """
     has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
     has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
@@ -810,6 +829,9 @@ def effective_target_ltv(
 
     if largest_offer_ltv is not None:
         target = min(target, largest_offer_ltv)
+
+    if MAX_DURATION_DAYS >= LONG_DURATION_PREMIUM_DAYS:
+        target = target / LONG_DURATION_COLLATERAL_PREMIUM
 
     return max(min(target, HARD_LTV_CEILING), 0.05)
 

@@ -81,6 +81,12 @@ YOUNG_TOKEN_DISCOUNT = 0.05                # percentage points below the token's
 MATURE_TOKEN_COLLATERAL_DISCOUNT = 0.10    # accept this much less collateral than the market average
 HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what
 
+# Mirrors strategy.py: the 15-day+ tier always requires this much MORE
+# collateral than the pool's typical LTV implies (dynamic, not a fixed
+# ceiling — scales with whatever the pool actually trades at).
+LONG_DURATION_COLLATERAL_PREMIUM = 1.25
+LONG_DURATION_PREMIUM_DAYS = 15
+
 KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 
 # ---------------------------------------------------------------------------
@@ -279,6 +285,7 @@ def effective_target_ltv(
     market_total_volume_usd: float = 0.0,
     our_offer_usdc: float = 0.0,
     largest_offer_ltv: float | None = None,
+    days: int = 0,
 ) -> float:
     """Recomputes the same dynamic LTV target strategy.py uses — see
     effective_target_ltv() in strategy.py and README §4 for the full rule.
@@ -288,7 +295,9 @@ def effective_target_ltv(
     result down (never loosens it) to the pair's single largest live offer's
     LTV — same guardrail strategy.py applies, guarding against the
     weighted-median benchmark being looser than what the market's most
-    prominent participant actually accepts."""
+    prominent participant actually accepts. For days >= LONG_DURATION_PREMIUM_DAYS,
+    the result is additionally divided by LONG_DURATION_COLLATERAL_PREMIUM —
+    same extra tightening strategy.py applies for its longest tier."""
     has_enough_volume = our_offer_usdc > 0 and market_total_volume_usd >= MARKET_VOLUME_MULTIPLIER * our_offer_usdc
     has_enough_data = market_sample_count >= MIN_MARKET_SAMPLES or has_enough_volume
 
@@ -303,6 +312,9 @@ def effective_target_ltv(
 
     if largest_offer_ltv is not None:
         target = min(target, largest_offer_ltv)
+
+    if days >= LONG_DURATION_PREMIUM_DAYS:
+        target = target / LONG_DURATION_COLLATERAL_PREMIUM
 
     return max(min(target, HARD_LTV_CEILING), 0.05)
 
@@ -454,7 +466,7 @@ def check_strategy(
         )
         target_ltv = effective_target_ltv(
             collateral_mint, fallback_ltv, market_weighted_ltv, market_sample_count,
-            market_total_volume_usd, principal_usdc, largest_offer_ltv,
+            market_total_volume_usd, principal_usdc, largest_offer_ltv, days,
         )
 
         if collateral_price and decimals is not None and collateral_raw > 0:

@@ -209,6 +209,8 @@ LONG_DURATION_PREMIUM_DAYS = 15            # duration tier(s) >= this get the pr
 MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 
+MIN_FILL_USDC = 10.0         # minimum a borrower must take in a partial fill, across every offer
+
 WALLET_BUFFER_USDC = 100.0   # always leave at least this much USDC unallocated
 
 ROUND_STEP_USDC = 500.0        # round each pair's principal down to the nearest $500...
@@ -1038,9 +1040,9 @@ def compute_offer_params(ps: PairStats, our_offer_usdc: float | None = None) -> 
         log.debug("  USD LTV = %.1f%% (market median, hard ceiling = %.0f%%)",
                   median_ltv * 100, HARD_LTV_CEILING * 100)
 
-    # minFillAmount: minimum a borrower must take in a partial fill.
-    # API requires this to be > 1000 raw units. Use 1% of principal, floored at 1001.
-    min_fill = max(1001, principal_amount // 100)
+    # minFillAmount: minimum a borrower must take in a partial fill, fixed at
+    # MIN_FILL_USDC across every offer. API requires this to be > 1000 raw units.
+    min_fill = max(1001, int(MIN_FILL_USDC * 10 ** USDC_DECIMALS))
 
     return {
         "signer": WALLET_PUBKEY,
@@ -1446,7 +1448,7 @@ def main() -> None:
                         continue
 
                 offer_params["collateralAmount"] = collateral_raw
-                offer_params["minFillAmount"] = max(1001, pair_budget_raw // 100)
+                offer_params["minFillAmount"] = max(1001, int(MIN_FILL_USDC * 10 ** USDC_DECIMALS))
 
                 collateral_price = current_prices.get(ps.collateral_mint)
                 decimals = decimals_map.get(ps.collateral_mint)

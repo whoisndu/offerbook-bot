@@ -87,6 +87,7 @@ DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes")
 OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24h
 MIN_APY_BPS = 10
 ALLOW_PARTIAL_FILL = True
+MIN_FILL_USDC = 10.0  # minimum a borrower must take in a partial fill, across every offer
 PAGE_SIZE = 100
 
 # How much better than the pool's single largest live offer to target — a
@@ -590,9 +591,10 @@ def main() -> None:
 
         principal_raw = int(available_usdc_raw * fraction)
         principal_usdc = principal_raw / 10 ** USDC_DECIMALS
-        # minFillAmount must be >= 1001 raw units AND <= half of principalAmount (API constraint) —
-        # so principal_raw must be >= 2002 for any valid minFillAmount to exist at all.
-        if principal_raw < 2002:
+        min_fill_raw = max(1001, int(MIN_FILL_USDC * 10 ** USDC_DECIMALS))
+        # minFillAmount must be <= half of principalAmount (API constraint) —
+        # so principal_raw must be >= 2x MIN_FILL_USDC for a valid minFillAmount to exist.
+        if principal_raw < 2 * min_fill_raw:
             log.info("  Skipping — allocation too small (%.6f USDC)", principal_usdc)
             skipped += 1
             continue
@@ -633,7 +635,7 @@ def main() -> None:
             "duration": terms["target_duration"],
             "expiry": OFFER_EXPIRY_SECS,
             "allowPartialFill": ALLOW_PARTIAL_FILL,
-            "minFillAmount": max(1001, principal_raw // 100),
+            "minFillAmount": min_fill_raw,
             "topup": "minimum",
         }
 

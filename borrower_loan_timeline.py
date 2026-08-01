@@ -20,7 +20,10 @@ Usage:
   python borrower_loan_timeline.py                      # prompts: "Enter collateral symbol ..."
   python borrower_loan_timeline.py --collateral USELESS
   python borrower_loan_timeline.py --collateral USELESS --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ
-  python borrower_loan_timeline.py --collateral USELESS --output ~/Desktop/chart.png
+  python borrower_loan_timeline.py --collateral USELESS --output /some/other/path.png
+
+Charts always save to ~/Desktop/borrower_timeline_<borrower8>.png by default
+(pass --output to save elsewhere instead).
 
 Notes:
   - "Loans" here means USDC-principal loans against the given collateral,
@@ -38,6 +41,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -52,6 +56,8 @@ PAGE_SIZE = 100
 
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 SYMBOL_TO_MINT = {sym.upper(): mint for mint, sym in KNOWN_SYMBOLS.items()}
+
+DESKTOP_DIR = Path.home() / "Desktop"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -269,7 +275,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--collateral", default=None, help="Collateral symbol (e.g. USELESS) or mint address. Omit to be prompted.")
     parser.add_argument("--borrower", default=None, help="Borrower wallet address. Omit to be prompted (blank there auto-picks the largest borrower).")
-    parser.add_argument("--output", default=None, help="PNG output path. Defaults to ./borrower_timeline_<borrower8>.png")
+    parser.add_argument("--output", default=None, help="PNG output path. Defaults to ~/Desktop/borrower_timeline_<borrower8>.png")
     args = parser.parse_args()
 
     collateral_arg = args.collateral or prompt_for_collateral()
@@ -300,7 +306,7 @@ def main() -> None:
     gaps, intervals = find_gaps(rows)
     print_summary(rows, gaps, intervals, now)
 
-    output_path = args.output or f"borrower_timeline_{borrower[:8]}.png"
+    output_path = args.output or str(DESKTOP_DIR / f"borrower_timeline_{borrower[:8]}.png")
     plot(rows, gaps, borrower, collateral_symbol, now, output_path)
 
 

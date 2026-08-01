@@ -3,12 +3,7 @@ name: Token arbitrage scan
 on:
   schedule:
     - cron: "*/15 * * * *"
-  workflow_dispatch:
-    inputs:
-      fake_test_spread:
-        description: "TEMPORARY: send a one-off test email instead of scanning (true/false)"
-        required: false
-        default: "false"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -30,7 +25,6 @@ jobs:
           SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
           SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
           NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
-          FAKE_TEST_SPREAD: ${{ github.event.inputs.fake_test_spread }}
         run: python3 arbitrage_scanner.py
 
       - name: Commit updated state

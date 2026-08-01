@@ -239,24 +239,6 @@ def main() -> None:
     parser.add_argument("--no-email", action="store_true", help="Console output only — skip email and state persistence")
     args = parser.parse_args()
 
-    # TEMPORARY: one-off email-delivery check, not real logic. Remove after
-    # confirming the email arrives — see conversation, not meant to ship.
-    if os.getenv("FAKE_TEST_SPREAD", "").lower() == "true":
-        log.warning("FAKE_TEST_SPREAD=true — sending a one-off TEST email, not touching real state")
-        fake = {
-            "key": "So11111111111111111111111111111111111111112",
-            "spread_bps": 3600,
-            "borrow": Leg(900, 5000, 0.45, 604800, "TEST-FAKE-BORROW-PUBKEY-NOT-REAL"),
-            "lend": Leg(4500, 3000, 0.60, 604800, "TEST-FAKE-LEND-PUBKEY-NOT-REAL"),
-        }
-        send_email(
-            "[TEST] Offerbook arbitrage scanner — email delivery check",
-            "This is a SYNTHETIC test spread sent to confirm email delivery works.\n"
-            "No real arbitrage opportunity exists right now — safe to ignore.\n\n"
-            "Example of what a real alert would look like:\n\n" + describe_spread(fake),
-        )
-        return
-
     books = build_books()
     log.info("Collateral types with a live offer on at least one side: %d", len(books))
 

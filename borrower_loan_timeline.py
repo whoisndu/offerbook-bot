@@ -20,15 +20,27 @@ blank at the prompt) for every collateral that borrower has ever used.
 Leaving --borrower blank auto-picks the largest borrower (by total USD
 principal) within whatever --collateral scope was chosen.
 
+Counterparty mode (--address): instead of one borrower, give an address and
+whether it's a lender or a borrower (--role, or you'll be prompted after
+entering the address). Every OTHER party it currently shares an active loan
+with is treated as a counterparty (active loans only, since those are the
+relationships that are live right now) — then each counterparty's full loan
+timeline (every loan they've ever been party to on the other side, any
+status, scoped to --collateral) is charted to its own PNG.
+
 Usage:
   python borrower_loan_timeline.py                      # prompts for borrower, then collateral
   python borrower_loan_timeline.py --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --collateral all
   python borrower_loan_timeline.py --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --collateral USELESS
   python borrower_loan_timeline.py --collateral USELESS                      # auto-picks that token's largest borrower
   python borrower_loan_timeline.py --collateral USELESS --output /some/other/path.png
+  python borrower_loan_timeline.py --address 8pXq...9nZ --role lender        # one PNG per borrower they're actively lending to
+  python borrower_loan_timeline.py --address 4nFM...DMrZ --role borrower     # one PNG per lender they're actively borrowing from
 
 Charts always save to ~/Desktop/borrower_timeline_<borrower8>.png by default
-(pass --output to save elsewhere instead).
+(pass --output to save elsewhere instead). In --address mode, charts save to
+~/Desktop/counterparty_timelines_<address8>/ by default (pass --output to use
+a different directory instead).
 
 Notes:
   - "Loans" here means USDC-principal loans, across all statuses
@@ -262,7 +274,7 @@ def print_summary(rows: list[dict], gaps: list[tuple[datetime, datetime, float]]
 
 
 def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrower: str,
-         collateral_label: str, now: datetime, output_path: str) -> None:
+         collateral_label: str, now: datetime, output_path: str, subject_role: str | None = None) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
@@ -284,10 +296,12 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
         ax1.text(r["end"] + label_offset, i, f"${r['usd']:,.0f} {r['collateral_symbol']}",
                   va="center", ha="left", fontsize=6)
 
+    role_suffix = f" ({subject_role})" if subject_role else ""
+    verb = "lent" if subject_role == "lender" else "borrowed"
     ax1.set_ylabel("Loan (chronological)")
     ax1.set_title(
-        f"USDC/{collateral_label} loan timeline — {borrower}\n"
-        f"{len(rows)} loans, ${sum(r['usd'] for r in rows):,.0f} total principal borrowed"
+        f"USDC/{collateral_label} loan timeline — {borrower}{role_suffix}\n"
+        f"{len(rows)} loans, ${sum(r['usd'] for r in rows):,.0f} total principal {verb}"
     )
     ax1.set_yticks([])
     ax1.invert_yaxis()
@@ -340,35 +354,33 @@ def prompt_for_collateral() -> str:
     return raw or "all"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--borrower", default=None, help="Borrower wallet address. Omit to be prompted (blank there auto-picks the largest borrower).")
-    parser.add_argument("--collateral", default=None, help='Collateral symbol, mint address, or "all". Omit to be prompted (blank there means all).')
-    parser.add_argument("--output", default=None, help="PNG output path. Defaults to ~/Desktop/borrower_timeline_<borrower8>.png")
-    args = parser.parse_args()
+def prompt_for_mode() -> str:
+    """Interactively ask which of the two things this run is for."""
+    raw = input(
+        "What would you like to do?\n"
+        "  1) Chart a single borrower's loan timeline\n"
+        "  2) Take an address, find its active-loan counterparties, and chart each one's timeline\n"
+        "Choice [1/2, default 1]: "
+    ).strip()
+    return "address" if raw == "2" else "borrower"
 
-    # A flag not passed on the command line at all → ask interactively.
-    borrower_arg = args.borrower if "--borrower" in sys.argv else prompt_for_borrower()
-    collateral_arg = (args.collateral if "--collateral" in sys.argv else prompt_for_collateral()) or "all"
 
-    log.info("Fetching loan history platform-wide…")
-    all_loans = fetch_all_loans()
-    if not all_loans:
-        log.error("No USDC-principal loans found platform-wide.")
-        sys.exit(1)
+def prompt_for_address() -> str:
+    raw = input("Enter the address: ").strip()
+    while not raw:
+        raw = input("Address can't be blank — enter the address: ").strip()
+    return raw
 
-    all_collateral = collateral_arg.strip().upper() == "ALL"
-    if all_collateral:
-        scoped_loans = all_loans
-        collateral_label = "ALL collateral"
-    else:
-        collateral_mint = SYMBOL_TO_MINT.get(collateral_arg.upper(), collateral_arg)
-        collateral_label = KNOWN_SYMBOLS.get(collateral_mint, collateral_mint[:8] + "…")
-        scoped_loans = filter_by_collateral(all_loans, collateral_mint)
-        if not scoped_loans:
-            log.error("No loans found for collateral %s — check the mint/symbol.", collateral_arg)
-            sys.exit(1)
 
+def prompt_for_role(address: str) -> str:
+    raw = input(f"Is {address} a lender or a borrower? [lender/borrower]: ").strip().lower()
+    while raw not in ("lender", "borrower"):
+        raw = input("Please enter 'lender' or 'borrower': ").strip().lower()
+    return raw
+
+
+def run_single_borrower_mode(scoped_loans: list[dict], all_collateral: bool, collateral_label: str,
+                              borrower_arg: str | None, output_arg: str | None) -> None:
     borrower = borrower_arg or find_largest_borrower(scoped_loans)
     if not borrower_arg:
         log.info("No borrower given — auto-selected largest borrower: %s", borrower)
@@ -389,8 +401,109 @@ def main() -> None:
     gaps, intervals = find_gaps(rows)
     print_summary(rows, gaps, intervals, now)
 
-    output_path = args.output or str(DESKTOP_DIR / f"borrower_timeline_{borrower[:8]}.png")
+    output_path = output_arg or str(DESKTOP_DIR / f"borrower_timeline_{borrower[:8]}.png")
     plot(rows, gaps, borrower, collateral_label, now, output_path)
+
+
+def run_counterparty_mode(scoped_loans: list[dict], all_collateral: bool, collateral_label: str,
+                           address: str, role: str, output_dir_arg: str | None) -> None:
+    """Find every OTHER party `address` currently shares an active loan with
+    (its counterparties), then chart each counterparty's full loan timeline
+    (every loan they've ever been on the other side of, any status) to its
+    own PNG. Counterparties are derived from active loans only — those are
+    the relationships that are actually live right now."""
+    own_field, counterparty_field = ("lender", "borrower") if role == "lender" else ("borrower", "lender")
+
+    active_for_address = [l for l in scoped_loans if l.get("_status") == "active" and l.get(own_field) == address]
+    if not active_for_address:
+        log.error("No active loans found where %s is the %s (within collateral scope %s).",
+                   address, role, collateral_label)
+        sys.exit(1)
+
+    counterparties = sorted({l.get(counterparty_field) for l in active_for_address if l.get(counterparty_field)})
+    log.info("Found %d active counterpart%s (%s) for %s %s: %s",
+              len(counterparties), "y" if len(counterparties) == 1 else "ies",
+              counterparty_field, role, address, ", ".join(counterparties))
+
+    now = datetime.now(timezone.utc)
+    output_dir = Path(output_dir_arg) if output_dir_arg else DESKTOP_DIR / f"counterparty_timelines_{address[:8]}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for cp in counterparties:
+        cp_loans = [l for l in scoped_loans if l.get(counterparty_field) == cp]
+        if not cp_loans:
+            continue
+        resolve_collateral_symbols(cp_loans)
+        if all_collateral:
+            used = sorted({collateral_symbol_for(l) for l in cp_loans})
+            log.info("Collateral tokens used by %s %s: %s", counterparty_field, cp, ", ".join(used))
+
+        rows = build_rows(cp_loans, now)
+        gaps, intervals = find_gaps(rows)
+        log.info("--- %s %s ---", counterparty_field, cp)
+        print_summary(rows, gaps, intervals, now)
+
+        out_path = output_dir / f"{counterparty_field}_{cp[:8]}.png"
+        plot(rows, gaps, cp, collateral_label, now, str(out_path), subject_role=counterparty_field)
+
+    log.info("Saved %d chart(s) to %s", len(counterparties), output_dir)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--borrower", default=None, help="Borrower wallet address. Omit to be prompted (blank there auto-picks the largest borrower).")
+    parser.add_argument("--address", default=None,
+                         help="Counterparty mode: an address to find active-loan counterparties for, instead of "
+                              "charting a single borrower. Each counterparty gets its own PNG. Requires --role "
+                              "(or you'll be prompted for it).")
+    parser.add_argument("--role", default=None, choices=["lender", "borrower"],
+                         help='Whether --address is the "lender" or "borrower" side of its active loans. '
+                              'Only used with --address; omit to be prompted.')
+    parser.add_argument("--collateral", default=None, help='Collateral symbol, mint address, or "all". Omit to be prompted (blank there means all).')
+    parser.add_argument("--output", default=None,
+                         help="Single-borrower mode: PNG output path (default ~/Desktop/borrower_timeline_<borrower8>.png). "
+                              "--address mode: output DIRECTORY (default ~/Desktop/counterparty_timelines_<address8>/).")
+    args = parser.parse_args()
+
+    address_given = "--address" in sys.argv
+    borrower_given = "--borrower" in sys.argv
+
+    if address_given:
+        mode = "address"
+    elif borrower_given:
+        mode = "borrower"
+    else:
+        mode = prompt_for_mode()
+
+    # A flag not passed on the command line at all → ask interactively.
+    collateral_arg = (args.collateral if "--collateral" in sys.argv else prompt_for_collateral()) or "all"
+
+    log.info("Fetching loan history platform-wide…")
+    all_loans = fetch_all_loans()
+    if not all_loans:
+        log.error("No USDC-principal loans found platform-wide.")
+        sys.exit(1)
+
+    all_collateral = collateral_arg.strip().upper() == "ALL"
+    if all_collateral:
+        scoped_loans = all_loans
+        collateral_label = "ALL collateral"
+    else:
+        collateral_mint = SYMBOL_TO_MINT.get(collateral_arg.upper(), collateral_arg)
+        collateral_label = KNOWN_SYMBOLS.get(collateral_mint, collateral_mint[:8] + "…")
+        scoped_loans = filter_by_collateral(all_loans, collateral_mint)
+        if not scoped_loans:
+            log.error("No loans found for collateral %s — check the mint/symbol.", collateral_arg)
+            sys.exit(1)
+
+    if mode == "address":
+        address = args.address if address_given else prompt_for_address()
+        role = args.role if "--role" in sys.argv else prompt_for_role(address)
+        run_counterparty_mode(scoped_loans, all_collateral, collateral_label, address, role, args.output)
+        return
+
+    borrower_arg = args.borrower if borrower_given else prompt_for_borrower()
+    run_single_borrower_mode(scoped_loans, all_collateral, collateral_label, borrower_arg, args.output)
 
 
 if __name__ == "__main__":

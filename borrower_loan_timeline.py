@@ -1,37 +1,44 @@
 """
 Offerbook Borrower Loan Timeline
 ==================================
-Plots one borrower's full loan history for a given collateral as a Gantt-style
-timeline (one bar per loan, colored by outcome), plus a concurrent-open-loans
-step chart underneath — so you can see at a glance whether a borrower takes
-breaks between loans, how often, and whether their activity is ramping up or
-down over time.
+Plots one borrower's full loan history as a Gantt-style timeline (one bar
+per loan, colored by outcome), plus a concurrent-open-loans step chart
+underneath — so you can see at a glance whether a borrower takes breaks
+between loans, how often, and whether their activity is ramping up or down
+over time. Scope it to a single collateral token, or to every token that
+borrower has ever borrowed against at once.
 
-Each loan bar is labeled with its principal size (USD), and every detected
-gap (a stretch with zero loans open) is labeled with its length in days
-directly on the chart, so both are easy to eyeball without reading the
-console output.
+Each loan bar is labeled with its principal size (USD) — and, when scoped to
+"all" collateral, which token it was against, since bars can now span
+several different tokens. Every detected gap (a stretch with zero loans
+open) is labeled with its length in days directly on the chart, so both are
+easy to eyeball without reading the console output.
 
-If --collateral/--borrower are omitted, prompts interactively for them
-(blank borrower answer auto-picks the largest borrower by total USD
-principal for that collateral).
+If --collateral/--borrower are omitted, prompts interactively for them.
+--collateral accepts a symbol, a mint address, or "all" (or just leave it
+blank at the prompt) for every collateral that borrower has ever used.
+Leaving --borrower blank auto-picks the largest borrower (by total USD
+principal) within whatever --collateral scope was chosen.
 
 Usage:
-  python borrower_loan_timeline.py                      # prompts: "Enter collateral symbol ..."
-  python borrower_loan_timeline.py --collateral USELESS
-  python borrower_loan_timeline.py --collateral USELESS --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ
+  python borrower_loan_timeline.py                      # prompts for borrower, then collateral
+  python borrower_loan_timeline.py --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --collateral all
+  python borrower_loan_timeline.py --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --collateral USELESS
+  python borrower_loan_timeline.py --collateral USELESS                      # auto-picks that token's largest borrower
   python borrower_loan_timeline.py --collateral USELESS --output /some/other/path.png
 
 Charts always save to ~/Desktop/borrower_timeline_<borrower8>.png by default
 (pass --output to save elsewhere instead).
 
 Notes:
-  - "Loans" here means USDC-principal loans against the given collateral,
-    across all statuses (active/repaid/defaulted).
+  - "Loans" here means USDC-principal loans, across all statuses
+    (active/repaid/defaulted), scoped to one collateral or all of them.
   - A "gap" is a stretch where the borrower has zero loans open at all
     (concurrent-open-loans hits 0), not merely between individual loan
     originations — a borrower can open loan #2 before loan #1 closes, and
-    that isn't a break.
+    that isn't a break. In "all collateral" mode this is measured across
+    every token together — a loan against token A overlapping one against
+    token B still counts as continuously busy, not a gap.
 """
 from __future__ import annotations
 
@@ -84,18 +91,35 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
     return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE)
 
 
-def fetch_loans_for_collateral(collateral_mint: str) -> list[dict]:
-    """All USDC-principal loans (active/repaid/defaulted) against collateral_mint."""
+def fetch_all_loans() -> list[dict]:
+    """Every USDC-principal loan (active/repaid/defaulted) platform-wide,
+    regardless of collateral. Fetched once and filtered in-memory by
+    collateral/borrower as needed, rather than re-fetching per scope."""
     loans: list[dict] = []
     for status in ("active", "repaid", "defaulted"):
         items = _fetch_all_pages(f"/loans/status/{status}")
         for l in items:
-            cmint = l.get("collateralMint") or _common._mint_from_asset(l.get("collateral", {}))
             pmint = l.get("principalMint") or _common._mint_from_asset(l.get("principal", {}))
-            if cmint == collateral_mint and pmint == USDC_MINT:
+            if pmint == USDC_MINT:
                 l["_status"] = status
                 loans.append(l)
     return loans
+
+
+def filter_by_collateral(loans: list[dict], collateral_mint: str) -> list[dict]:
+    return [
+        l for l in loans
+        if (l.get("collateralMint") or _common._mint_from_asset(l.get("collateral", {}))) == collateral_mint
+    ]
+
+
+def filter_by_borrower(loans: list[dict], borrower: str) -> list[dict]:
+    return [l for l in loans if l.get("borrower") == borrower]
+
+
+def collateral_symbol_for(loan: dict) -> str:
+    cmint = loan.get("collateralMint") or _common._mint_from_asset(loan.get("collateral", {}))
+    return KNOWN_SYMBOLS.get(cmint, cmint[:6] + "…" if cmint else "?")
 
 
 def find_largest_borrower(loans: list[dict]) -> str:
@@ -127,7 +151,10 @@ def build_rows(loans: list[dict], now: datetime) -> list[dict]:
             else:
                 color, label = COLOR_ON_TIME, "on-time repaid"
         usd = (l.get("metadata") or {}).get("startPrincipalAmountUsd") or 0.0
-        rows.append({"start": start, "end": end, "color": color, "label": label, "usd": usd})
+        rows.append({
+            "start": start, "end": end, "color": color, "label": label, "usd": usd,
+            "collateral_symbol": collateral_symbol_for(l),
+        })
     rows.sort(key=lambda r: r["start"])
     return rows
 
@@ -195,7 +222,7 @@ def print_summary(rows: list[dict], gaps: list[tuple[datetime, datetime, float]]
 
 
 def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrower: str,
-         collateral_symbol: str, now: datetime, output_path: str) -> None:
+         collateral_label: str, now: datetime, output_path: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
@@ -214,12 +241,12 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
     for i, r in enumerate(rows):
         ax1.barh(i, (r["end"] - r["start"]).total_seconds() / 86400,
                   left=r["start"], color=r["color"], edgecolor="black", linewidth=0.3, height=0.8)
-        ax1.text(r["end"] + label_offset, i, f"${r['usd']:,.0f}",
+        ax1.text(r["end"] + label_offset, i, f"${r['usd']:,.0f} {r['collateral_symbol']}",
                   va="center", ha="left", fontsize=6)
 
     ax1.set_ylabel("Loan (chronological)")
     ax1.set_title(
-        f"USDC/{collateral_symbol} loan timeline — {borrower}\n"
+        f"USDC/{collateral_label} loan timeline — {borrower}\n"
         f"{len(rows)} loans, ${sum(r['usd'] for r in rows):,.0f} total principal borrowed"
     )
     ax1.set_yticks([])
@@ -256,50 +283,64 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
     log.info("Saved chart to %s", output_path)
 
 
-def prompt_for_collateral() -> str:
-    """Interactively ask for a collateral symbol or mint, re-prompting on empty input."""
-    while True:
-        raw = input("Enter collateral symbol (e.g. USELESS) or mint address: ").strip()
-        if raw:
-            return raw
-        print("  Please enter a collateral symbol or mint address.")
-
-
 def prompt_for_borrower() -> str | None:
-    """Interactively ask for a borrower address; blank means auto-pick the largest."""
+    """Interactively ask for a borrower address; blank means auto-pick the largest
+    (within whatever collateral scope is chosen next)."""
     raw = input("Enter borrower address (leave blank to auto-pick the largest borrower): ").strip()
     return raw or None
 
 
+def prompt_for_collateral() -> str:
+    """Interactively ask for a collateral symbol/mint, or blank/'all' for every
+    collateral the borrower has ever used."""
+    raw = input(
+        'Enter collateral symbol (e.g. USELESS) or mint address, '
+        'or leave blank for ALL collateral this borrower has used: '
+    ).strip()
+    return raw or "all"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--collateral", default=None, help="Collateral symbol (e.g. USELESS) or mint address. Omit to be prompted.")
     parser.add_argument("--borrower", default=None, help="Borrower wallet address. Omit to be prompted (blank there auto-picks the largest borrower).")
+    parser.add_argument("--collateral", default=None, help='Collateral symbol, mint address, or "all". Omit to be prompted (blank there means all).')
     parser.add_argument("--output", default=None, help="PNG output path. Defaults to ~/Desktop/borrower_timeline_<borrower8>.png")
     args = parser.parse_args()
 
-    collateral_arg = args.collateral or prompt_for_collateral()
-    # --borrower wasn't passed on the command line at all → ask interactively
-    # (blank answer there means "auto-pick the largest borrower").
+    # A flag not passed on the command line at all → ask interactively.
     borrower_arg = args.borrower if "--borrower" in sys.argv else prompt_for_borrower()
+    collateral_arg = (args.collateral if "--collateral" in sys.argv else prompt_for_collateral()) or "all"
 
-    collateral_mint = SYMBOL_TO_MINT.get(collateral_arg.upper(), collateral_arg)
-    collateral_symbol = KNOWN_SYMBOLS.get(collateral_mint, collateral_mint[:8] + "…")
-
-    log.info("Fetching loan history for collateral %s (%s)…", collateral_symbol, collateral_mint[:8])
-    all_loans = fetch_loans_for_collateral(collateral_mint)
+    log.info("Fetching loan history platform-wide…")
+    all_loans = fetch_all_loans()
     if not all_loans:
-        log.error("No loans found for collateral %s — check the mint/symbol.", collateral_arg)
+        log.error("No USDC-principal loans found platform-wide.")
         sys.exit(1)
 
-    borrower = borrower_arg or find_largest_borrower(all_loans)
+    all_collateral = collateral_arg.strip().upper() == "ALL"
+    if all_collateral:
+        scoped_loans = all_loans
+        collateral_label = "ALL collateral"
+    else:
+        collateral_mint = SYMBOL_TO_MINT.get(collateral_arg.upper(), collateral_arg)
+        collateral_label = KNOWN_SYMBOLS.get(collateral_mint, collateral_mint[:8] + "…")
+        scoped_loans = filter_by_collateral(all_loans, collateral_mint)
+        if not scoped_loans:
+            log.error("No loans found for collateral %s — check the mint/symbol.", collateral_arg)
+            sys.exit(1)
+
+    borrower = borrower_arg or find_largest_borrower(scoped_loans)
     if not borrower_arg:
         log.info("No borrower given — auto-selected largest borrower: %s", borrower)
 
-    loans = [l for l in all_loans if l.get("borrower") == borrower]
+    loans = filter_by_borrower(scoped_loans, borrower)
     if not loans:
-        log.error("No loans found for borrower %s on collateral %s.", borrower, collateral_arg)
+        log.error("No loans found for borrower %s with collateral scope %s.", borrower, collateral_label)
         sys.exit(1)
+
+    if all_collateral:
+        used = sorted({collateral_symbol_for(l) for l in loans})
+        log.info("Collateral tokens used by this borrower: %s", ", ".join(used))
 
     now = datetime.now(timezone.utc)
     rows = build_rows(loans, now)
@@ -307,7 +348,7 @@ def main() -> None:
     print_summary(rows, gaps, intervals, now)
 
     output_path = args.output or str(DESKTOP_DIR / f"borrower_timeline_{borrower[:8]}.png")
-    plot(rows, gaps, borrower, collateral_symbol, now, output_path)
+    plot(rows, gaps, borrower, collateral_label, now, output_path)
 
 
 if __name__ == "__main__":

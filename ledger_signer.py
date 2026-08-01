@@ -68,16 +68,19 @@ def _describe_transaction(tx: VersionedTransaction, message_bytes: bytes) -> str
     before an approval — which, unlike a hot-wallet tx, can't be walked back
     once it lands on-chain.
 
-    Also includes the SHA-256 "Message Hash" of message_bytes — the Solana
-    app's own firmware computes and displays this exact value on-device
-    during blind signing (see handle_sign_message.c in LedgerHQ/app-solana,
-    cx_hash_sha256(G_command.message, ...) -> "Message Hash" summary item).
-    Comparing it against the device screen catches a tampered/substituted
-    transaction that this console output alone couldn't.
+    Also includes the SHA-256 "Message Hash" of message_bytes, base58-encoded
+    — the Solana app's own firmware computes and displays this exact value
+    on-device during blind signing (see handle_sign_message.c in
+    LedgerHQ/app-solana, cx_hash_sha256(G_command.message, ...) -> "Message
+    Hash" summary item; base58 because that's how the Solana ecosystem
+    displays every 32-byte value — pubkeys, signatures, hashes — confirmed
+    against an actual device screen, which shows a 44-char base58 string,
+    not hex). Comparing it against the device screen catches a
+    tampered/substituted transaction that this console output alone couldn't.
     """
     msg = tx.message
     account_keys = [str(k) for k in msg.account_keys]
-    message_hash = hashlib.sha256(message_bytes).hexdigest()
+    message_hash = base58.b58encode(hashlib.sha256(message_bytes).digest()).decode()
 
     lines = []
     lines.append("=" * 78)

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import hashlib
 
 import base58
 from ledgerblue.comm import CommException, getDongle
@@ -58,7 +59,7 @@ def _encode_path(path_str: str) -> bytes:
     return out
 
 
-def _describe_transaction(tx: VersionedTransaction) -> str:
+def _describe_transaction(tx: VersionedTransaction, message_bytes: bytes) -> str:
     """
     Human-readable dump of a transaction's accounts and instructions, printed
     right before it's sent to the Ledger for approval. The Ledger's own screen
@@ -66,14 +67,24 @@ def _describe_transaction(tx: VersionedTransaction) -> str:
     only real chance to visually catch a wrong account, amount, or program
     before an approval — which, unlike a hot-wallet tx, can't be walked back
     once it lands on-chain.
+
+    Also includes the SHA-256 "Message Hash" of message_bytes — the Solana
+    app's own firmware computes and displays this exact value on-device
+    during blind signing (see handle_sign_message.c in LedgerHQ/app-solana,
+    cx_hash_sha256(G_command.message, ...) -> "Message Hash" summary item).
+    Comparing it against the device screen catches a tampered/substituted
+    transaction that this console output alone couldn't.
     """
     msg = tx.message
     account_keys = [str(k) for k in msg.account_keys]
+    message_hash = hashlib.sha256(message_bytes).hexdigest()
 
     lines = []
     lines.append("=" * 78)
     lines.append("TRANSACTION TO SIGN — review before approving on the Ledger")
     lines.append("=" * 78)
+    lines.append(f"Message Hash     : {message_hash}")
+    lines.append("  ^ compare this against the \"Message Hash\" shown on your Ledger screen")
     lines.append(f"Recent blockhash : {msg.recent_blockhash}")
     lines.append(f"Fee payer        : {account_keys[0]}")
     lines.append("")
@@ -174,11 +185,12 @@ class LedgerSigner:
         else:
             signer_index = 0
 
-        print(_describe_transaction(tx))
-
         # Hardware wallets sign only the message bytes, not the full wire-format
         # transaction (which includes empty signature placeholder slots).
         message_bytes = bytes(tx.message)
+
+        print(_describe_transaction(tx, message_bytes))
+
         sig_bytes = self._sign_bytes(message_bytes)
 
         signatures = list(tx.signatures)

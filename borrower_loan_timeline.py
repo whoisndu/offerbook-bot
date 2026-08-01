@@ -61,8 +61,16 @@ API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PAGE_SIZE = 100
 
+JUPITER_TOKEN_SEARCH_API = "https://api.jup.ag/tokens/v2/search"
+JUPITER_SEARCH_BATCH_SIZE = 50  # keep query strings reasonably sized
+
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 SYMBOL_TO_MINT = {sym.upper(): mint for mint, sym in KNOWN_SYMBOLS.items()}
+
+# Populated once per run by resolve_collateral_symbols() below — mints not in
+# the curated KNOWN_SYMBOLS table (long-tail/pump.fun tokens) get their real
+# symbol looked up via Jupiter instead of falling back to a truncated address.
+_RESOLVED_SYMBOLS: dict[str, str] = {}
 
 DESKTOP_DIR = Path.home() / "Desktop"
 
@@ -119,7 +127,39 @@ def filter_by_borrower(loans: list[dict], borrower: str) -> list[dict]:
 
 def collateral_symbol_for(loan: dict) -> str:
     cmint = loan.get("collateralMint") or _common._mint_from_asset(loan.get("collateral", {}))
-    return KNOWN_SYMBOLS.get(cmint, cmint[:6] + "…" if cmint else "?")
+    if cmint in KNOWN_SYMBOLS:
+        return KNOWN_SYMBOLS[cmint]
+    if cmint in _RESOLVED_SYMBOLS:
+        return _RESOLVED_SYMBOLS[cmint]
+    return cmint[:6] + "…" if cmint else "?"
+
+
+def resolve_collateral_symbols(loans: list[dict]) -> None:
+    """Look up real symbols (via Jupiter's token search API) for every
+    collateral mint in `loans` that isn't already in KNOWN_SYMBOLS, and cache
+    them in _RESOLVED_SYMBOLS — covers long-tail/pump.fun tokens the curated
+    table doesn't have. Same approach update_config.py uses for the same
+    reason: Jupiter indexes far more of these than Offerbook's own registry.
+    NFT collateral (no fungible mint) is left alone; collateral_symbol_for()
+    falls back to a truncated address for those."""
+    mints = {
+        loan.get("collateralMint") or _common._mint_from_asset(loan.get("collateral", {}))
+        for loan in loans
+    }
+    unresolved = sorted(m for m in mints if m and m not in KNOWN_SYMBOLS and m not in _RESOLVED_SYMBOLS)
+    if not unresolved:
+        return
+    for i in range(0, len(unresolved), JUPITER_SEARCH_BATCH_SIZE):
+        chunk = unresolved[i : i + JUPITER_SEARCH_BATCH_SIZE]
+        try:
+            resp = SESSION.get(JUPITER_TOKEN_SEARCH_API, params={"query": ",".join(chunk)}, timeout=15)
+            resp.raise_for_status()
+            for t in resp.json():
+                mint, symbol = t.get("id"), t.get("symbol")
+                if mint and symbol:
+                    _RESOLVED_SYMBOLS[mint] = symbol
+        except Exception as exc:
+            log.warning("Jupiter token symbol lookup failed for a batch: %s", exc)
 
 
 def find_largest_borrower(loans: list[dict]) -> str:
@@ -337,6 +377,8 @@ def main() -> None:
     if not loans:
         log.error("No loans found for borrower %s with collateral scope %s.", borrower, collateral_label)
         sys.exit(1)
+
+    resolve_collateral_symbols(loans)
 
     if all_collateral:
         used = sorted({collateral_symbol_for(l) for l in loans})

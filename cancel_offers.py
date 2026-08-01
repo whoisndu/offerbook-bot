@@ -56,7 +56,8 @@ DRY_RUN       = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 SIGNING_MODE   = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
 LEDGER_PATH    = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 
-BATCH_SIZE = 5    # offers per cancel tx (keep conservative)
+BATCH_SIZE = 15   # offers per cancel tx -- tested against the live builder API at
+                  # 955 bytes/tx (Solana's 1232-byte tx limit), ~23% headroom left
 PAGE_SIZE  = 100
 
 # Duration in seconds for each strategy — used to filter offers by type.

@@ -473,6 +473,35 @@ python borrower_loan_timeline.py --collateral USELESS --output /some/other/path.
 
 Omitting `--borrower` auto-picks the largest borrower (by total USD principal) for that collateral. Charts save to `~/Desktop/borrower_timeline_<borrower8>.png` by default. Read-only, no signing.
 
+## Competing-offer posting-time chart (`offer_posting_times.py`)
+
+Charts WHEN competing lenders post their offers for a given collateral, so you can time `strategy.py` runs to land after most of the day's competing volume is already on the book, instead of undercutting a thin, partially-posted market. Pulls every lending offer for that collateral across every status (active/partiallyFilled/fulfilled/cancelled/expired) over a lookback window — not just what's live right now, since currently-live offers alone are capped by the platform's 24h expiry and only show a partial day. Your own offers are excluded by default.
+
+```bash
+python offer_posting_times.py                      # prompts for collateral
+python offer_posting_times.py --collateral PUMP
+python offer_posting_times.py --collateral all      # every collateral together
+python offer_posting_times.py --collateral PUMP --days-back 14
+python offer_posting_times.py --collateral PUMP --tz America/New_York
+python offer_posting_times.py --collateral PUMP --coverage 0.9
+```
+
+Plots a scatter of posting time (date vs. hour-of-day, colored by status) to show whether the daily rhythm is consistent, plus an hourly histogram with a cumulative-%-of-USD-volume line to make the busiest posting hours obvious. Prints a recommended "post after HH:00" time — the first hour by whose end `--coverage` (default 80%) of a typical day's competing USD volume has historically posted. Charts save to `~/Desktop/offer_posting_times_<label>.png` by default. Read-only, no signing.
+
+## Competitor posting-time distillation report (`competitor_timing_report.py`)
+
+`strategy.py` posts ALL of its offers in one batch run rather than trickling them out — so the timing question that matters isn't "when do most offers for one token get posted" (that's `offer_posting_times.py`), it's "when has essentially every top competitor across the WHOLE market already posted for the day," so a single run can undercut everyone's fresh pricing at once. This pulls every lending offer platform-wide (every collateral pair) over a rolling lookback window, ranks lenders by total USD volume in that window, profiles both the aggregate market rhythm and each top lender's individual posting hours, then hands that aggregated data to Moonshot's Kimi model (via its OpenAI-compatible API) for a short, distilled, actionable recommendation — one summarization API call, not a multi-turn agent.
+
+```bash
+python competitor_timing_report.py                    # 14-day lookback, top 10 lenders, emails the report
+python competitor_timing_report.py --days-back 21
+python competitor_timing_report.py --top-lenders 15
+python competitor_timing_report.py --tz America/New_York
+python competitor_timing_report.py --no-email          # console output only, skip email + state
+```
+
+Runs every 2 days via `.github/workflows/competitor_timing_report.yml`, which explicitly pins `--tz Africa/Lagos` (WAT, fixed UTC+1, no DST) since the GitHub Actions runner defaults to UTC — run locally without `--tz` and it uses the machine's own local timezone instead, which only matches if that machine is also on WAT/UTC+1. Prior-run stats persist to `competitor_timing_state.json` so each report can call out drift — the recommended hour shifting, a top lender's own timing changing, new names entering the top ranks — but that file is gitignored and **never committed** (it's competitive-intelligence tracking, same reasoning as `lender_capital_state.json`); the workflow persists it across runs via `actions/cache` instead. Requires `MOONSHOT_API_KEY` (a Kimi key from [platform.moonshot.ai](https://platform.moonshot.ai) — for the distillation call; `MOONSHOT_BASE_URL` and `KIMI_MODEL` are overridable if you're on the China platform or the default model ID changes) alongside the existing `SMTP_*` secrets and `OFFERBOOK_WALLET` (used only to exclude our own offers, never to sign). Read-only, no signing.
+
 ## Shared code (`offerbook_common.py`)
 
 Logic that used to be copy-pasted across scripts now lives in one place and gets imported, not duplicated:
@@ -552,7 +581,7 @@ python strategy.py --days 7 --private-key
 | `TELEGRAM_BOT_TOKEN` | No | — | Bot token from @BotFather — used by `wallet_tx_watch.py` and `tg_deposit_watch.py` |
 | `TELEGRAM_CHAT_ID` | No | — | Your chat id — same two scripts |
 
-`SMTP_FROM_EMAIL` / `SMTP_APP_PASSWORD` / `NOTIFY_EMAIL_TO` (used by `loan_watch_notify.py` and `arbitrage_scanner.py`) are **not** meant to go in `.env` — they live only as GitHub Actions secrets (`gh secret set <NAME>`), since those two scripts are meant to run unattended on a schedule, not locally.
+`SMTP_FROM_EMAIL` / `SMTP_APP_PASSWORD` / `NOTIFY_EMAIL_TO` (used by `loan_watch_notify.py`, `arbitrage_scanner.py`, and `competitor_timing_report.py`) are **not** meant to go in `.env` — they live only as GitHub Actions secrets (`gh secret set <NAME>`), since those scripts are meant to run unattended on a schedule, not locally. `MOONSHOT_API_KEY` (used by `competitor_timing_report.py` for its distillation call) follows the same pattern — GitHub Actions secret only, never `.env`.
 
 ## Signing modes
 

@@ -1,0 +1,48 @@
+name: Competitor posting-time report
+
+on:
+  schedule:
+    - cron: "0 6 */2 * *"
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests python-dotenv openai
+
+      # State is competitive intelligence (like lender_capital_state.json) and is
+      # never committed to the repo — persisted across runs via cache instead,
+      # restored from the most recent prior run and re-saved under a fresh key.
+      - name: Restore prior report state
+        uses: actions/cache/restore@v4
+        with:
+          path: competitor_timing_state.json
+          key: competitor-timing-state-${{ github.run_id }}
+          restore-keys: |
+            competitor-timing-state-
+
+      - name: Run competitor timing report
+        env:
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          OFFERBOOK_WALLET: ${{ secrets.OFFERBOOK_WALLET }}
+          SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+        # GitHub Actions runners default to UTC — pin explicitly to the operator's
+        # timezone (Africa/Lagos, WAT, fixed UTC+1 with no DST) so the
+        # recommended-hour output means the same thing here as it does locally.
+        run: python3 competitor_timing_report.py --tz Africa/Lagos
+
+      - name: Save report state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: competitor_timing_state.json
+          key: competitor-timing-state-${{ github.run_id }}

@@ -79,6 +79,8 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -602,11 +604,25 @@ def build_local_report(market_summary: dict, top_lenders: list[dict], delta: dic
 # Email
 # ---------------------------------------------------------------------------
 
-def send_email(subject: str, body: str) -> None:
+def send_email(subject: str, body: str, image_path: str | None = None) -> None:
+    """Sends `body` as the email text; if `image_path` exists, attaches it
+    (e.g. the heatmap PNG) as a regular file attachment — most mail clients
+    show a PNG attachment inline in the preview pane, so this is enough to
+    "see the chart" without switching the whole email to HTML."""
     if not (SMTP_FROM_EMAIL and SMTP_APP_PASSWORD and NOTIFY_EMAIL_TO):
         log.warning("SMTP env vars not set — skipping email: %s", subject)
         return
-    msg = MIMEText(body)
+
+    if image_path and Path(image_path).exists():
+        msg = MIMEMultipart()
+        msg.attach(MIMEText(body))
+        with open(image_path, "rb") as f:
+            image = MIMEImage(f.read())
+        image.add_header("Content-Disposition", "attachment", filename=Path(image_path).name)
+        msg.attach(image)
+    else:
+        msg = MIMEText(body)
+
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM_EMAIL
     msg["To"] = NOTIFY_EMAIL_TO
@@ -684,11 +700,13 @@ def main() -> None:
                   p["address"], p["total_usd"], p["offer_count"],
                   p["own_peak_hour_local"], p["own_recommended_post_after_hour_local"])
 
+    chart_path = None
     if not args.no_chart:
-        chart_path = args.chart_output or str(DESKTOP_DIR / "competitor_top_lenders_heatmap.png")
+        candidate_path = args.chart_output or str(DESKTOP_DIR / "competitor_top_lenders_heatmap.png")
         try:
-            plot_top_lenders_heatmap(top_lenders, market_summary, tz_name, chart_path, args.heatmap_top)
-            log.info("Saved top-%d lenders heatmap to %s", args.heatmap_top, chart_path)
+            plot_top_lenders_heatmap(top_lenders, market_summary, tz_name, candidate_path, args.heatmap_top)
+            log.info("Saved top-%d lenders heatmap to %s", args.heatmap_top, candidate_path)
+            chart_path = candidate_path
         except Exception as exc:
             log.warning("Could not save heatmap chart (non-fatal, continuing): %s", exc)
 
@@ -715,7 +733,7 @@ def main() -> None:
 
     if not args.no_email:
         subject = f"Offerbook competitor timing report — post after {market_summary['recommended_post_after_hour_local']} local"
-        send_email(subject, report_text)
+        send_email(subject, report_text, chart_path)
         save_state(market_summary, top_lenders)
     else:
         log.info("--no-email set — skipped email and state persistence.")

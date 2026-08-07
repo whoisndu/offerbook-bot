@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install requests python-dotenv openai
+      - run: pip install requests python-dotenv numpy scikit-learn matplotlib
 
       # State is competitive intelligence (like lender_capital_state.json) and is
       # never committed to the repo — persisted across runs via cache instead,
@@ -30,7 +30,6 @@ jobs:
 
       - name: Run competitor timing report
         env:
-          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
           OFFERBOOK_WALLET: ${{ secrets.OFFERBOOK_WALLET }}
           SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
           SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
@@ -38,7 +37,17 @@ jobs:
         # GitHub Actions runners default to UTC — pin explicitly to the operator's
         # timezone (Africa/Lagos, WAT, fixed UTC+1 with no DST) so the
         # recommended-hour output means the same thing here as it does locally.
-        run: python3 competitor_timing_report.py --tz Africa/Lagos
+        # --chart-output uses a repo-relative path (not ~/Desktop, which doesn't
+        # exist on the runner) so the artifact-upload step below can find it.
+        run: python3 competitor_timing_report.py --tz Africa/Lagos --chart-output ./competitor_top_lenders_heatmap.png
+
+      - name: Upload heatmap chart
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: competitor-top-lenders-heatmap
+          path: competitor_top_lenders_heatmap.png
+          if-no-files-found: ignore
 
       - name: Save report state
         if: always()

@@ -13,40 +13,55 @@ This pulls every lending offer platform-wide (every collateral pair, not
 one) over a rolling lookback window, ranks lenders by total USD principal
 offered in that window (the "top lenders" — the ones whose pricing
 actually matters to undercut), and profiles both the aggregate market
-posting rhythm and each top lender's individual posting hours. That
-aggregated (not raw per-offer) data is then handed to Moonshot's Kimi model
-to distill into a short, actionable recommendation — this is a single
-summarization API call, not a multi-turn autonomous agent: the task is
-"read these stats and write the takeaway," which doesn't need tool use or
-an agentic loop. Uses Moonshot's OpenAI-compatible chat completions API
-(https://api.moonshot.ai/v1) via the `openai` SDK pointed at that base URL.
+posting rhythm and each top lender's individual posting hours. Two local,
+free (no external API, no billing) ML techniques then turn that into
+genuine analysis rather than just a bigger table:
+
+  - K-MEANS CLUSTERING (scikit-learn) groups top lenders by the SHAPE of
+    their 24-hour USD-weighted posting profile — behavioral archetypes
+    ("morning poster", "evening poster", etc.) rather than just a volume
+    ranking. K is picked automatically via silhouette score. Clustering,
+    not regression, is the right tool for hour-of-day: it's circular
+    (23:00 and 00:00 are adjacent), which a scalar regression would
+    mishandle, but a 24-dimensional distribution vector sidesteps that.
+  - LINEAR REGRESSION (numpy least-squares) fits day-index vs. total daily
+    competing USD volume over the lookback window, to report whether
+    competition is intensifying or cooling off. Volume-over-time is a
+    normal (non-circular) quantity, so a plain fit is valid here.
+
+Both run locally in a few milliseconds — no external LLM call, no API key,
+no billing dependency.
+
+Also saves a heatmap PNG (hour-of-day x top-3-lenders, colored by each
+lender's own % of daily volume in that hour — normalized per lender so the
+#1 lender's raw dollar volume doesn't wash out everyone else's row) to
+~/Desktop/competitor_top_lenders_heatmap.png. Best-effort: wrapped so a
+save failure (e.g. no writable Desktop in CI) logs a warning instead of
+failing the whole run — the email is the primary deliverable, the chart is
+a local bonus.
 
 Meant to run on a schedule (see
 .github/workflows/competitor_timing_report.yml, every 2 days) — costs
-GitHub Actions minutes plus one Kimi API call per run. Prior-run stats
-persist to competitor_timing_state.json (gitignored — like
-lender_capital_state.json, this is competitive-intelligence tracking, kept
-private and NOT committed to the repo; the workflow persists it via
-actions/cache instead) so each report can call out what changed since last
-time (recommended hour drifting, a top lender's pattern shifting, a new
-name entering the top ranks).
+only GitHub Actions minutes. Prior-run stats persist to
+competitor_timing_state.json (gitignored — like lender_capital_state.json,
+this is competitive-intelligence tracking, kept private and NOT committed
+to the repo; the workflow persists it via actions/cache instead) so each
+report can call out what changed since last time (recommended hour
+drifting, a top lender's pattern shifting, a new name entering the top
+ranks).
 
 Usage:
-  python competitor_timing_report.py                    # 14-day lookback, top 10 lenders, emails the report
+  python competitor_timing_report.py                    # 14-day lookback, top 20 lenders, emails the report
   python competitor_timing_report.py --days-back 21
   python competitor_timing_report.py --top-lenders 15
   python competitor_timing_report.py --tz America/New_York
   python competitor_timing_report.py --coverage 0.9
   python competitor_timing_report.py --no-email          # console output only, skip email + state
   python competitor_timing_report.py --all-principals    # include non-USDC principal offers too
+  python competitor_timing_report.py --heatmap-top 5     # chart more than the top 3 lenders
+  python competitor_timing_report.py --no-chart          # skip the heatmap PNG entirely
 
 Required env vars:
-  MOONSHOT_API_KEY   - Kimi API key from platform.moonshot.ai, for the distillation call
-  MOONSHOT_BASE_URL  - optional override (default: https://api.moonshot.ai/v1 — the
-                        international platform; use https://api.moonshot.cn/v1 only if
-                        signed up on the China platform instead)
-  KIMI_MODEL         - optional override (default: kimi-k2-0711-preview — check
-                        platform.moonshot.ai's model list if this 404s, model IDs shift)
   SMTP_FROM_EMAIL    - Gmail address to send from     (skipped with a warning if unset)
   SMTP_APP_PASSWORD  - Gmail App Password for that address
   NOTIFY_EMAIL_TO    - recipient address
@@ -83,14 +98,11 @@ PAGE_SIZE = 100
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 
 STATE_PATH = Path(__file__).parent / "competitor_timing_state.json"
+DESKTOP_DIR = Path.home() / "Desktop"
 
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
 SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
 NOTIFY_EMAIL_TO = os.getenv("NOTIFY_EMAIL_TO")
-
-MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY")
-MOONSHOT_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
-KIMI_MODEL = os.getenv("KIMI_MODEL", "kimi-k2-0711-preview")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,6 +195,46 @@ def recommended_post_hour(cum_pct: list[float], coverage: float) -> int:
     return 23
 
 
+def daily_volume_trend(daily_usd: dict) -> dict | None:
+    """
+    Linear regression (day-index vs. total daily competing USD volume, via
+    numpy least-squares) over the lookback window — a coarse "is
+    competition intensifying" signal. Volume-over-time is a normal
+    (non-circular) quantity, unlike hour-of-day, so a plain fit is valid
+    here without any circular-statistics handling. Returns None if there
+    are too few distinct days for a trend to mean anything.
+    """
+    if len(daily_usd) < 3:
+        return None
+
+    import numpy as np
+
+    ordered_dates = sorted(daily_usd)
+    y = [daily_usd[d] for d in ordered_dates]
+    x = list(range(len(y)))
+
+    slope, intercept = np.polyfit(x, y, 1)
+    mean_y = sum(y) / len(y)
+    y_pred = [slope * xi + intercept for xi in x]
+    ss_res = sum((yi - ypi) ** 2 for yi, ypi in zip(y, y_pred))
+    ss_tot = sum((yi - mean_y) ** 2 for yi in y)
+    r_squared = round(1 - ss_res / ss_tot, 3) if ss_tot > 0 else 0.0
+
+    # "Flat" is scale-relative (2% of mean daily volume/day) rather than a
+    # fixed dollar threshold — a $10/day drift is noise on a $500k/day
+    # market and a real signal on a $200/day one.
+    threshold = max(mean_y * 0.02, 1.0)
+    direction = "increasing" if slope > threshold else "decreasing" if slope < -threshold else "flat"
+
+    return {
+        "slope_usd_per_day": round(float(slope), 2),
+        "r_squared": r_squared,
+        "direction": direction,
+        "days_observed": len(y),
+        "low_confidence": len(y) < 7 or r_squared < 0.3,
+    }
+
+
 def build_market_summary(
     offers: list[dict], tz: ZoneInfo, coverage: float,
 ) -> tuple[dict, dict[str, dict]]:
@@ -193,6 +245,7 @@ def build_market_summary(
     """
     hours: list[int] = []
     usds: list[float] = []
+    daily_usd: dict = defaultdict(float)
     per_lender: dict[str, dict] = defaultdict(lambda: {
         "total_usd": 0.0, "offer_count": 0, "hours": [], "usds": [],
         "collateral_usd": defaultdict(float),
@@ -200,13 +253,15 @@ def build_market_summary(
 
     for o in offers:
         created_utc = _parse_ts(o["createdAt"])
-        local_hour = created_utc.astimezone(tz).hour
+        local_dt = created_utc.astimezone(tz)
+        local_hour = local_dt.hour
         usd = (o.get("metadata") or {}).get("principalAmountUsd") or 0.0
         creator = o.get("creator", "")
         cmint = o.get("collateralMint") or _mint_from_asset(o.get("collateral", {}))
 
         hours.append(local_hour)
         usds.append(usd)
+        daily_usd[local_dt.date()] += usd
 
         ld = per_lender[creator]
         ld["total_usd"] += usd
@@ -228,6 +283,7 @@ def build_market_summary(
         "cumulative_pct_of_volume": [round(v, 1) for v in cum_pct],
         "recommended_post_after_hour_local": f"{(rec_hour + 1) % 24:02d}:00",
         "coverage_at_recommended_hour_pct": round(cum_pct[rec_hour], 1),
+        "volume_trend": daily_volume_trend(daily_usd),
     }
     return market_summary, per_lender
 
@@ -245,12 +301,111 @@ def top_lender_profiles(per_lender: dict[str, dict], top_n: int, coverage: float
             "total_usd": round(d["total_usd"], 2),
             "offer_count": d["offer_count"],
             "hourly_counts": counts,
+            "hourly_usd": [round(v, 2) for v in usd_sums],
+            # Their single busiest hour (mode) — distinct from
+            # own_recommended_post_after_hour_local below, which is a
+            # cumulative-coverage threshold, not a peak.
+            "own_peak_hour_local": f"{int(max(range(24), key=lambda h: usd_sums[h])):02d}:00",
             "own_recommended_post_after_hour_local": f"{(rec_hour + 1) % 24:02d}:00",
             "top_collateral": [
                 {"symbol": symbol_for(m), "usd": round(u, 2)} for m, u in top_collateral
             ],
         })
     return profiles
+
+
+def _hour_archetype_label(avg_peak_hour: float) -> str:
+    h = avg_peak_hour % 24
+    if h < 6:
+        return "late-night / dawn poster"
+    if h < 12:
+        return "morning poster"
+    if h < 18:
+        return "afternoon poster"
+    return "evening / night poster"
+
+
+# A lender with only a couple of offers in the window doesn't have a
+# meaningful 24-hour "shape" — clustering on that is closer to fitting
+# noise than behavior, so they're excluded from clustering specifically
+# (they still appear in the ranked top-lenders list with their own
+# post-after time; they just don't get an archetype label).
+MIN_OFFERS_FOR_CLUSTERING = 3
+MAX_CLUSTERS = 6
+
+
+def cluster_lender_profiles(top_lenders: list[dict]) -> tuple[dict[str, dict], dict | None]:
+    """
+    K-means clustering (scikit-learn) on each sufficiently-sampled top
+    lender's normalized 24-hour USD-share posting profile — groups
+    competitors by the SHAPE of when their money shows up, not just how
+    much. K is chosen automatically via silhouette score, scaling up to
+    MAX_CLUSTERS as more candidates become available (a fixed small ceiling
+    would waste the extra resolution once --top-lenders is raised). Returns
+    ({}, None) if there aren't enough well-sampled top lenders to cluster
+    meaningfully, or if no candidate K produced a stable (>=2 cluster)
+    grouping.
+    """
+    candidates = [p for p in top_lenders if p["offer_count"] >= MIN_OFFERS_FOR_CLUSTERING]
+    if len(candidates) < 4:
+        return {}, None
+
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    vectors = []
+    for p in candidates:
+        usd = np.array(p["hourly_usd"], dtype=float)
+        total = usd.sum()
+        vectors.append(usd / total if total > 0 else usd)
+    X = np.array(vectors)
+
+    max_k = min(MAX_CLUSTERS, len(candidates) - 1)
+    best_k, best_score, best_labels = None, -1.0, None
+    for k in range(2, max_k + 1):
+        labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(X)
+        if len(set(labels)) < 2:
+            continue
+        score = silhouette_score(X, labels)
+        if score > best_score:
+            best_k, best_score, best_labels = k, score, labels
+
+    if best_labels is None:
+        return {}, None
+
+    groups: dict[int, list[dict]] = defaultdict(list)
+    group_vectors: dict[int, list] = defaultdict(list)
+    for label, p, vec in zip(best_labels, candidates, X):
+        groups[int(label)].append(p)
+        group_vectors[int(label)].append(vec)
+
+    cluster_map: dict[str, dict] = {}
+    for label, members in groups.items():
+        if len(members) == 1:
+            # A singleton "cluster" isn't a shared archetype — it's one
+            # lender whose shape didn't match anyone else's. Label it as
+            # that, rather than an hour-bucket name implying a pattern
+            # other lenders share.
+            archetype = "distinct pattern (doesn't match other top lenders)"
+        else:
+            # Archetype hour comes from the CLUSTER CENTROID's peak, not
+            # from averaging each member's own peak hour — hour-of-day is
+            # circular (23:00 and 01:00 average to ~00:00, not ~12:00 as a
+            # naive arithmetic mean of the hour numbers would give), and
+            # the centroid is already a well-defined vector average with no
+            # wraparound issue.
+            centroid = np.mean(group_vectors[label], axis=0)
+            archetype = _hour_archetype_label(int(np.argmax(centroid)))
+        for m in members:
+            cluster_map[m["address"]] = {
+                "cluster": label,
+                "cluster_size": len(members),
+                "archetype": archetype,
+            }
+
+    meta = {"k": best_k, "silhouette_score": round(float(best_score), 3)}
+    return cluster_map, meta
 
 
 # ---------------------------------------------------------------------------
@@ -306,72 +461,141 @@ def build_delta(previous: dict, market_summary: dict, top_lenders: list[dict]) -
 
 
 # ---------------------------------------------------------------------------
-# Distillation — single Kimi (Moonshot) API call, not a multi-turn agent
+# Chart — hour-of-day x top lenders heatmap
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-You are a market-timing analyst for a competitive USDC lending bot on the \
-Offerbook protocol (Solana). The bot posts ALL of its lending offers in one \
-batch run rather than trickling them out over the day, so it wants to run \
-AFTER most competing capital across the whole market has already posted for \
-the period — that way its undercut pricing benchmarks against fresh, \
-representative competitor data instead of yesterday's stragglers.
+def plot_top_lenders_heatmap(top_lenders: list[dict], market_summary: dict, tz_name: str,
+                              output_path: str, top_n: int = 3) -> None:
+    """
+    Heatmap of hour-of-day (x) vs. the top N lenders (y), colored by each
+    lender's own SHARE of their daily USD volume posted in that hour — each
+    row normalized to sum to 100% of THAT lender's own volume, not the raw
+    dollar amount. Without that normalization the #1 lender's much larger
+    absolute volume would wash out every other row's color scale, defeating
+    the point of comparing WHEN each of them posts. A dashed line marks the
+    market-wide recommended post-after hour for direct context.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-You will be given aggregated (not raw per-offer) platform-wide statistics: \
-an hourly posting-time histogram and cumulative-volume curve for the whole \
-market, individual profiles for the top lenders by USD volume, and — when \
-available — a delta versus the previous report.
+    subset = top_lenders[:top_n]
+    if not subset:
+        return
 
-Write a short, distilled report a trader can act on before the next run. \
-Do not restate the raw numbers back verbatim — synthesize them into a \
-recommendation. Structure:
-1. The single recommended post-after time (local), one sentence on why.
-2. Notable competitor timing behavior — who posts latest/earliest among the \
-top lenders, and whether any of them alone would justify posting later.
-3. What changed since the last report, if delta data is present — otherwise \
-omit this section entirely (don't say "no delta data").
-4. Any data-quality caveats worth flagging (thin sample, one dominant \
-outlier skewing the average, etc.) — omit if none.
+    matrix = []
+    labels = []
+    for p in subset:
+        usd = np.array(p["hourly_usd"], dtype=float)
+        total = usd.sum()
+        share_pct = (usd / total * 100) if total > 0 else usd
+        matrix.append(share_pct)
+        labels.append(f"{p['address'][:6]}…{p['address'][-4:]}  (${p['total_usd']:,.0f})")
+    matrix = np.array(matrix)
 
-Keep it tight: a few short paragraphs or a tight bullet list. No preamble, \
-no restating the task back."""
+    fig, ax = plt.subplots(figsize=(14, 1.3 * len(subset) + 2))
+    im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd")
+
+    ax.set_xticks(range(24))
+    ax.set_xticklabels([f"{h:02d}" for h in range(24)], fontsize=8)
+    ax.set_yticks(range(len(subset)))
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel(f"Hour of day ({tz_name})")
+    ax.set_title(f"Top {len(subset)} lenders — % of their own daily USD volume posted per hour")
+
+    # market_summary's "post after HH:00" is already (threshold_hour + 1) —
+    # the boundary sits between the threshold column and the next one.
+    rec_hour = int(market_summary["recommended_post_after_hour_local"].split(":")[0])
+    ax.axvline(rec_hour - 0.5, color="#2563eb", linestyle="--", linewidth=1.5,
+               label=f"market recommended post-after ({market_summary['recommended_post_after_hour_local']})")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25 if len(subset) <= 3 else -0.15), fontsize=8)
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar.set_label("% of that lender's own daily volume")
+
+    plt.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
 
-def distill_report(market_summary: dict, top_lenders: list[dict], delta: dict | None,
-                    days_back: int, tz_name: str, coverage: float) -> str:
-    """Calls Moonshot's Kimi model via its OpenAI-compatible chat completions
-    API (https://platform.moonshot.ai/docs) — the `openai` SDK works against
-    any OpenAI-compatible endpoint by pointing base_url at it."""
-    from openai import OpenAI
+# ---------------------------------------------------------------------------
+# Report formatting — local only, no external API call
+# ---------------------------------------------------------------------------
 
-    if not MOONSHOT_API_KEY:
-        raise RuntimeError("MOONSHOT_API_KEY not set")
+def build_local_report(market_summary: dict, top_lenders: list[dict], delta: dict | None,
+                        cluster_map: dict[str, dict], cluster_meta: dict | None,
+                        days_back: int, tz_name: str) -> str:
+    """Formats the already-computed stats — including the K-means archetype
+    clusters and the linear volume trend — into a readable plain-text
+    report. Everything here was computed locally; there's no external call
+    to fail or bill for."""
+    lines: list[str] = [
+        f"Offerbook competitor posting-time report — {days_back}-day lookback, {tz_name}",
+        "",
+        f"RECOMMENDATION: post after {market_summary['recommended_post_after_hour_local']} local — "
+        f"by then ~{market_summary['coverage_at_recommended_hour_pct']:.0f}% of typical competing "
+        f"USD volume (${market_summary['total_usd_volume']:,.0f} total, {market_summary['total_offers']} "
+        f"offers CREATED in this window, not necessarily still open) has historically posted.",
+        "",
+        "Legend: \"offers\" = offer-creation events in the window (most have since expired/cancelled/"
+        "filled — this is activity volume, not live inventory). \"busiest hour\" = their single "
+        "highest-USD hour. \"80%-by\" = the hour by which ~80% of their typical daily volume has "
+        "historically posted (a cumulative threshold, NOT the same as busiest hour). \"[archetype]\" "
+        "describes the whole cluster's shared shape, not this lender individually.",
+    ]
 
-    client = OpenAI(api_key=MOONSHOT_API_KEY, base_url=MOONSHOT_BASE_URL)
+    trend = market_summary.get("volume_trend")
+    if trend:
+        confidence = "low-confidence" if trend["low_confidence"] else "confidence"
+        lines += [
+            "",
+            f"TREND ({confidence}; linear regression, R²={trend['r_squared']}, "
+            f"{trend['days_observed']} days observed): competing volume is {trend['direction']} "
+            f"at roughly ${abs(trend['slope_usd_per_day']):,.0f}/day.",
+        ]
 
-    payload = {
-        "lookback_days": days_back,
-        "timezone": tz_name,
-        "coverage_threshold_pct": coverage * 100,
-        "market": market_summary,
-        "top_lenders": top_lenders,
-        "delta_since_last_report": delta,
-    }
+    lines += ["", f"TOP {len(top_lenders)} LENDERS BY USD VOLUME:"]
+    if cluster_meta:
+        quality = " — weak separation, treat these as loose groupings" if cluster_meta["silhouette_score"] < 0.4 else ""
+        lines.append(f"  (clustered into {cluster_meta['k']} posting-time archetypes via k-means, "
+                      f"silhouette={cluster_meta['silhouette_score']}{quality})")
+    for p in top_lenders:
+        info = cluster_map.get(p["address"])
+        cluster_str = f"  [{info['archetype']}, n={info['cluster_size']}]" if info else ""
+        lines.append(
+            f"  {p['address']}  ${p['total_usd']:,.0f}  ({p['offer_count']} offers)  "
+            f"busiest hour: {p['own_peak_hour_local']}  "
+            f"80%-by: {p['own_recommended_post_after_hour_local']}{cluster_str}"
+        )
+    if not cluster_meta and len(top_lenders) >= 4:
+        lines.append("  (clustering found no stable grouping — top lenders' posting shapes "
+                      "don't separate cleanly into distinct archetypes this run)")
 
-    response = client.chat.completions.create(
-        model=KIMI_MODEL,
-        max_tokens=4096,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(payload, indent=2)},
-        ],
-    )
+    if delta:
+        lines += ["", "CHANGES SINCE LAST REPORT:"]
+        changed = False
+        if delta["recommended_hour_changed"]:
+            lines.append(
+                f"  Recommended post-after hour moved from "
+                f"{delta['previous_recommended_post_after_hour_local']} to "
+                f"{market_summary['recommended_post_after_hour_local']}."
+            )
+            changed = True
+        if delta["new_entrants_to_top_ranks"]:
+            lines.append(f"  New to top ranks: {', '.join(delta['new_entrants_to_top_ranks'])}")
+            changed = True
+        if delta["dropped_out_of_top_ranks"]:
+            lines.append(f"  Dropped out of top ranks: {', '.join(delta['dropped_out_of_top_ranks'])}")
+            changed = True
+        for shift in delta["lenders_whose_own_timing_shifted"]:
+            lines.append(f"  {shift['address']} shifted own post-after: {shift['from']} → {shift['to']}")
+            changed = True
+        if not changed:
+            lines.append("  No material changes since last report.")
 
-    choice = response.choices[0]
-    if choice.finish_reason == "content_filter":
-        raise RuntimeError("Kimi declined to generate the report (finish_reason=content_filter)")
-
-    return choice.message.content or ""
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -408,13 +632,17 @@ def resolve_tz(tz_arg: str | None) -> ZoneInfo:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--days-back", type=int, default=14, help="Rolling lookback window in days (default 14).")
-    parser.add_argument("--top-lenders", type=int, default=10, help="How many top lenders (by USD volume) to profile (default 10).")
+    parser.add_argument("--top-lenders", type=int, default=20, help="How many top lenders (by USD volume) to profile (default 20).")
     parser.add_argument("--coverage", type=float, default=0.80, help="Fraction of volume that should post before the recommended hour (default 0.80).")
     parser.add_argument("--tz", default=None, help="IANA timezone for hour bucketing (default: this machine's local tz).")
     parser.add_argument("--all-principals", action="store_true", help="Include every principal token, not just USDC.")
     parser.add_argument("--include-self", action="store_true", help="Include our own offers instead of excluding them.")
     parser.add_argument("--wallet", default=None, help="Wallet pubkey to exclude as 'self' (default: OFFERBOOK_WALLET env var).")
     parser.add_argument("--no-email", action="store_true", help="Console output only — skip email and state persistence.")
+    parser.add_argument("--heatmap-top", type=int, default=3, help="How many top lenders to chart in the heatmap (default 3).")
+    parser.add_argument("--no-chart", action="store_true", help="Skip saving the heatmap PNG.")
+    parser.add_argument("--chart-output", default=None,
+                         help="Heatmap PNG output path (default ~/Desktop/competitor_top_lenders_heatmap.png).")
     args = parser.parse_args()
 
     if not (0 < args.coverage <= 1):
@@ -452,19 +680,30 @@ def main() -> None:
               market_summary["coverage_at_recommended_hour_pct"])
     log.info("Top %d lender(s) by USD volume:", len(top_lenders))
     for p in top_lenders:
-        log.info("  %s  $%.2f  (%d offers)  own post-after: %s",
+        log.info("  %s  $%.2f  (%d offers)  busiest: %s  80%%-by: %s",
                   p["address"], p["total_usd"], p["offer_count"],
-                  p["own_recommended_post_after_hour_local"])
+                  p["own_peak_hour_local"], p["own_recommended_post_after_hour_local"])
+
+    if not args.no_chart:
+        chart_path = args.chart_output or str(DESKTOP_DIR / "competitor_top_lenders_heatmap.png")
+        try:
+            plot_top_lenders_heatmap(top_lenders, market_summary, tz_name, chart_path, args.heatmap_top)
+            log.info("Saved top-%d lenders heatmap to %s", args.heatmap_top, chart_path)
+        except Exception as exc:
+            log.warning("Could not save heatmap chart (non-fatal, continuing): %s", exc)
 
     previous_state = load_state() if not args.no_email else {}
     delta = build_delta(previous_state, market_summary, top_lenders)
 
-    log.info("Calling Kimi (%s) to distill the report …", KIMI_MODEL)
-    try:
-        report_text = distill_report(market_summary, top_lenders, delta, args.days_back, tz_name, args.coverage)
-    except Exception as exc:
-        log.error("Distillation call failed: %s", exc)
-        sys.exit(1)
+    log.info("Clustering top lenders by posting-time shape (k-means) and fitting the volume trend …")
+    cluster_map, cluster_meta = cluster_lender_profiles(top_lenders)
+    if cluster_meta:
+        log.info("  → k=%d clusters, silhouette=%.3f", cluster_meta["k"], cluster_meta["silhouette_score"])
+    else:
+        log.info("  → no stable clustering found")
+
+    report_text = build_local_report(market_summary, top_lenders, delta, cluster_map, cluster_meta,
+                                      args.days_back, tz_name)
 
     log.info("")
     log.info("=" * 78)

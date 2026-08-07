@@ -12,7 +12,7 @@ libusb1==3.4.0
 matplotlib==3.11.1
 ndeflib==0.3.3
 nfcpy==1.0.4
-openai==2.53.0
+numpy==2.4.6
 pillow==12.3.0
 protobuf==5.29.6
 pycryptodome==3.23.0
@@ -29,6 +29,7 @@ python-gnupg==0.5.6
 python-u2flib-host==3.0.3
 PyYAML==6.0.3
 requests==2.34.2
+scikit-learn==1.9.0
 solders==0.27.1
 typing_extensions==4.15.0
 urllib3==2.7.0

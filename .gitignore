@@ -10,5 +10,6 @@ defaulter_config.yaml
 tg_watchlist.json
 lender_capital_state.json
 competitor_timing_state.json
+*.png
 create_targeted_offers.py
 allocation_config.yaml

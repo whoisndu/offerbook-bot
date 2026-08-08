@@ -40,6 +40,22 @@ save failure (e.g. no writable Desktop in CI) logs a warning instead of
 failing the whole run — the email is the primary deliverable, the chart is
 a local bonus.
 
+A flat/continuous hourly posting shape (rather than one daily spike) is
+ambiguous on its own — it could mean "many offers spread through the day"
+or "fast continuous renewal with no real quiet window," and those two mean
+opposite things for whether the recommended post-after hour actually buys
+you a safe gap before that lender reprices. RENEWAL CADENCE ANALYSIS
+resolves that ambiguity using data the heatmap doesn't: each offer's own
+`duration`/`expiredAt`/`updatedAt` fields. For each top lender it groups
+their offers into (creator, principal, collateral) slots, and for every
+offer that closed via cancellation or expiry (not fulfillment — a fill is
+a borrower taking the offer, not the lender repricing), looks for the next
+offer created in that same slot to measure the actual renewal gap. A
+lender with a short median duration and a short median renewal gap is
+renewing continuously — no hour of the day is "after" them. A lender with
+a long duration and a large renewal gap really does go quiet after their
+daily wave, and posting after their recommended hour buys a real window.
+
 Meant to run on a schedule (see
 .github/workflows/competitor_timing_report.yml, every 2 days) — costs
 only GitHub Actions minutes. Prior-run stats persist to
@@ -60,6 +76,7 @@ Usage:
   python competitor_timing_report.py --all-principals    # include non-USDC principal offers too
   python competitor_timing_report.py --heatmap-top 5     # chart more than the top 3 lenders
   python competitor_timing_report.py --no-chart          # skip the heatmap PNG entirely
+  python competitor_timing_report.py --renewal-window-hours 48  # tighter "is this a renewal" cutoff
 
 Required env vars:
   SMTP_FROM_EMAIL    - Gmail address to send from     (skipped with a warning if unset)
@@ -79,6 +96,7 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -316,6 +334,120 @@ def top_lender_profiles(per_lender: dict[str, dict], top_n: int, coverage: float
     return profiles
 
 
+# ---------------------------------------------------------------------------
+# Renewal cadence — does a lender's flat/continuous hourly shape mean "many
+# offers spread through the day" or "fast renewal with no real quiet window"?
+# ---------------------------------------------------------------------------
+
+def analyze_renewal_cadence(
+    offers: list[dict], top_addresses: set[str], renewal_window_hours: float,
+) -> dict[str, dict]:
+    """
+    For each top lender, groups their offers into (creator, principalMint,
+    collateralMint) slots and, for every offer that closed via cancellation
+    or expiry (fulfillment is excluded — a fill is a borrower taking the
+    offer, not the lender repricing), finds the next offer created in that
+    same slot to measure the actual gap between "this offer stopped being
+    live" and "a replacement showed up." `expiredAt` is used as the close
+    time for expired offers (the offer's own scheduled expiry) and
+    `updatedAt` for cancelled ones (the best available proxy for when the
+    lender pulled it, since the API doesn't expose a dedicated cancelledAt).
+
+    This is what actually distinguishes the two readings a flat 24-hour
+    posting shape is otherwise consistent with: a short median duration +
+    short median renewal gap means the lender is renewing continuously, so
+    there's no hour of the day that's genuinely "after" them. A long
+    duration + large renewal gap means they really do go quiet after their
+    daily wave.
+    """
+    by_slot: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for o in offers:
+        creator = o.get("creator", "")
+        if creator not in top_addresses:
+            continue
+        pmint = o.get("principalMint") or _mint_from_asset(o.get("principal", {}))
+        cmint = o.get("collateralMint") or _mint_from_asset(o.get("collateral", {}))
+        by_slot[(creator, pmint, cmint)].append(o)
+
+    per_lender: dict[str, dict] = defaultdict(lambda: {
+        "durations_hours": [],
+        "actual_lifetimes_hours": [],
+        "renewal_gaps_hours": [],
+        "closed_count": 0,
+        "cancelled_count": 0,
+        "expired_count": 0,
+        "renewed_count": 0,
+    })
+
+    for (creator, _pmint, _cmint), slot_offers in by_slot.items():
+        slot_offers.sort(key=lambda o: _parse_ts(o["createdAt"]))
+        ld = per_lender[creator]
+        for o in slot_offers:
+            dur = o.get("duration")
+            if dur:
+                ld["durations_hours"].append(dur / 3600)
+
+        for i, o in enumerate(slot_offers):
+            status = o.get("status")
+            if status not in ("cancelled", "expired"):
+                continue
+            created = _parse_ts(o["createdAt"])
+            end = _parse_ts(o["expiredAt"] if status == "expired" else o["updatedAt"])
+
+            ld["closed_count"] += 1
+            ld["cancelled_count" if status == "cancelled" else "expired_count"] += 1
+            lifetime_h = (end - created).total_seconds() / 3600
+            if lifetime_h >= 0:
+                ld["actual_lifetimes_hours"].append(lifetime_h)
+
+            nxt = next(
+                (later for later in slot_offers[i + 1:] if _parse_ts(later["createdAt"]) > end),
+                None,
+            )
+            if nxt:
+                gap_h = (_parse_ts(nxt["createdAt"]) - end).total_seconds() / 3600
+                if gap_h <= renewal_window_hours:
+                    ld["renewal_gaps_hours"].append(gap_h)
+                    ld["renewed_count"] += 1
+
+    summaries: dict[str, dict] = {}
+    for creator, d in per_lender.items():
+        if not d["durations_hours"] and not d["closed_count"]:
+            continue
+        summaries[creator] = {
+            "median_stated_duration_hours": round(median(d["durations_hours"]), 1) if d["durations_hours"] else None,
+            "median_actual_lifetime_hours": round(median(d["actual_lifetimes_hours"]), 1) if d["actual_lifetimes_hours"] else None,
+            "closed_count": d["closed_count"],
+            "cancelled_count": d["cancelled_count"],
+            "expired_count": d["expired_count"],
+            "renewed_count": d["renewed_count"],
+            "renewal_rate_pct": round(100 * d["renewed_count"] / d["closed_count"], 1) if d["closed_count"] else None,
+            "median_renewal_gap_hours": round(median(d["renewal_gaps_hours"]), 2) if d["renewal_gaps_hours"] else None,
+        }
+    return summaries
+
+
+def _renewal_interpretation(summary: dict) -> str:
+    """
+    Deliberately keyed off ACTUAL lifetime, not the offer's stated
+    `duration` field — the stated value is often just the lender's ceiling
+    (e.g. maxed at 168h/7 days) regardless of how briefly they actually
+    let the offer run before cancelling, so using it here would mislabel a
+    fast-cycling lender as "slow to renew" just because they set a long
+    nominal duration.
+    """
+    gap = summary.get("median_renewal_gap_hours")
+    rate = summary.get("renewal_rate_pct")
+    lifetime = summary.get("median_actual_lifetime_hours")
+    if gap is None or rate is None:
+        return "not enough closed offers in this window to tell"
+    if gap <= 3 and rate >= 50:
+        return "fast/continuous renewal — no real quiet window after any single hour"
+    if lifetime is not None and lifetime >= 24 and (gap >= 12 or rate < 30):
+        return "long actual lifetime, slow to renew — a real quiet window exists after their wave"
+    return "moderate renewal pace"
+
+
 def _hour_archetype_label(avg_peak_hour: float) -> str:
     h = avg_peak_hour % 24
     if h < 6:
@@ -528,6 +660,7 @@ def plot_top_lenders_heatmap(top_lenders: list[dict], market_summary: dict, tz_n
 
 def build_local_report(market_summary: dict, top_lenders: list[dict], delta: dict | None,
                         cluster_map: dict[str, dict], cluster_meta: dict | None,
+                        renewal_stats: dict[str, dict], renewal_window_hours: float,
                         days_back: int, tz_name: str) -> str:
     """Formats the already-computed stats — including the K-means archetype
     clusters and the linear volume trend — into a readable plain-text
@@ -574,6 +707,33 @@ def build_local_report(market_summary: dict, top_lenders: list[dict], delta: dic
     if not cluster_meta and len(top_lenders) >= 4:
         lines.append("  (clustering found no stable grouping — top lenders' posting shapes "
                       "don't separate cleanly into distinct archetypes this run)")
+
+    lines += [
+        "",
+        f"RENEWAL CADENCE (per top lender, offers that closed via cancel/expiry only — "
+        f"fulfilled offers excluded since a fill is demand-side, not repricing; a next post "
+        f"in the same creator+principal+collateral slot within {renewal_window_hours:.0f}h "
+        f"of closing counts as a renewal):",
+        "  A flat/continuous hourly posting shape is ambiguous on its own — this is what "
+        "resolves it: short duration + short renewal gap means the lender reprices "
+        "continuously, so no hour of the day is genuinely \"after\" them; long duration + "
+        "large renewal gap means posting after their recommended hour buys a real quiet window.",
+    ]
+    for p in top_lenders:
+        rs = renewal_stats.get(p["address"])
+        if not rs:
+            lines.append(f"  {p['address']}  — no closed (cancelled/expired) offers in this window to analyze")
+            continue
+        dur = f"{rs['median_stated_duration_hours']:.1f}h" if rs["median_stated_duration_hours"] is not None else "n/a"
+        lifetime = f"{rs['median_actual_lifetime_hours']:.1f}h" if rs["median_actual_lifetime_hours"] is not None else "n/a"
+        gap = f"{rs['median_renewal_gap_hours']:.1f}h" if rs["median_renewal_gap_hours"] is not None else "n/a"
+        rate = f"{rs['renewal_rate_pct']:.0f}%" if rs["renewal_rate_pct"] is not None else "n/a"
+        lines.append(
+            f"  {p['address']}  stated duration (median): {dur}  actual lifetime (median): {lifetime}  "
+            f"closed: {rs['closed_count']} ({rs['cancelled_count']} cancelled, {rs['expired_count']} expired)  "
+            f"renewed within {renewal_window_hours:.0f}h: {rate} (gap median {gap})  "
+            f"→ {_renewal_interpretation(rs)}"
+        )
 
     if delta:
         lines += ["", "CHANGES SINCE LAST REPORT:"]
@@ -659,6 +819,8 @@ def main() -> None:
     parser.add_argument("--no-chart", action="store_true", help="Skip saving the heatmap PNG.")
     parser.add_argument("--chart-output", default=None,
                          help="Heatmap PNG output path (default ~/Desktop/competitor_top_lenders_heatmap.png).")
+    parser.add_argument("--renewal-window-hours", type=float, default=72.0,
+                         help="Max hours after a closed offer to still count the next same-slot post as a renewal (default 72).")
     args = parser.parse_args()
 
     if not (0 < args.coverage <= 1):
@@ -720,8 +882,13 @@ def main() -> None:
     else:
         log.info("  → no stable clustering found")
 
+    log.info("Correlating closed offers with renewals (renewal window: %.0fh) …", args.renewal_window_hours)
+    renewal_stats = analyze_renewal_cadence(
+        offers, {p["address"] for p in top_lenders}, args.renewal_window_hours,
+    )
+
     report_text = build_local_report(market_summary, top_lenders, delta, cluster_map, cluster_meta,
-                                      args.days_back, tz_name)
+                                      renewal_stats, args.renewal_window_hours, args.days_back, tz_name)
 
     log.info("")
     log.info("=" * 78)

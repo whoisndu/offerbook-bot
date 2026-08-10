@@ -73,8 +73,26 @@ SESSION = requests.Session()
 
 def symbol_for(mint: str) -> str:
     if not mint:
-        return "NFT"
+        return "unknown"
     return KNOWN_SYMBOLS.get(mint, f"{mint[:6]}…{mint[-4:]}")
+
+
+# "kind" is the API's own discriminator for what the collateral actually is
+# (see OfferAsset in api-1.json) — classicNft/programmableNft offers DO carry
+# a mint field (just like a fungible token), so detecting "NFT" by an empty
+# mint alone (the old approach) missed those two kinds. Using `kind` directly
+# is what arbitrage_scanner.py's collateral_key() already does, for the same
+# reason.
+NFT_COLLATERAL_KINDS = {"classicNft", "programmableNft", "coreNft"}
+
+
+def collateral_label(collateral: dict) -> tuple[str, bool]:
+    """Returns (display label, is_nft)."""
+    kind = collateral.get("kind", "")
+    if kind not in NFT_COLLATERAL_KINDS:
+        return symbol_for(_mint_from_asset(collateral)), False
+    ident = collateral.get("mint") or collateral.get("asset") or ""
+    return (f"NFT ({ident[:6]}…{ident[-4:]})" if ident else "NFT"), True
 
 
 def load_state() -> set[str]:
@@ -117,14 +135,15 @@ def describe_offer(o: dict) -> dict:
     p_usd = meta.get("principalAmountUsd") or 0.0
     c_usd = meta.get("collateralAmountUsd") or 0.0
     p_mint = o.get("principalMint") or _mint_from_asset(o.get("principal", {}))
-    c_mint = o.get("collateralMint") or _mint_from_asset(o.get("collateral", {}))
+    c_label, is_nft = collateral_label(o.get("collateral") or {})
     return {
         "pubkey": o["pubkey"],
         "creator": o.get("creator", ""),
         "principal_symbol": symbol_for(p_mint),
         "principal_usd": p_usd,
-        "collateral_symbol": symbol_for(c_mint),
+        "collateral_symbol": c_label,
         "collateral_usd": c_usd,
+        "is_nft": is_nft,
         "ltv": p_usd / c_usd if c_usd else None,
         "apy_bps": o.get("apy", 0),
         "duration_secs": o.get("duration", 0),
@@ -141,6 +160,22 @@ def format_offer_line(d: dict) -> str:
         f"{d['duration_secs']/86400:.1f}d term\n"
         f"  creator {d['creator']}  offer {d['pubkey']}  created {d['created_at']}"
     )
+
+
+def split_by_collateral_type(offers: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(token_backed, nft_backed) — both ranked largest to smallest loan size.
+    Assumes `offers` is already sorted by principal_usd descending; filtering
+    preserves that order in each sublist rather than re-sorting."""
+    token_offers = [d for d in offers if not d["is_nft"]]
+    nft_offers = [d for d in offers if d["is_nft"]]
+    return token_offers, nft_offers
+
+
+def format_section(title: str, items: list[dict]) -> str:
+    header = f"{title} ({len(items)}):"
+    if not items:
+        return header
+    return header + "\n" + "\n\n".join(format_offer_line(d) for d in items)
 
 
 def main() -> None:
@@ -176,13 +211,17 @@ def main() -> None:
         new_offers = [d for d in offers if d["pubkey"] not in previously_notified]
         if new_offers:
             log.info("New borrow request%s since last run: %d", "" if len(new_offers) == 1 else "s", len(new_offers))
+            new_token, new_nft = split_by_collateral_type(new_offers)
             subject = (
                 f"Offerbook: new borrow request — {new_offers[0]['principal_symbol']} "
                 f"${new_offers[0]['principal_usd']:,.0f}"
                 if len(new_offers) == 1
                 else f"Offerbook: {len(new_offers)} new borrow requests"
             )
-            body = "\n\n".join(format_offer_line(d) for d in new_offers)
+            body = "\n\n".join([
+                format_section("TOKEN-BACKED", new_token),
+                format_section("NFT-BACKED", new_nft),
+            ])
             send_email(subject, body)
         else:
             log.info("No new borrow requests since last run (nothing to email).")
@@ -192,13 +231,16 @@ def main() -> None:
         log.info("No open borrow requests match the current filters.")
         return
 
+    token_offers, nft_offers = split_by_collateral_type(offers)
     log.info("")
     log.info("=" * 100)
-    log.info("OPEN BORROW REQUESTS — %d total, largest first", len(offers))
+    log.info("OPEN BORROW REQUESTS — %d total, largest first within each group", len(offers))
     log.info("=" * 100)
-    for d in offers:
-        for line in format_offer_line(d).splitlines():
-            log.info(line)
+    for title, items in (("TOKEN-BACKED", token_offers), ("NFT-BACKED", nft_offers)):
+        log.info("--- %s (%d) ---", title, len(items))
+        for d in items:
+            for line in format_offer_line(d).splitlines():
+                log.info(line)
     log.info("=" * 100)
 
 

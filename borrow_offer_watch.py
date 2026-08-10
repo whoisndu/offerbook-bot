@@ -53,7 +53,17 @@ from offerbook_common import _mint_from_asset
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 PAGE_SIZE = 100
 
+JUPITER_TOKEN_SEARCH_API = "https://api.jup.ag/tokens/v2/search"
+JUPITER_SEARCH_BATCH_SIZE = 50
+
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
+
+# Populated once per run by resolve_symbols() below — mints not in the
+# curated KNOWN_SYMBOLS table (long-tail/pump.fun tokens) get their real
+# symbol looked up via Jupiter instead of a truncated address. Same approach
+# as offer_posting_times.py's resolve_symbols()/borrower_loan_timeline.py's
+# resolve_collateral_symbols().
+_RESOLVED_SYMBOLS: dict[str, str] = {}
 
 STATE_PATH = Path(__file__).parent / "borrow_offer_watch_state.json"
 
@@ -74,7 +84,31 @@ SESSION = requests.Session()
 def symbol_for(mint: str) -> str:
     if not mint:
         return "unknown"
-    return KNOWN_SYMBOLS.get(mint, f"{mint[:6]}…{mint[-4:]}")
+    if mint in KNOWN_SYMBOLS:
+        return KNOWN_SYMBOLS[mint]
+    if mint in _RESOLVED_SYMBOLS:
+        return _RESOLVED_SYMBOLS[mint]
+    return f"{mint[:6]}…{mint[-4:]}"
+
+
+def resolve_symbols(mints: set[str]) -> None:
+    """Look up real symbols (via Jupiter's token search API) for any mint in
+    `mints` that isn't already in KNOWN_SYMBOLS — covers long-tail/pump.fun
+    tokens the curated table doesn't have."""
+    unresolved = sorted(m for m in mints if m and m not in KNOWN_SYMBOLS and m not in _RESOLVED_SYMBOLS)
+    if not unresolved:
+        return
+    for i in range(0, len(unresolved), JUPITER_SEARCH_BATCH_SIZE):
+        chunk = unresolved[i : i + JUPITER_SEARCH_BATCH_SIZE]
+        try:
+            resp = SESSION.get(JUPITER_TOKEN_SEARCH_API, params={"query": ",".join(chunk)}, timeout=15)
+            resp.raise_for_status()
+            for t in resp.json():
+                mint, sym = t.get("id"), t.get("symbol")
+                if mint and sym:
+                    _RESOLVED_SYMBOLS[mint] = sym
+        except Exception as exc:
+            log.warning("Jupiter token symbol lookup failed for a batch: %s", exc)
 
 
 # "kind" is the API's own discriminator for what the collateral actually is
@@ -200,6 +234,17 @@ def main() -> None:
         before = len(raw)
         raw = [o for o in raw if o.get("creator") != wallet]
         log.info("  → excluded %d of our own borrow request(s)", before - len(raw))
+
+    # Resolve real symbols for principal mints and fungible (kind="token")
+    # collateral mints before building descriptions — NFT mints are each a
+    # unique one-of-one, not a fungible symbol, so they're left alone here
+    # and handled by collateral_label()'s truncated-identifier fallback.
+    mints_to_resolve = set()
+    for o in raw:
+        mints_to_resolve.add(o.get("principalMint") or _mint_from_asset(o.get("principal", {})))
+        if (o.get("collateral") or {}).get("kind") not in NFT_COLLATERAL_KINDS:
+            mints_to_resolve.add(_mint_from_asset(o.get("collateral") or {}))
+    resolve_symbols(mints_to_resolve)
 
     offers = [describe_offer(o) for o in raw]
     offers = [d for d in offers if d["principal_usd"] >= args.min_size]

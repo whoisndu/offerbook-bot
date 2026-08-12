@@ -213,6 +213,13 @@ MIN_FILL_USDC = 10.0         # minimum a borrower must take in a partial fill, a
 
 WALLET_BUFFER_USDC = 100.0   # always leave at least this much USDC unallocated
 
+# Below this total available balance, splitting capital by each token's
+# configured allocation fraction (e.g. 35%, 50%) produces offers too small to
+# be worth posting. Override every non-zero-allocation token to 100% instead,
+# relying on the same capital rehypothecation already used across pairs
+# (not every offer fills at once) so each token still gets a full-size offer.
+LOW_BALANCE_ALLOCATION_OVERRIDE_USDC = 1500.0
+
 ROUND_STEP_USDC = 500.0        # round each pair's principal down to the nearest $500...
 ROUND_SMALL_STEP_USDC = 100.0  # ...or nearest $100 if the pair's budget is under one $500 step
 
@@ -266,6 +273,8 @@ SYMBOL_TO_MINT: dict[str, str] = {
     "NEET": "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump",
     "ZEC": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
     "HYPE": "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g",
+    "URANUS": "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
+    "CARDS": "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp",
 }
 
 # ---------------------------------------------------------------------------
@@ -952,13 +961,25 @@ def build_pair_stats(
     return stats
 
 
+def effective_allocation_fraction(collateral_mint: str, usdc_available_raw: int | None) -> float:
+    """Configured allocation fraction for `collateral_mint`, overridden to 100%
+    when total available capital is below LOW_BALANCE_ALLOCATION_OVERRIDE_USDC
+    (see that constant for why) — only for tokens already allocated >0 in the
+    config; tokens explicitly set to 0.0 (skip entirely) are never overridden."""
+    fraction = ALLOCATION_CONFIG.get(collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+    if fraction > 0 and usdc_available_raw is not None:
+        if usdc_available_raw / 10 ** USDC_DECIMALS < LOW_BALANCE_ALLOCATION_OVERRIDE_USDC:
+            return 1.0
+    return fraction
+
+
 def our_offer_usdc_for(collateral_mint: str, usdc_available_raw: int | None) -> float | None:
     """Our intended USDC principal for this collateral, derived purely from
     the allocation config and available balance — known before any market
     data is fetched, so it can be used to size-filter market benchmarks."""
     if usdc_available_raw is None:
         return None
-    fraction = ALLOCATION_CONFIG.get(collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+    fraction = effective_allocation_fraction(collateral_mint, usdc_available_raw)
     return usdc_available_raw / 10 ** USDC_DECIMALS * fraction
 
 
@@ -1335,14 +1356,17 @@ def main() -> None:
             pair_offer_params[pair] = params
 
             if usdc_available_raw is not None and params["principalMint"] == USDC_MINT:
-                fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+                fraction = effective_allocation_fraction(ps.collateral_mint, usdc_available_raw)
                 pair_budgets_raw[pair] = int(usdc_available_raw * fraction)
 
         log.info("=" * 60)
         log.info("Allocation config: %s", _CONFIG_PATH)
+        if usdc_available_raw is not None and usdc_available_raw / 10 ** USDC_DECIMALS < LOW_BALANCE_ALLOCATION_OVERRIDE_USDC:
+            log.info("  Low-balance override active (< %.2f USDC available) — non-zero-allocation "
+                     "tokens get 100%% instead of their configured fraction", LOW_BALANCE_ALLOCATION_OVERRIDE_USDC)
         for pair, budget_raw in pair_budgets_raw.items():
             ps = relevant_pairs[pair]
-            fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+            fraction = effective_allocation_fraction(ps.collateral_mint, usdc_available_raw)
             log.info("  %s…  →  %.0f%%  =  %.2f USDC",
                      ps.collateral_mint[:8], fraction * 100, budget_raw / 10**USDC_DECIMALS)
         log.info("=" * 60)

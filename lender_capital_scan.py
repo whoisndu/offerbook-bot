@@ -56,6 +56,12 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PAGE_SIZE = 100
 MAX_WORKERS = 10
 
+# Exclude lenders inactive longer than this AND with no funds currently sitting
+# in escrow — a lender with escrow funds could fill an offer at any time
+# regardless of how long since their last on-chain activity, so only the
+# combination of "stale" and "no dry powder in escrow" is excluded.
+INACTIVE_DAYS_THRESHOLD = 14
+
 STATE_PATH = Path(__file__).parent / "lender_capital_state.json"
 
 logging.basicConfig(
@@ -211,10 +217,28 @@ def format_last_seen(ts: datetime | None) -> str:
     return f"{hours / 24:.1f}d ago"
 
 
+def _is_stale(b: LenderBalance, last_seen: dict[str, datetime]) -> bool:
+    """True if inactive for more than INACTIVE_DAYS_THRESHOLD days (or never
+    seen at all) AND currently holding no escrow balance (dust below a cent
+    doesn't count as "funds in escrow" — it wouldn't back a real offer)."""
+    if b.escrow_usd >= 0.01:
+        return False
+    ts = last_seen.get(b.lender)
+    if ts is None:
+        return True
+    days_inactive = (datetime.now(timezone.utc) - ts).total_seconds() / 86400
+    return days_inactive > INACTIVE_DAYS_THRESHOLD
+
+
 def print_report(
     balances: list[LenderBalance], previous: dict, last_seen: dict[str, datetime], min_total: float, top: int
 ) -> None:
     balances = [b for b in balances if b.total_usd > min_total]
+    stale_count = sum(1 for b in balances if _is_stale(b, last_seen))
+    if stale_count:
+        log.info("Excluding %d lender(s) inactive > %d days with no escrow balance",
+                  stale_count, INACTIVE_DAYS_THRESHOLD)
+    balances = [b for b in balances if not _is_stale(b, last_seen)]
     balances.sort(key=lambda b: -b.total_usd)
 
     if previous:

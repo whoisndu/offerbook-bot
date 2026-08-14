@@ -51,6 +51,10 @@ Notes:
     that isn't a break. In "all collateral" mode this is measured across
     every token together — a loan against token A overlapping one against
     token B still counts as continuously busy, not a gap.
+  - Repaid loans are split into "early" (repaid >=EARLY_REPAY_HOURS before
+    expiry), "on-time" (repaid at or before expiry, but less than
+    EARLY_REPAY_HOURS ahead of it), and "late" (repaid after expiry) — each
+    its own bar color.
 """
 from __future__ import annotations
 
@@ -95,12 +99,15 @@ log = logging.getLogger("borrower_loan_timeline")
 
 SESSION = requests.Session()
 
+COLOR_EARLY = "#06b6d4"
 COLOR_ON_TIME = "#22c55e"
 COLOR_LATE = "#f97316"
 COLOR_DEFAULTED = "#ef4444"
 COLOR_ACTIVE = "#3b82f6"
 
 MIN_GAP_DAYS_TO_LABEL = 0.05  # ignore sub-hour rounding noise between adjacent loans
+
+EARLY_REPAY_HOURS = 6  # repaid this much (or more) before expiry counts as "early"
 
 
 def _parse_ts(t: str) -> datetime:
@@ -200,6 +207,8 @@ def build_rows(loans: list[dict], now: datetime) -> list[dict]:
             end = _parse_ts(l["updatedAt"])
             if end > expired:
                 color, label = COLOR_LATE, "late repaid"
+            elif (expired - end).total_seconds() / 3600 >= EARLY_REPAY_HOURS:
+                color, label = COLOR_EARLY, "early repaid"
             else:
                 color, label = COLOR_ON_TIME, "on-time repaid"
         usd = (l.get("metadata") or {}).get("startPrincipalAmountUsd") or 0.0
@@ -307,6 +316,7 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
     ax1.invert_yaxis()
 
     legend_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=COLOR_EARLY, label=f"early repaid (>={EARLY_REPAY_HOURS}h before expiry)"),
         plt.Rectangle((0, 0), 1, 1, color=COLOR_ON_TIME, label="on-time repaid"),
         plt.Rectangle((0, 0), 1, 1, color=COLOR_LATE, label="late repaid"),
         plt.Rectangle((0, 0), 1, 1, color=COLOR_DEFAULTED, label="defaulted"),

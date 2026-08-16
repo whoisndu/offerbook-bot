@@ -15,6 +15,11 @@ already committed — plus a "last seen" column: the most recent createdAt/
 updatedAt across all of their Offerbook loan/offer records, i.e. purely
 platform activity, not general wallet activity elsewhere.
 
+Also tracks each lender's all-time loan count (active + repaid + defaulted
+loans where they're the lender — open offers that haven't been matched yet
+don't count) and reports how many new loans they've opened since the
+previous run, alongside the balance change.
+
 Every run's balances are persisted to lender_capital_state.json (gitignored —
 like defaulter_config.yaml/tg_watchlist.json, this reveals your own
 competitive-intelligence tracking, so it's kept private) and compared against
@@ -38,6 +43,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -95,14 +101,17 @@ def _note_last_seen(last_seen: dict[str, datetime], addr: str, record: dict) -> 
             last_seen[addr] = ts
 
 
-def fetch_all_lenders() -> tuple[set[str], dict[str, datetime]]:
+def fetch_all_lenders() -> tuple[set[str], dict[str, datetime], dict[str, int]]:
     """Union of everyone who is or has ever been a lender: active-loan lenders,
     open-lending-offer creators, and lenders from ALL resolved loan history
     (repaid + defaulted) — so a past lender shows up even if they currently have
     no active loan or open offer at all. Also returns each lender's most recent
-    createdAt/updatedAt across all of those records, as a "last seen" signal —
-    computed for free from data already being fetched, no extra API calls."""
+    createdAt/updatedAt across all of those records, as a "last seen" signal,
+    and their all-time loan count (active + repaid + defaulted only — open
+    offers aren't loans yet) — both computed for free from data already being
+    fetched, no extra API calls."""
     last_seen: dict[str, datetime] = {}
+    loan_counts: Counter[str] = Counter()
 
     log.info("Fetching active loans …")
     active_loans = _fetch_all_pages("/loans/status/active")
@@ -111,6 +120,7 @@ def fetch_all_lenders() -> tuple[set[str], dict[str, datetime]]:
     for l in active_loans:
         if l.get("lender"):
             _note_last_seen(last_seen, l["lender"], l)
+            loan_counts[l["lender"]] += 1
 
     log.info("Fetching open lending offers …")
     open_offers: list[dict] = []
@@ -132,6 +142,7 @@ def fetch_all_lenders() -> tuple[set[str], dict[str, datetime]]:
     for l in repaid:
         if l.get("lender"):
             _note_last_seen(last_seen, l["lender"], l)
+            loan_counts[l["lender"]] += 1
 
     log.info("Fetching defaulted-loan history …")
     defaulted = _fetch_all_pages("/loans/status/defaulted")
@@ -140,8 +151,9 @@ def fetch_all_lenders() -> tuple[set[str], dict[str, datetime]]:
     for l in defaulted:
         if l.get("lender"):
             _note_last_seen(last_seen, l["lender"], l)
+            loan_counts[l["lender"]] += 1
 
-    return lenders, last_seen
+    return lenders, last_seen, dict(loan_counts)
 
 
 def wallet_usdc(wallet: str) -> float:
@@ -172,6 +184,7 @@ class LenderBalance:
     lender: str
     wallet_usd: float
     escrow_usd: float
+    loan_count: int
 
     @property
     def total_usd(self) -> float:
@@ -192,14 +205,15 @@ def save_state(balances: list[LenderBalance], previous: dict) -> None:
             "wallet_usd": b.wallet_usd,
             "escrow_usd": b.escrow_usd,
             "total_usd": b.total_usd,
+            "loan_count": b.loan_count,
             "last_updated": now_iso,
         }
     STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
-def scan_balances(lenders: set[str]) -> list[LenderBalance]:
+def scan_balances(lenders: set[str], loan_counts: dict[str, int]) -> list[LenderBalance]:
     def fetch_one(lender: str) -> LenderBalance:
-        return LenderBalance(lender, wallet_usdc(lender), escrow_usdc(lender))
+        return LenderBalance(lender, wallet_usdc(lender), escrow_usdc(lender), loan_counts.get(lender, 0))
 
     log.info("Fetching wallet + escrow USDC balances for %d lender(s) …", len(lenders))
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -251,18 +265,20 @@ def print_report(
     log.info("=" * 100)
     log.info("Lender capital (wallet + escrow USDC) — everyone who is or has ever been a lender")
     log.info("=" * 100)
-    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}  {:>14}"
-    log.info(col.format("lender", "wallet $", "escrow $", "total $", "Δ since last", "last seen"))
+    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}  {:>11}  {:>14}"
+    log.info(col.format("lender", "wallet $", "escrow $", "total $", "Δ since last", "new loans", "last seen"))
     log.info("-" * 124)
     for b in balances[:top]:
         prev = previous.get(b.lender)
         if prev is None:
             delta_str = "NEW"
+            loan_delta_str = "NEW"
         else:
             delta = b.total_usd - prev.get("total_usd", 0.0)
             delta_str = f"{delta:+,.2f}"
+            loan_delta_str = str(b.loan_count - prev.get("loan_count", 0))
         seen_str = format_last_seen(last_seen.get(b.lender))
-        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}", delta_str, seen_str))
+        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}", delta_str, loan_delta_str, seen_str))
     log.info("-" * 124)
 
     total_wallet = sum(b.wallet_usd for b in balances)
@@ -291,9 +307,9 @@ def main() -> None:
 
     previous = load_state()
 
-    lenders, last_seen = fetch_all_lenders()
+    lenders, last_seen, loan_counts = fetch_all_lenders()
     log.info("Distinct lenders (active loan, open offer, or resolved loan history): %d", len(lenders))
-    balances = scan_balances(lenders)
+    balances = scan_balances(lenders, loan_counts)
     print_report(balances, previous, last_seen, args.min_total, args.top)
 
     if not args.no_save:

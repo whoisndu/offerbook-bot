@@ -51,6 +51,8 @@ Usage:
   python strategy.py --days 7           # run only the 7-day strategy, no prompt
   python strategy.py --days 3,7         # run the 3-day and 7-day strategies back to back
   python strategy.py --collateral HYPE  # only create an offer for this collateral
+  python strategy.py --collateral CARDS,ANSEM,URANUS --days 1,3,7   # multiple tokens, one run
+  python strategy.py --collateral CARDS,ANSEM --full-alloc --days 1  # 100% alloc override for this run only
 
 Notes:
   - The Offerbook transaction API returns a base64-encoded Solana transaction.
@@ -171,6 +173,36 @@ def prompt_for_durations() -> list[int]:
         print(f"  Invalid input — enter one or more of: {supported} (comma-separated)")
 
 
+def prompt_for_collateral() -> tuple[str | None, list[str] | None]:
+    """Interactively ask whether to run the full strategy across every allocated
+    pair, or target specific token(s) only. Returns (raw input string or None,
+    resolved mint list or None) — both None means "run everything"."""
+    raw = input(
+        'Target specific token(s) only? Enter symbol(s) or mint address(es), '
+        'comma-separated (e.g. "CARDS,ANSEM"), or press Enter to run the full '
+        'strategy across every allocated pair: '
+    ).strip()
+    if not raw:
+        return None, None
+    resolved = [
+        SYMBOL_TO_MINT.get(tok.strip().upper(), tok.strip())
+        for tok in raw.split(",") if tok.strip()
+    ]
+    return raw, resolved or None
+
+
+def prompt_for_full_alloc() -> bool:
+    """Interactively ask whether to override the configured allocation to 100%
+    for the just-selected token(s), for this run only — handy when running a
+    few specific tokens on a low balance where the configured fractions
+    (e.g. 60%) would split it too thin."""
+    choice = input(
+        "Override allocation to 100% of available balance for these token(s), "
+        "this run only? [y/N] "
+    ).strip().lower()
+    return choice in ("y", "yes")
+
+
 # LTV target is computed per-token from that token's own market data (see
 # effective_target_ltv() below) rather than a single fixed ceiling:
 #   - Not enough data to trust the token's own market → use FALLBACK_LTV
@@ -275,6 +307,7 @@ SYMBOL_TO_MINT: dict[str, str] = {
     "HYPE": "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g",
     "URANUS": "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
     "CARDS": "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp",
+    "ANSEM": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
 }
 
 # ---------------------------------------------------------------------------
@@ -306,6 +339,13 @@ _CONFIG_PATH = os.getenv(
     os.path.join(os.path.dirname(__file__), "allocation_config.yaml"),
 )
 ALLOCATION_CONFIG: dict[str, float] = _load_allocation_config(_CONFIG_PATH)
+
+# Populated in main() from --full-alloc — collateral mints in this set get
+# 100% allocation for this run only, regardless of what allocation_config.yaml
+# says (and regardless of LOW_BALANCE_ALLOCATION_OVERRIDE_USDC). Never
+# persisted to the yaml file. Only ever populated when --collateral was also
+# given, so this can't silently blow out every token's allocation at once.
+FULL_ALLOC_OVERRIDE_MINTS: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -965,7 +1005,15 @@ def effective_allocation_fraction(collateral_mint: str, usdc_available_raw: int 
     """Configured allocation fraction for `collateral_mint`, overridden to 100%
     when total available capital is below LOW_BALANCE_ALLOCATION_OVERRIDE_USDC
     (see that constant for why) — only for tokens already allocated >0 in the
-    config; tokens explicitly set to 0.0 (skip entirely) are never overridden."""
+    config; tokens explicitly set to 0.0 (skip entirely) are never overridden.
+
+    --full-alloc takes priority over both the config and the low-balance
+    override: if this mint was explicitly selected via --collateral and
+    --full-alloc, it always gets 100%, even at a balance that would otherwise
+    stay under the low-balance threshold's automatic bump, and even if the
+    config has it below 100%."""
+    if collateral_mint in FULL_ALLOC_OVERRIDE_MINTS:
+        return 1.0
     fraction = ALLOCATION_CONFIG.get(collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
     if fraction > 0 and usdc_available_raw is not None:
         if usdc_available_raw / 10 ** USDC_DECIMALS < LOW_BALANCE_ALLOCATION_OVERRIDE_USDC:
@@ -1024,6 +1072,8 @@ def compute_offer_params(ps: PairStats, our_offer_usdc: float | None = None) -> 
     # runs first and the 'default' fraction is used if the pair passes.
     collateral_in_config = ps.collateral_mint in ALLOCATION_CONFIG
     allocation_fraction = ALLOCATION_CONFIG.get(ps.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
+    if ps.collateral_mint in FULL_ALLOC_OVERRIDE_MINTS:
+        allocation_fraction = 1.0  # --full-alloc always wins, even over an explicit 0.0 in the config
 
     if collateral_in_config:
         if allocation_fraction == 0.0:
@@ -1219,8 +1269,17 @@ def main() -> None:
     _common.add_signing_args(parser)
     parser.add_argument(
         "--collateral", default=None,
-        help="Only create an offer for this collateral (symbol like HYPE, or a mint address). "
+        help="Only create offers for this collateral (symbol like HYPE, or a mint address). "
+             'Comma-separated for multiple, e.g. "CARDS,ANSEM,URANUS". '
              "Omit to run the full strategy across every allocated pair.",
+    )
+    parser.add_argument(
+        "--full-alloc", action="store_true",
+        help="Override allocation_config.yaml to 100%% for the token(s) given via --collateral, "
+             "for this run only (the yaml file itself is never modified). Useful for a quick "
+             "run on a few specific tokens, especially when your balance is low and the "
+             "configured fractions would split it too thin. Requires --collateral — refuses to "
+             "blanket-override every token in the config at once.",
     )
     parser.add_argument(
         "--days", default=None,
@@ -1230,9 +1289,32 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    collateral_filter = None
-    if args.collateral:
-        collateral_filter = SYMBOL_TO_MINT.get(args.collateral.upper(), args.collateral)
+    collateral_from_cli = bool(args.collateral)
+    collateral_filters: list[str] | None = None
+    if collateral_from_cli:
+        # Given on the CLI — non-interactive (cron/automation), so --full-alloc
+        # is respected exactly as passed and we never prompt below.
+        collateral_filters = [
+            SYMBOL_TO_MINT.get(tok.strip().upper(), tok.strip())
+            for tok in args.collateral.split(",") if tok.strip()
+        ]
+    else:
+        # Not given on the CLI at all — ask interactively which direction to
+        # go (full strategy vs specific token(s)), same as --days below.
+        args.collateral, collateral_filters = prompt_for_collateral()
+
+    if args.full_alloc:
+        if not collateral_filters:
+            log.error("--full-alloc requires --collateral (won't override every token in the config at once).")
+            sys.exit(1)
+    elif not collateral_from_cli and collateral_filters and prompt_for_full_alloc():
+        args.full_alloc = True
+
+    if args.full_alloc:
+        global FULL_ALLOC_OVERRIDE_MINTS
+        FULL_ALLOC_OVERRIDE_MINTS = set(collateral_filters)
+        log.info("Overriding allocation to 100%% for %s (this run only, yaml untouched)",
+                 ", ".join(args.collateral.split(",")))
 
     if args.days:
         selected_days = _parse_duration_selection(args.days)
@@ -1319,14 +1401,14 @@ def main() -> None:
         }
         log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
 
-        if collateral_filter:
+        if collateral_filters:
             relevant_pairs = {
-                pair: ps for pair, ps in relevant_pairs.items() if pair[1] == collateral_filter
+                pair: ps for pair, ps in relevant_pairs.items() if pair[1] in collateral_filters
             }
             log.info("Filtered to collateral %s: %d pair(s)", args.collateral, len(relevant_pairs))
             if not relevant_pairs:
                 log.error("No benchmarkable pair found for collateral %s (%s) — nothing to do.",
-                          args.collateral, collateral_filter)
+                          args.collateral, ", ".join(collateral_filters))
                 continue
 
         # 4b. Skip any pair where we already have a live (active/partiallyFilled)

@@ -4,7 +4,7 @@ An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol 
 
 ## Strategies
 
-One script, `strategy.py`, covering four calibrated loan durations — it prompts for which one(s) to run (or accepts `--days`), and can run more than one in the same invocation (e.g. `--days 1,3,7`). Each offer listing expires after **24 hours** and is re-posted on the next run.
+One script, `strategy.py`, covering four calibrated loan durations — it prompts for which one(s) to run (or accepts `--days`), and can run more than one in the same invocation (e.g. `--days 1,3,7`). It also prompts for whether to run across every allocated pair or target specific token(s) only (or accepts `--collateral`) — see [Targeting specific collateral](#targeting-specific-collateral) below. Each offer listing expires after **24 hours** and is re-posted on the next run.
 
 | Duration | LTV floor (thin market data) | LTV hard ceiling | APY target |
 |---|---|---|---|
@@ -561,7 +561,7 @@ DRY_RUN=true python strategy.py --days 7
 python cancel_offers.py --days all
 python strategy.py --days 1,3,7,15
 
-# Omit --days to be prompted interactively instead
+# Omit --days and --collateral to be prompted interactively for both instead
 python strategy.py
 
 # Prefer the hot wallet key instead of the Ledger?
@@ -626,25 +626,46 @@ python cancel_offers.py --ledger --days 7 --yes
 python strategy.py --days 7 --private-key --yes
 ```
 
-## Testing against a single collateral
+## Targeting specific collateral
 
-`strategy.py` accepts `--collateral <SYMBOL|mint>` to scope a run to one
-collateral pair instead of every allocated market — useful for testing
-signing or sizing changes without touching the rest of your allocation. Omit
-it and every pair in `allocation_config.yaml` is processed as usual.
+`strategy.py` accepts `--collateral <SYMBOL|mint>[,<SYMBOL|mint>...]` to scope
+a run to one or more specific collateral pairs instead of every allocated
+market — useful for testing signing or sizing changes without touching the
+rest of your allocation, or for a quick run on just a few tokens. Omit it and
+you're prompted interactively (run across everything, or name specific
+tokens); pass it and every pair in `allocation_config.yaml` is processed as
+usual.
 
 ```bash
 python strategy.py --days 1 --collateral HYPE --yes
 python strategy.py --days 3 --collateral HYPE --yes
-python strategy.py --days 7 --collateral HYPE --yes
-python strategy.py --days 15 --collateral HYPE --yes
 python strategy.py --days 3,7 --collateral HYPE --yes
+python strategy.py --days 1,3,7 --collateral CARDS,ANSEM,URANUS --yes
 MAX_OFFER_PRINCIPAL_USDC=50 python strategy.py --days 3 --collateral HYPE --yes
 ```
 
-Note: with a single pair selected, the full per-pair allocation budget
-(`allocation_config.yaml`) goes to that one market — use
+Note: with specific pairs selected, the full per-pair allocation budget
+(`allocation_config.yaml`) goes to each of those markets — use
 `MAX_OFFER_PRINCIPAL_USDC` to size down a genuine test.
+
+### One-time 100% allocation override (`--full-alloc`)
+
+`--full-alloc` overrides `allocation_config.yaml` to 100% for just the
+token(s) named in `--collateral`, for that run only — `allocation_config.yaml`
+itself is never modified. Useful when running a few specific tokens on a low
+balance, where the configured fractions (e.g. 60%) would split it too thin.
+Requires `--collateral` — it refuses to blanket-override every token in the
+config at once.
+
+```bash
+python strategy.py --days 1,3,7 --collateral CARDS,ANSEM,URANUS --full-alloc --yes
+```
+
+If `--collateral` is omitted (interactive mode), you're also prompted
+"Override allocation to 100%... this run only?" right after naming specific
+tokens. This prompt is skipped entirely when `--collateral` is passed on the
+CLI, so scripted/cron runs never block on it — pass `--full-alloc` explicitly
+if you want the override in that case.
 
 ## Security
 

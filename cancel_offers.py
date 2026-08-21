@@ -10,15 +10,20 @@ by scanning on-chain accounts directly via getProgramAccounts.
 Signing modes:
   --ledger        Sign with a Ledger hardware wallet (default). Requires the
                    Solana app open on-device; you approve each transaction
-                   with a button press. Path: OFFERBOOK_LEDGER_PATH (default
-                   44'/501'/0').
+                   with a button press. In Ledger mode you're interactively
+                   prompted which account to cancel offers on (see
+                   KNOWN_LEDGER_ACCOUNTS below) unless --ledger-path is given —
+                   there's no single "default" account here, unlike
+                   create_targeted_offers.py, since this script is meant to
+                   operate on whichever wallet's offers you're cleaning up.
   --private-key   Sign with OFFERBOOK_PRIVATE_KEY from .env (hot wallet).
 
 Usage:
-  python cancel_offers.py                   # interactive strategy prompt, Ledger signing
-  python cancel_offers.py --private-key     # same, but sign with the hot wallet key
-  python cancel_offers.py --days 7          # skip prompt, cancel 7-day offers
-  python cancel_offers.py --days all        # skip prompt, cancel everything
+  python cancel_offers.py                   # prompts for strategy AND which account, Ledger signing
+  python cancel_offers.py --ledger-path "44'/501'/1'"  # skip the account prompt
+  python cancel_offers.py --private-key     # sign with the hot wallet key instead
+  python cancel_offers.py --days 7          # skip the strategy prompt, cancel 7-day offers
+  python cancel_offers.py --days all        # skip the strategy prompt, cancel everything
   python cancel_offers.py --withdraw        # also pull funds back to wallet
   python cancel_offers.py --yes             # skip the signing-mode confirmation prompt
   DRY_RUN=true python cancel_offers.py      # preview without submitting
@@ -55,6 +60,15 @@ DRY_RUN       = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 # "ledger" or "private_key" — Ledger is the default signing mode.
 SIGNING_MODE   = os.getenv("OFFERBOOK_SIGNING_MODE", "ledger").strip().lower()
 LEDGER_PATH    = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
+
+# Named Ledger accounts in use, for the interactive account-picker prompt below.
+# Purely a labeling convenience — any derivation path works via --ledger-path
+# or the prompt's "custom" option, this dict just saves re-typing/misremembering
+# the known ones.
+KNOWN_LEDGER_ACCOUNTS: dict[str, tuple[str, str]] = {
+    "1": ("44'/501'/0'", "Original / general strategy account"),
+    "2": ("44'/501'/1'", "Targeted-offers account"),
+}
 
 BATCH_SIZE = 15   # offers per cancel tx -- tested against the live builder API at
                   # 955 bytes/tx (Solana's 1232-byte tx limit), ~23% headroom left
@@ -133,6 +147,38 @@ def resolve_signer_wallet() -> str:
 
 def confirm_signing_mode(skip_prompt: bool) -> None:
     _common.confirm_signing_mode(SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH, DRY_RUN, skip_prompt)
+
+# ---------------------------------------------------------------------------
+# Account selection prompt (Ledger mode only)
+# ---------------------------------------------------------------------------
+
+def prompt_ledger_path() -> str:
+    """
+    Interactively ask which Ledger account to cancel offers on. Unlike
+    create_targeted_offers.py (which always targets its own dedicated
+    account), this script is a general cleanup tool meant to run against
+    whichever wallet you're pointed at — so it always asks rather than
+    silently defaulting, to avoid cancelling (or worse, failing to find)
+    offers on the wrong account.
+    """
+    print()
+    print("Which account do you want to cancel offers on?")
+    print()
+    for key, (path, label) in KNOWN_LEDGER_ACCOUNTS.items():
+        print(f"  [{key}]  {label}  ({path})")
+    print(f"  [c]  Custom derivation path")
+    print()
+    while True:
+        choice = input("Choice: ").strip().lower()
+        if choice in KNOWN_LEDGER_ACCOUNTS:
+            return KNOWN_LEDGER_ACCOUNTS[choice][0]
+        if choice == "c":
+            custom = input("Enter derivation path (e.g. \"44'/501'/2'\"): ").strip()
+            if custom:
+                return custom
+            print("  Path can't be empty")
+            continue
+        print(f"  Please enter one of: {', '.join(KNOWN_LEDGER_ACCOUNTS)}, or 'c' for custom")
 
 # ---------------------------------------------------------------------------
 # Strategy selection prompt
@@ -328,7 +374,7 @@ def cancel_batch(pubkeys: list[str], withdraw_mode: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global SIGNING_MODE, WALLET_PUBKEY
+    global SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH
 
     parser = argparse.ArgumentParser(description="Cancel Offerbook lending offers by strategy")
     parser.add_argument(
@@ -341,6 +387,12 @@ def main() -> None:
         "--withdraw",
         action="store_true",
         help="Withdraw funds back to wallet after cancellation (default: leave in escrow)",
+    )
+    parser.add_argument(
+        "--ledger-path",
+        default=None,
+        help="Ledger derivation path to cancel offers on (e.g. \"44'/501'/1'\"). "
+             "Omit to be prompted interactively (Ledger mode only).",
     )
     _common.add_signing_args(parser)
     args = parser.parse_args()
@@ -355,6 +407,7 @@ def main() -> None:
             log.error("OFFERBOOK_PRIVATE_KEY is not set (required for live private-key mode)")
             sys.exit(1)
     else:
+        LEDGER_PATH = args.ledger_path or prompt_ledger_path()
         resolve_signer_wallet()  # queries the Ledger device, sets WALLET_PUBKEY
 
     confirm_signing_mode(skip_prompt=args.yes)

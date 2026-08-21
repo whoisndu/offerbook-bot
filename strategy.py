@@ -252,7 +252,7 @@ WALLET_BUFFER_USDC = 100.0   # always leave at least this much USDC unallocated
 # (not every offer fills at once) so each token still gets a full-size offer.
 LOW_BALANCE_ALLOCATION_OVERRIDE_USDC = 1500.0
 
-ROUND_STEP_USDC = 500.0        # round each pair's principal down to the nearest $500...
+ROUND_STEP_USDC = 100.0        # round each pair's principal down to the nearest $100...
 ROUND_SMALL_STEP_USDC = 100.0  # ...or nearest $100 if the pair's budget is under one $500 step
 
 DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")

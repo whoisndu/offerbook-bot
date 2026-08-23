@@ -24,6 +24,7 @@ pyobjc-framework-Cocoa==12.2.1; sys_platform == "darwin"
 pyobjc-framework-CoreBluetooth==12.2.1; sys_platform == "darwin"
 pyobjc-framework-libdispatch==12.2.1; sys_platform == "darwin"
 pyserial==3.5
+python-docx==1.2.0
 python-dotenv==1.2.2
 python-gnupg==0.5.6
 python-u2flib-host==3.0.3

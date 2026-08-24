@@ -5,6 +5,12 @@
     "lender": "CnnaudqeP1m8mJwFPPG6CJ8xYaPxDJbHE4byoTPgcKhe",
     "principal_usd": 306.8632164707976
   },
+  "2r5vxVdAYEXPDsbCMgVApKcxVij8iKS6pGoT8TqeDiRp": {
+    "borrower": "7Bq2CUTpj5ATst6pFyEi5wre28hQeVdKNHZST59Ao9nm",
+    "expiredAt": "2026-08-24T12:59:46Z",
+    "lender": "13UHfjKr6rpKwRXQ1KGAMcwjtY7eYBA2B5m9RBgxrFBz",
+    "principal_usd": 8.99635085115013
+  },
   "4FtYEDRN7UpbnsdwfHLDwy7N1oN2jtYE26YMzwH6TZo6": {
     "borrower": "G8WRBZFfxTn7nNNB1Q6Gi3VAQzLBNyHzUytxA9cYmNCv",
     "expiredAt": "2026-08-08T12:39:49Z",

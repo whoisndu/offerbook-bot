@@ -1263,10 +1263,15 @@ def create_offer(params: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global SIGNING_MODE, WALLET_PUBKEY
+    global SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH
 
     parser = argparse.ArgumentParser(description="Offerbook competitive lending strategy")
     _common.add_signing_args(parser)
+    parser.add_argument(
+        "--ledger-path", default=None,
+        help="Ledger derivation path to sign with, e.g. \"44'/501'/1'\" — skips the interactive "
+             "account prompt below.",
+    )
     parser.add_argument(
         "--collateral", default=None,
         help="Only create offers for this collateral (symbol like HYPE, or a mint address). "
@@ -1337,6 +1342,7 @@ def main() -> None:
             log.error("OFFERBOOK_PRIVATE_KEY is not set (required for live private-key mode)")
             sys.exit(1)
     else:
+        LEDGER_PATH = args.ledger_path or _common.prompt_for_ledger_path(LEDGER_PATH)
         resolve_signer_wallet()  # queries the Ledger device, sets WALLET_PUBKEY
 
     confirm_signing_mode(skip_prompt=args.yes)

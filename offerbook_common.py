@@ -65,6 +65,21 @@ def resolve_signer_wallet(signing_mode: str, wallet_pubkey: str, ledger_path: st
     return device_pubkey
 
 
+def prompt_for_ledger_path(default_path: str) -> str:
+    """Interactively ask which Ledger account to run on, so a run never
+    silently defaults to whichever account happens to be hardcoded. Accepts
+    a bare account index (e.g. "1" -> "44'/501'/1'") or a full derivation
+    path (e.g. "44'/501'/2'"); pressing Enter keeps default_path."""
+    raw = input(
+        f"Which Ledger account do you want to run on? Enter an account index "
+        f"(0, 1, 2, ...) or a full derivation path, or press Enter for the "
+        f"default ({default_path}): "
+    ).strip()
+    if not raw:
+        return default_path
+    return f"44'/501'/{raw}'" if raw.isdigit() else raw
+
+
 def confirm_signing_mode(
     signing_mode: str, wallet_pubkey: str, ledger_path: str, dry_run: bool, skip_prompt: bool,
 ) -> None:

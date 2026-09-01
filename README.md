@@ -284,6 +284,22 @@ DRY_RUN=true python cancel_offers.py
 
 The script identifies each strategy's offers by their `duration` field (86 400 / 259 200 / 604 800 / 1 296 000 seconds) so only the right orders are touched. Offers are cancelled in batches of **15** per transaction (`BATCH_SIZE`) — tested against the live builder API at 955 bytes/tx, comfortably under Solana's 1232-byte transaction limit (20/batch was tested too but left too little headroom, only 3%, given offers can vary slightly in account count).
 
+## Fill a single offer (`fill_offer.py`)
+
+Fully fills one live offer by pubkey — either a "borrowing" offer (someone posted collateral wanting principal; you fill it as the lender) or a "lending" offer (someone posted principal wanting collateral; you fill it as the borrower). Offer type is auto-detected from the live offer data.
+
+Fetches the offer fresh right before building the fill transaction (so amounts reflect current `remainingPrincipal`/`remainingCollateral`, not whatever was seen earlier), prints a preview, and asks for confirmation before any signing — same safety pattern as the other scripts here.
+
+In Ledger mode you're interactively prompted which account to sign with (unless `--ledger-path` is given) — this script has no "right" account, it depends what you're filling and with what. Same `KNOWN_LEDGER_ACCOUNTS` labels as `cancel_offers.py`'s picker (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), plus a custom-path option.
+
+```bash
+python fill_offer.py --offer <pubkey>
+python fill_offer.py --offer <pubkey> --ledger-path "44'/501'/1'"   # skip the account prompt
+python fill_offer.py --offer <pubkey> --private-key
+python fill_offer.py --offer <pubkey> --yes
+DRY_RUN=true python fill_offer.py --offer <pubkey>   # preview without submitting
+```
+
 ## Collateral-coverage watchlist (`defaulter_watch.py`)
 
 A read-only analytics scanner over the platform's full loan history (defaulted and repaid), used to identify borrowers whose positions have historically been fully covered by collateral value from a lender's perspective — a more direct signal of downside risk than repayment punctuality alone. It combines two signals per borrower:
@@ -352,6 +368,21 @@ python loan_watch_notify.py
 # Manually trigger the GitHub Actions workflow instead of waiting for its schedule
 gh workflow run loan_watch.yml
 ```
+
+## New borrow-request watch (`borrow_offer_watch.py`)
+
+Emails on every newly-appearing open borrow request platform-wide — every principal, every collateral type (including NFTs), no profitability filter. This is the raw feed; for "is this one worth acting on" see `arbitrage_scanner.py` below, which only alerts on borrow requests that clear a profitable spread against a live lending offer for the same collateral.
+
+Runs every 15 minutes via `.github/workflows/borrow_offer_watch.yml`. Dedup works like `arbitrage_scanner.py`'s: state is the set of currently-open borrow-offer pubkeys, persisted to `borrow_offer_watch_state.json` (committed back to the repo by the workflow — these are public open offers, not competitive intel, so unlike `competitor_timing_state.json` there's nothing here worth keeping private). Each run only emails offers not already in that set, then overwrites the state with exactly this run's live set — anything no longer open (filled, cancelled, expired) simply stops appearing next run.
+
+```bash
+python borrow_offer_watch.py                        # all open borrow requests, email if new ones found
+python borrow_offer_watch.py --min-size 20           # ignore requests under $20 principal
+python borrow_offer_watch.py --principal-mint <mint> # only this principal token
+python borrow_offer_watch.py --no-email              # console output only, skip email + state
+```
+
+Required env vars for email (GitHub Actions secrets, shared with `loan_watch_notify.py`): `SMTP_FROM_EMAIL`, `SMTP_APP_PASSWORD`, `NOTIFY_EMAIL_TO`. `OFFERBOOK_WALLET` is used to exclude our own borrow requests, if any — a warning is logged (not skipped) if unset, same as the other scan scripts.
 
 ## Wallet transaction watch (`wallet_tx_watch.py`)
 
@@ -460,6 +491,22 @@ Also shows **last seen**: the most recent `createdAt`/`updatedAt` across all of 
 
 Read-only, no signing. Exit code is always `0` — this is an informational report, not a pass/fail check.
 
+## Realized PNL leaderboard (`pnl_leaderboard.py`)
+
+Ranks every Offerbook lender by all-time realized PNL. There's no "top by PNL" endpoint on the API — only volume-based leaderboards (`/metrics/top-lenders`) — so this pulls the full repaid + defaulted loan history platform-wide (no borrower/lender filter) and aggregates client-side.
+
+Realized PNL per lender =
+
+- **+ net interest earned on repaid loans.** Interest is converted to USD via the platform's documented proportional formula (`interest / principalAmount * startPrincipalAmountUsd`), then the actual protocol "repay" fee charged is subtracted — taken straight from `metadata.fees.repay.amountUsd` per loan, not assumed as a flat rate.
+- **+ collateral kept on defaulted loans**, valued at default time (`endCollateralAmountUsd`), minus the principal that was lent out and not recovered (`startPrincipalAmountUsd`). This is a mark-to-market figure at the moment of default, not necessarily cash actually realized — if the lender is still holding the seized collateral, it's unrealized from here.
+
+```bash
+python pnl_leaderboard.py              # top 25 by realized PNL
+python pnl_leaderboard.py --top 50
+```
+
+Read-only, never signs or submits anything.
+
 ## Borrower loan timeline (`borrower_loan_timeline.py`)
 
 Plots one borrower's full loan history for a given collateral as a Gantt-style timeline (one bar per loan, colored by outcome — on-time/late/defaulted/active, labeled with each loan's principal size) plus a concurrent-open-loans step chart underneath, so gaps in activity are easy to spot and label with their length in days directly on the chart. Useful for answering "does this borrower take breaks, and how often" at a glance rather than by reading a table.
@@ -510,7 +557,8 @@ Runs every 2 days via `.github/workflows/competitor_timing_report.yml`, which ex
 
 Logic that used to be copy-pasted across scripts now lives in one place and gets imported, not duplicated:
 
-- **Ledger signing** — `get_ledger_signer()`, `resolve_signer_wallet()`, `confirm_signing_mode()`. Used by `strategy.py`, `cancel_offers.py`, `defaulter_capture.py`, `create_targeted_offers.py` (via `defaulter_capture.py`), and `verify_offers.py` (read-only wallet resolution only, never signs).
+- **Ledger signing** — `get_ledger_signer()`, `resolve_signer_wallet()`, `confirm_signing_mode()`. Used by `strategy.py`, `cancel_offers.py`, `fill_offer.py`, `defaulter_capture.py`, `create_targeted_offers.py` (via `defaulter_capture.py`), and `verify_offers.py` (read-only wallet resolution only, never signs).
+- **`prompt_for_ledger_path()`** — the interactive "which Ledger account do you want to run on?" prompt (see "Signing modes"), accepting a bare account index or a full derivation path. Used by `strategy.py`; `cancel_offers.py`/`fill_offer.py` use their own labeled-picker variant of the same idea (`KNOWN_LEDGER_ACCOUNTS`) since those two have no "right" default account.
 - **HTTP client + pagination** — `api_get()`, `post_tx()`, `fetch_all_pages()`. Used by every script that talks to the Offerbook API.
 - **CLI signing flags** — `add_signing_args()` / `resolve_signing_mode()` add and validate the `--ledger`/`--private-key`/`--yes` flags shared by every signing-capable script.
 - **`KNOWN_DECIMALS` / `KNOWN_SYMBOLS`** — the canonical token → decimals / display-symbol tables (24 tokens). Every script that needs either imports these instead of keeping its own copy, so a token added here is immediately recognized everywhere (`strategy.py`, `verify_offers.py`, `underwater.py`, `defaulter_capture.py`, `defaulter_watch.py`, `soon_to_expire.py`, `loan_watch_notify.py`).
@@ -580,16 +628,16 @@ python strategy.py --days 7 --private-key
 | `SOLANA_RPC` | No | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
 | `MAX_OFFER_PRINCIPAL_USDC` | No | `0` | Per-offer USDC cap (0 = full allocation) |
 | `ALLOCATION_CONFIG` | No | `allocation_config.yaml` | Path to allocation config file |
-| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py`, `strategy.py`, and `defaulter_capture.py` |
-| `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing |
+| `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py`, `strategy.py`, `fill_offer.py`, and `defaulter_capture.py` |
+| `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing — in `strategy.py`, `cancel_offers.py`, and `fill_offer.py` this is only the fallback offered at the interactive account prompt (see "Signing modes" below), not used silently |
 | `TELEGRAM_BOT_TOKEN` | No | — | Bot token from @BotFather — used by `wallet_tx_watch.py` and `tg_deposit_watch.py` |
 | `TELEGRAM_CHAT_ID` | No | — | Your chat id — same two scripts |
 
-`SMTP_FROM_EMAIL` / `SMTP_APP_PASSWORD` / `NOTIFY_EMAIL_TO` (used by `loan_watch_notify.py`, `arbitrage_scanner.py`, and `competitor_timing_report.py`) are **not** meant to go in `.env` — they live only as GitHub Actions secrets (`gh secret set <NAME>`), since those scripts are meant to run unattended on a schedule, not locally.
+`SMTP_FROM_EMAIL` / `SMTP_APP_PASSWORD` / `NOTIFY_EMAIL_TO` (used by `loan_watch_notify.py`, `borrow_offer_watch.py`, `arbitrage_scanner.py`, and `competitor_timing_report.py`) are **not** meant to go in `.env` — they live only as GitHub Actions secrets (`gh secret set <NAME>`), since those scripts are meant to run unattended on a schedule, not locally.
 
 ## Signing modes
 
-Every script (`cancel_offers.py`, `strategy.py`) supports two signing modes —
+Every script (`cancel_offers.py`, `strategy.py`, `fill_offer.py`) supports two signing modes —
 **Ledger is the default**:
 
 - `--ledger` (default): signs via a Ledger hardware wallet over USB. Requires
@@ -598,6 +646,18 @@ Every script (`cancel_offers.py`, `strategy.py`) supports two signing modes —
   transaction with a physical button press — the private key never touches
   this machine. See `ledger_signer.py`.
 - `--private-key`: signs with `OFFERBOOK_PRIVATE_KEY` from `.env` (hot wallet).
+
+**Which Ledger account:** in Ledger mode, `strategy.py`, `cancel_offers.py`,
+and `fill_offer.py` all interactively ask which account (derivation path) to
+sign with — there's no silent default, so a run never quietly lands on the
+wrong account. `cancel_offers.py`/`fill_offer.py` show a small labeled picker
+(`KNOWN_LEDGER_ACCOUNTS`, e.g. "Original / general strategy account" for
+`44'/501'/0'`, "Targeted-offers account" for `44'/501'/1'`) plus a custom-path
+option; `strategy.py` uses the equivalent shared prompt in
+`offerbook_common.prompt_for_ledger_path()`, which accepts either a bare
+account index (`0`, `1`, ...) or a full derivation path. Pass `--ledger-path
+"44'/501'/N'"` on any of them to skip the prompt entirely (e.g. for cron/
+automation).
 
 Every run prints the resolved signing mode and wallet address and asks for
 confirmation before doing anything, so you always know which wallet/mode
@@ -620,9 +680,11 @@ before approving: a mismatch means the bytes about to be signed aren't the
 ones printed to the console.
 
 ```bash
-python cancel_offers.py                 # Ledger signing (default), interactive
+python cancel_offers.py                 # Ledger signing (default), prompts for strategy AND account
 python cancel_offers.py --private-key   # hot wallet signing
 python cancel_offers.py --ledger --days 7 --yes
+python strategy.py --days 7                          # prompts which Ledger account to run on
+python strategy.py --days 7 --ledger-path "44'/501'/1'"  # skip that prompt
 python strategy.py --days 7 --private-key --yes
 ```
 

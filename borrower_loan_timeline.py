@@ -12,7 +12,10 @@ Each loan bar is labeled with its principal size (USD) — and, when scoped to
 "all" collateral, which token it was against, since bars can now span
 several different tokens. Every detected gap (a stretch with zero loans
 open) is labeled with its length in days directly on the chart, so both are
-easy to eyeball without reading the console output.
+easy to eyeball without reading the console output. The chart title always
+states the most recent loan's start date and how it resolved (still active,
+or closed/date + outcome) — the rightmost bar's exact date is otherwise easy
+to misjudge from the x-axis alone, especially on a long or crowded timeline.
 
 If --collateral/--borrower are omitted, prompts interactively for them.
 --collateral accepts a symbol, a mint address, or "all" (or just leave it
@@ -307,10 +310,16 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
 
     role_suffix = f" ({subject_role})" if subject_role else ""
     verb = "lent" if subject_role == "lender" else "borrowed"
+    last_row = rows[-1]  # rows sorted ascending by start, so this is the most recent loan
+    last_loan_str = f"last loan started {last_row['start'].date()}"
+    if last_row["label"] != "active":
+        last_loan_str += f", closed {last_row['end'].date()} ({last_row['label']})"
+    else:
+        last_loan_str += " (still active)"
     ax1.set_ylabel("Loan (chronological)")
     ax1.set_title(
         f"USDC/{collateral_label} loan timeline — {borrower}{role_suffix}\n"
-        f"{len(rows)} loans, ${sum(r['usd'] for r in rows):,.0f} total principal {verb}"
+        f"{len(rows)} loans, ${sum(r['usd'] for r in rows):,.0f} total principal {verb}  —  {last_loan_str}"
     )
     ax1.set_yticks([])
     ax1.invert_yaxis()

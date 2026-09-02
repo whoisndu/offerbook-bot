@@ -16,5 +16,11 @@
     "expiredAt": "2026-07-30T08:32:08Z",
     "lender": "CxzmfgADE45SktN2uCwDjB2PSNg7qgTQm4GM1xtYK4er",
     "principal_usd": 9.99917340518372
+  },
+  "JDNSA5EhBkpiNLXCKnYuEtrmgTLB9nh3yJqADbxPsW6e": {
+    "borrower": "FFBTJtxJ6tMGZLycYyxFnF34T8mCxxt9dJ3DC6f1t6b6",
+    "expiredAt": "2026-09-02T09:13:05Z",
+    "lender": "13UHfjKr6rpKwRXQ1KGAMcwjtY7eYBA2B5m9RBgxrFBz",
+    "principal_usd": 499.9392801342059
   }
 }

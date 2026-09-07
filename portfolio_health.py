@@ -31,7 +31,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -59,6 +59,10 @@ KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 AT_RISK_LTV = 0.85       # live LTV at/above this: approaching underwater, flagged as a warning
 UNDERWATER_LTV = 1.0     # live LTV at/above this: collateral is worth less than principal
 EXPIRY_WARNING_HOURS = 48  # active loans due within this window (or already overdue) get flagged
+DISPLAY_TZ = timezone(timedelta(hours=1))  # exact expiry timestamps in the expiring-soon table are
+                                             # shown in this timezone (UTC+1) alongside the relative
+                                             # countdown, since "due in 4.2h" alone doesn't tell you
+                                             # the actual clock time to plan around
 
 logging.basicConfig(
     level=logging.INFO,
@@ -255,11 +259,30 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
             if start_principal_usd and start_collateral_usd else None
         )
 
+        expired_at = None
+        hrs_left = None
         try:
             expired_at = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
             hrs_left = (expired_at - now).total_seconds() / 3600.0
         except (KeyError, ValueError):
-            hrs_left = None
+            pass
+
+        # Unrealized profit: interest accrued so far but not yet collected
+        # (only realized on repayment; lost — replaced by whatever collateral
+        # is seized instead — if the loan defaults first). Pro-rated by
+        # elapsed time vs. the loan's full duration, converted to USD via the
+        # same proportional formula compute_realized_pnl uses for actually-
+        # collected interest.
+        accrued_interest_usd = None
+        try:
+            created_at = datetime.fromisoformat(l["createdAt"].replace("Z", "+00:00"))
+            duration_secs = l.get("duration") or 0
+            interest = l.get("interest") or 0
+            if duration_secs > 0 and principal_raw > 0 and start_principal_usd:
+                fraction = max(0.0, min(1.0, (now - created_at).total_seconds() / duration_secs))
+                accrued_interest_usd = (interest * fraction / principal_raw) * start_principal_usd
+        except (KeyError, ValueError):
+            pass
 
         rows.append({
             "borrower": l.get("borrower", ""),
@@ -268,7 +291,9 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
             "apy_bps": l.get("apy", 0),
             "origination_ltv": origination_ltv,
             "live_ltv": live_ltv,
+            "expired_at": expired_at,
             "hrs_left": hrs_left,
+            "accrued_interest_usd": accrued_interest_usd,
         })
     return rows
 
@@ -290,6 +315,12 @@ def _fmt_pct(x: float | None) -> str:
     return f"{x * 100:.1f}%" if x is not None else "n/a"
 
 
+def _fmt_utc1(dt: datetime | None) -> str:
+    if dt is None:
+        return "n/a"
+    return dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M") + " UTC+1"
+
+
 def print_wallet_report(
     wallet: str, sol_balance: int, usdc_wallet: int, usdc_escrow: int,
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
@@ -305,7 +336,9 @@ def print_wallet_report(
     )
 
     total_active_principal = sum(r["principal_usd"] or 0 for r in active_rows)
+    total_unrealized_usd = sum(r["accrued_interest_usd"] or 0 for r in active_rows)
     log.info("Active loans: %d   Outstanding principal: $%.2f", len(active_rows), total_active_principal)
+    log.info("Unrealized profit (interest accrued on active loans, not yet collected): $%.2f", total_unrealized_usd)
 
     at_risk = [r for r in active_rows if r["live_ltv"] is not None and r["live_ltv"] >= risk_ltv]
     expiring = [r for r in active_rows if r["hrs_left"] is not None and r["hrs_left"] <= expiry_hours]
@@ -328,12 +361,12 @@ def print_wallet_report(
     if expiring:
         log.info("")
         log.info("EXPIRING SOON / OVERDUE (within %.0fh):", expiry_hours)
-        col = "{:<14}{:<46}{:>10}{:>12}{:>10}"
-        log.info(col.format("collateral", "borrower", "APY", "live LTV", "due"))
+        col = "{:<14}{:<46}{:>10}{:>12}{:>10}  {:>22}"
+        log.info(col.format("collateral", "borrower", "APY", "live LTV", "due", "expires at"))
         for r in sorted(expiring, key=lambda r: (r["hrs_left"] if r["hrs_left"] is not None else 1e9)):
             log.info(col.format(
                 r["collateral_symbol"], r["borrower"], f"{r['apy_bps']/100:.2f}%",
-                _fmt_pct(r["live_ltv"]), _fmt_hrs(r["hrs_left"]),
+                _fmt_pct(r["live_ltv"]), _fmt_hrs(r["hrs_left"]), _fmt_utc1(r["expired_at"]),
             ))
 
     log.info("")
@@ -357,6 +390,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_usdc = sum(w["usdc_wallet"] + w["usdc_escrow"] for w in per_wallet)
     total_active = sum(len(w["active_rows"]) for w in per_wallet)
     total_outstanding = sum(sum(r["principal_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
+    total_unrealized = sum(sum(r["accrued_interest_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
     total_at_risk = sum(
         len([r for r in w["active_rows"] if r["live_ltv"] is not None and r["live_ltv"] >= w["risk_ltv"]])
         for w in per_wallet
@@ -369,6 +403,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
 
     log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
     log.info("Total active loans: %d   Outstanding principal: $%.2f   At-risk: %d", total_active, total_outstanding, total_at_risk)
+    log.info("Total unrealized profit (accrued interest on active loans): $%.2f", total_unrealized)
     log.info(
         "All-time: repaid=%d  defaulted=%d  default rate=%s",
         total_repaid, total_defaulted, f"{default_rate:.1f}%" if default_rate is not None else "n/a",

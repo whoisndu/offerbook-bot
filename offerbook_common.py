@@ -229,6 +229,11 @@ KNOWN_SYMBOLS: dict[str, str] = {
     "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": "HYPE",
     "TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx": "TUNA",
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+    "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups": "URANUS",
+    "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp": "CARDS",
+    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump": "ANSEM",
+    "5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5": "ONyc",
+    "ZEXy1pqteRu3n13kdyh4LwPQknkFk3GzmMYMuNadWPo": "ZEX",
 }
 
 

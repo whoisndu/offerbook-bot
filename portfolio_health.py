@@ -12,8 +12,20 @@ Read-only lender-side report across one or more of your own wallets:
     (valued at default time) minus the principal lost — same formula
     pnl_leaderboard.py uses platform-wide, scoped here to your wallets.
   - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
+  - Google Calendar reminder sync: diffs currently-active loans against
+    portfolio_reminder_state.json (last-known set of tracked reminders)
+    and, by default, directly syncs the result to your Google Calendar via
+    google_calendar_client.py (its own OAuth client, independent of any
+    Claude/MCP connector) — creating an "expires in 30min" popup reminder
+    for every active loan that doesn't have one yet, and deleting the
+    reminder for any previously-tracked loan that's since resolved
+    (repaid/defaulted). Requires one-time setup — see
+    google_calendar_client.py's docstring. Pass --no-calendar-sync to just
+    refresh portfolio_reminder_sync_plan.json without touching Calendar
+    (e.g. before you've done that setup).
 
-Never signs or submits anything — read-only, no private key needed.
+Never signs or submits anything on Offerbook — read-only there, no private
+key needed. (It does create/delete Google Calendar events, per the above.)
 
 Wallets to check come from OFFERBOOK_PORTFOLIO_WALLETS in .env (comma-
 separated addresses) so the addresses themselves never appear in this
@@ -25,10 +37,12 @@ Usage:
   python portfolio_health.py
   python portfolio_health.py --wallets <addr1>,<addr2>
   python portfolio_health.py --risk-ltv 0.80 --expiry-hours 24
+  python portfolio_health.py --no-calendar-sync
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -63,6 +77,10 @@ DISPLAY_TZ = timezone(timedelta(hours=1))  # exact expiry timestamps in the expi
                                              # shown in this timezone (UTC+1) alongside the relative
                                              # countdown, since "due in 4.2h" alone doesn't tell you
                                              # the actual clock time to plan around
+
+REMINDER_MINUTES_BEFORE = 30  # how far ahead of a loan's expiry its calendar reminder should fire
+REMINDER_STATE_PATH = os.path.join(os.path.dirname(__file__), "portfolio_reminder_state.json")
+REMINDER_SYNC_PLAN_PATH = os.path.join(os.path.dirname(__file__), "portfolio_reminder_sync_plan.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -185,13 +203,6 @@ def compute_live_ltv(
 # Per-loan / per-wallet stats
 # ---------------------------------------------------------------------------
 
-def _loan_usd(l: dict, prefer: str) -> float | None:
-    """metadata.{prefer}PrincipalAmountUsd, falling back to the other snapshot."""
-    meta = l.get("metadata") or {}
-    other = "start" if prefer == "end" else "end"
-    return meta.get(f"{prefer}PrincipalAmountUsd") or meta.get(f"{other}PrincipalAmountUsd")
-
-
 def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str) -> dict:
     """Realized PNL for one wallet as lender — same formula as pnl_leaderboard.py:
     net interest on repaid loans (interest/principalAmount * startPrincipalAmountUsd,
@@ -248,7 +259,7 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
         principal_raw = l.get("principalAmount") or 0
         collateral_raw = l.get("collateralAmount") or 0
 
-        live_ltv, live_principal_usd, live_collateral_usd = compute_live_ltv(
+        live_ltv, live_principal_usd, _live_collateral_usd = compute_live_ltv(
             pmint, cmint, principal_raw, collateral_raw, prices, decimals
         )
         meta = l.get("metadata") or {}
@@ -285,6 +296,8 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
             pass
 
         rows.append({
+            "loan_id": l.get("pubkey", ""),
+            "wallet": wallet,
             "borrower": l.get("borrower", ""),
             "collateral_symbol": symbol_for(cmint),
             "principal_usd": live_principal_usd if live_principal_usd is not None else start_principal_usd,
@@ -296,6 +309,131 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
             "accrued_interest_usd": accrued_interest_usd,
         })
     return rows
+
+# ---------------------------------------------------------------------------
+# Calendar reminder sync plan
+# ---------------------------------------------------------------------------
+#
+# This script never talks to Google Calendar directly — it has no OAuth
+# credentials of its own. Instead it computes what WOULD need to change
+# (given the loans that are currently active vs. REMINDER_STATE_PATH, the
+# record of reminders already created) and writes that as a plan to
+# REMINDER_SYNC_PLAN_PATH. Whatever actually has Calendar access reads that
+# plan, creates/deletes the events, and is responsible for writing the
+# updated REMINDER_STATE_PATH back with the real event IDs — this script
+# only ever reads that state file, never writes it.
+
+def load_reminder_state() -> dict:
+    """{loan_id: {"event_id": ..., "wallet": ..., "expires_at": ...}} for
+    every loan that currently has a tracked Google Calendar reminder."""
+    if not os.path.exists(REMINDER_STATE_PATH):
+        return {}
+    try:
+        with open(REMINDER_STATE_PATH) as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: datetime) -> dict:
+    """
+    Diff every currently-active loan (across all wallets checked this run)
+    against the last-known reminder state:
+      - "create": active loans with no tracked reminder yet, whose
+        (expiry - REMINDER_MINUTES_BEFORE) hasn't already passed — creating
+        a reminder for a window that's already gone would just be a
+        calendar event that never fires.
+      - "delete": previously-tracked loans no longer in the active list —
+        they must have resolved (repaid or defaulted) since the state was
+        last updated, so their reminder is now stale and should be removed.
+    """
+    active_by_id = {r["loan_id"]: r for r in all_active_rows if r.get("loan_id")}
+
+    to_create = []
+    for loan_id, r in active_by_id.items():
+        if loan_id in state or r["expired_at"] is None:
+            continue
+        reminder_time = r["expired_at"] - timedelta(minutes=REMINDER_MINUTES_BEFORE)
+        if reminder_time <= now:
+            continue
+        borrower = r["borrower"]
+        borrower_short = f"{borrower[:6]}…{borrower[-4:]}" if borrower else "unknown"
+        to_create.append({
+            "loan_id": loan_id,
+            "wallet": r["wallet"],
+            "summary": f"Offerbook loan expiring in {REMINDER_MINUTES_BEFORE}min — {r['collateral_symbol']} ({borrower_short})",
+            "description": (
+                f"Wallet: {r['wallet']}\nBorrower: {borrower}\nCollateral: {r['collateral_symbol']}\n"
+                f"Principal: ${r['principal_usd']:.2f}\nAPY: {r['apy_bps']/100:.2f}%\n"
+                f"Live LTV: {_fmt_pct(r['live_ltv'])}\nExpires: {_fmt_utc1(r['expired_at'])}"
+            ),
+            "reminder_time_utc": reminder_time.isoformat(),
+            "expires_at_utc": r["expired_at"].isoformat(),
+        })
+
+    to_delete = [
+        {"loan_id": loan_id, "event_id": entry.get("event_id"), "wallet": entry.get("wallet")}
+        for loan_id, entry in state.items()
+        if loan_id not in active_by_id
+    ]
+
+    return {"generated_at": now.isoformat(), "create": to_create, "delete": to_delete}
+
+
+def write_reminder_sync_plan(plan: dict) -> None:
+    with open(REMINDER_SYNC_PLAN_PATH, "w") as fh:
+        json.dump(plan, fh, indent=2)
+
+
+def save_reminder_state(state: dict) -> None:
+    with open(REMINDER_STATE_PATH, "w") as fh:
+        json.dump(state, fh, indent=2)
+
+
+def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
+    """
+    Actually creates/deletes the Google Calendar events for `plan` (see
+    build_reminder_sync_plan) via google_calendar_client, then updates and
+    persists REMINDER_STATE_PATH to match — this is the only place that
+    file gets written. Requires google_calendar_client's one-time OAuth
+    setup (see that module's docstring); the very first call may open a
+    browser window for you to grant access.
+    """
+    try:
+        import google_calendar_client as gcal
+    except ImportError as exc:
+        log.error(
+            "Can't sync to Google Calendar — missing dependency (%s). Run: "
+            "pip install google-auth google-auth-oauthlib google-api-python-client", exc,
+        )
+        return
+
+    created = deleted = errors = 0
+    for entry in plan["create"]:
+        try:
+            start_dt = datetime.fromisoformat(entry["reminder_time_utc"])
+            end_dt = start_dt + timedelta(minutes=5)
+            event_id = gcal.create_event(entry["summary"], entry["description"], start_dt.isoformat(), end_dt.isoformat())
+            state[entry["loan_id"]] = {
+                "event_id": event_id, "wallet": entry["wallet"], "expires_at": entry["expires_at_utc"],
+            }
+            created += 1
+        except Exception as exc:
+            log.error("Failed to create reminder for loan %s: %s", entry["loan_id"], exc)
+            errors += 1
+
+    for entry in plan["delete"]:
+        try:
+            if entry.get("event_id"):
+                gcal.delete_event(entry["event_id"])
+            state.pop(entry["loan_id"], None)
+            deleted += 1
+        except Exception as exc:
+            log.error("Failed to delete reminder for loan %s: %s", entry["loan_id"], exc)
+            errors += 1
+
+    save_reminder_state(state)
+    log.info("Calendar sync: created=%d  deleted=%d  errors=%d", created, deleted, errors)
 
 # ---------------------------------------------------------------------------
 # Printing
@@ -424,6 +562,10 @@ def main() -> None:
     parser.add_argument("--risk-ltv", type=float, default=AT_RISK_LTV, help=f"Flag active loans at/above this live LTV (default {AT_RISK_LTV})")
     parser.add_argument("--underwater-ltv", type=float, default=UNDERWATER_LTV, help=f"Live LTV considered fully underwater (default {UNDERWATER_LTV})")
     parser.add_argument("--expiry-hours", type=float, default=EXPIRY_WARNING_HOURS, help=f"Flag active loans due within this many hours, or already overdue (default {EXPIRY_WARNING_HOURS})")
+    parser.add_argument(
+        "--no-calendar-sync", action="store_true",
+        help="Skip syncing reminders to Google Calendar — just refresh the local plan file.",
+    )
     args = parser.parse_args()
 
     raw_wallets = args.wallets or os.getenv("OFFERBOOK_PORTFOLIO_WALLETS", "")
@@ -470,6 +612,20 @@ def main() -> None:
 
     if len(per_wallet) > 1:
         print_portfolio_summary(per_wallet)
+
+    all_active_rows = [r for w in per_wallet for r in w["active_rows"]]
+    reminder_state = load_reminder_state()
+    reminder_plan = build_reminder_sync_plan(all_active_rows, reminder_state, now)
+    write_reminder_sync_plan(reminder_plan)
+    log.info(
+        "Reminder sync plan: %d to create, %d to delete.",
+        len(reminder_plan["create"]), len(reminder_plan["delete"]),
+    )
+
+    if args.no_calendar_sync:
+        log.info("Skipping Calendar sync (--no-calendar-sync).")
+    else:
+        sync_reminders_to_calendar(reminder_plan, reminder_state)
 
 
 if __name__ == "__main__":

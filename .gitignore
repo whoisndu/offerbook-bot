@@ -13,3 +13,7 @@ competitor_timing_state.json
 *.png
 create_targeted_offers.py
 allocation_config.yaml
+portfolio_reminder_state.json
+portfolio_reminder_sync_plan.json
+google_calendar_credentials.json
+google_calendar_token.json

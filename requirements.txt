@@ -1,10 +1,19 @@
 base58==2.1.1
 bleak==3.0.2
 certifi==2026.5.20
+cffi==2.1.1
 charset-normalizer==3.4.7
+cryptography==50.0.1
 ECPy==1.2.5
 future==1.0.0
+google-api-core==2.36.0
+google-api-python-client==2.200.0
+google-auth==2.57.1
+google-auth-httplib2==0.4.2
+google-auth-oauthlib==1.4.1
+googleapis-common-protos==1.75.3
 hidapi==0.15.0
+httplib2==0.32.0
 idna==3.18
 jsonalias==0.1.1
 ledgerblue==0.1.58
@@ -13,8 +22,19 @@ matplotlib==3.11.1
 ndeflib==0.3.3
 nfcpy==1.0.4
 numpy==2.4.6
+oauthlib==3.3.1
+opentelemetry-api==1.44.0
 pillow==12.3.0
-protobuf==5.29.6
+proto-plus==1.28.4
+# NOTE: ledgerblue declares protobuf<6, but that only affects
+# ledgerblue.BlueHSMServer_pb2, which this repo never imports (only
+# ledgerblue.comm, used by ledger_signer.py, which doesn't touch protobuf
+# at all). Pinned to what google-api-python-client needs instead — verified
+# every Ledger-signing script in this repo still imports and works fine.
+protobuf==7.36.1
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
 pycryptodome==3.23.0
 pycryptodomex==3.23.0
 pyDes==2.0.1
@@ -23,6 +43,7 @@ pyobjc-core==12.2.1; sys_platform == "darwin"
 pyobjc-framework-Cocoa==12.2.1; sys_platform == "darwin"
 pyobjc-framework-CoreBluetooth==12.2.1; sys_platform == "darwin"
 pyobjc-framework-libdispatch==12.2.1; sys_platform == "darwin"
+pyparsing==3.3.2
 pyserial==3.5
 python-docx==1.2.0
 python-dotenv==1.2.2
@@ -30,9 +51,11 @@ python-gnupg==0.5.6
 python-u2flib-host==3.0.3
 PyYAML==6.0.3
 requests==2.34.2
+requests-oauthlib==2.0.0
 scikit-learn==1.9.0
 solders==0.27.1
 typing_extensions==4.15.0
+uritemplate==4.2.0
 urllib3==2.7.0
 websocket-client==1.9.0
 websockets==16.0

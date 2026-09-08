@@ -297,7 +297,7 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
         principal_raw = l.get("principalAmount") or 0
         collateral_raw = l.get("collateralAmount") or 0
 
-        live_ltv, live_principal_usd, _live_collateral_usd = compute_live_ltv(
+        live_ltv, live_principal_usd, live_collateral_usd = compute_live_ltv(
             pmint, cmint, principal_raw, collateral_raw, prices, decimals
         )
         meta = l.get("metadata") or {}
@@ -330,18 +330,30 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
             gross_interest_usd = (interest / principal_raw) * start_principal_usd
             accrued_interest_usd = gross_interest_usd * (1 - INTEREST_REPAY_FEE_RATE)
 
+        principal_usd = live_principal_usd if live_principal_usd is not None else start_principal_usd
+
+        # Current underwater loss: if this position had to be closed out right
+        # now (borrower defaults, collateral seized at today's price), this is
+        # how much of the principal wouldn't be covered by the collateral —
+        # zero for healthy (non-underwater) positions. Only computable when a
+        # live collateral price is available.
+        underwater_loss_usd = 0.0
+        if principal_usd is not None and live_collateral_usd is not None:
+            underwater_loss_usd = max(0.0, principal_usd - live_collateral_usd)
+
         rows.append({
             "loan_id": l.get("pubkey", ""),
             "wallet": wallet,
             "borrower": l.get("borrower", ""),
             "collateral_symbol": symbol_for(cmint),
-            "principal_usd": live_principal_usd if live_principal_usd is not None else start_principal_usd,
+            "principal_usd": principal_usd,
             "apy_bps": l.get("apy", 0),
             "origination_ltv": origination_ltv,
             "live_ltv": live_ltv,
             "expired_at": expired_at,
             "hrs_left": hrs_left,
             "accrued_interest_usd": accrued_interest_usd,
+            "underwater_loss_usd": underwater_loss_usd,
         })
     return rows
 
@@ -515,8 +527,13 @@ def print_wallet_report(
 
     total_active_principal = sum(r["principal_usd"] or 0 for r in active_rows)
     total_unrealized_usd = sum(r["accrued_interest_usd"] or 0 for r in active_rows)
+    total_underwater_loss_usd = sum(r["underwater_loss_usd"] or 0 for r in active_rows)
     log.info("Active loans: %d   Outstanding principal: $%.2f", len(active_rows), total_active_principal)
     log.info("Unrealized profit (interest owed on active loans, net of repay fee, not yet collected): $%.2f", total_unrealized_usd)
+    log.info(
+        "Unrealized profit net of current underwater losses (-$%.2f): $%.2f",
+        total_underwater_loss_usd, total_unrealized_usd - total_underwater_loss_usd,
+    )
 
     at_risk = [r for r in active_rows if r["live_ltv"] is not None and r["live_ltv"] >= risk_ltv]
     expiring = [r for r in active_rows if r["hrs_left"] is not None and r["hrs_left"] <= expiry_hours]
@@ -569,6 +586,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_active = sum(len(w["active_rows"]) for w in per_wallet)
     total_outstanding = sum(sum(r["principal_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
     total_unrealized = sum(sum(r["accrued_interest_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
+    total_underwater_loss = sum(sum(r["underwater_loss_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
     total_at_risk = sum(
         len([r for r in w["active_rows"] if r["live_ltv"] is not None and r["live_ltv"] >= w["risk_ltv"]])
         for w in per_wallet
@@ -588,6 +606,10 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     )
     log.info("Total active loans: %d   Outstanding principal: $%.2f   At-risk: %d", total_active, total_outstanding, total_at_risk)
     log.info("Total unrealized profit (interest owed on active loans, net of repay fee): $%.2f", total_unrealized)
+    log.info(
+        "Total unrealized profit net of current underwater losses (-$%.2f): $%.2f",
+        total_underwater_loss, total_unrealized - total_underwater_loss,
+    )
     log.info(
         "All-time: repaid=%d  defaulted=%d  default rate=%s",
         total_repaid, total_defaulted, f"{default_rate:.1f}%" if default_rate is not None else "n/a",

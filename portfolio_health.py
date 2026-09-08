@@ -12,6 +12,10 @@ Read-only lender-side report across one or more of your own wallets:
     (valued at default time) minus the principal lost — same formula
     pnl_leaderboard.py uses platform-wide, scoped here to your wallets.
   - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
+  - Volume: total USD principal (at origination) of every loan lent,
+    counted the moment it's created regardless of current status —
+    VOLUME_WINDOW_DAYS (7) trailing-day rolling total and all-time, per
+    wallet and combined across the portfolio.
   - Google Calendar reminder sync: diffs currently-active loans against
     portfolio_reminder_state.json (last-known set of tracked reminders)
     and, by default, directly syncs the result to your Google Calendar via
@@ -81,6 +85,9 @@ DISPLAY_TZ = timezone(timedelta(hours=1))  # exact expiry timestamps in the expi
 REMINDER_MINUTES_BEFORE = 30  # how far ahead of a loan's expiry its calendar reminder should fire
 REMINDER_STATE_PATH = os.path.join(os.path.dirname(__file__), "portfolio_reminder_state.json")
 REMINDER_SYNC_PLAN_PATH = os.path.join(os.path.dirname(__file__), "portfolio_reminder_sync_plan.json")
+
+VOLUME_WINDOW_DAYS = 7  # "this week" volume = loans originated in the trailing N days (rolling
+                          # window from now, not calendar-week-aligned)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -247,6 +254,31 @@ def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str)
         "net_pnl_usd": net_pnl_usd,
         "default_rate": default_rate,
     }
+
+
+def compute_volume(all_loans: list[dict], wallet: str, since: datetime | None) -> float:
+    """
+    Total USD principal (at origination) of every loan this wallet has ever
+    lent, optionally restricted to loans CREATED on/after `since`. A loan
+    counts toward volume the moment it's originated, regardless of its
+    current status (active/repaid/defaulted) — this measures capital put to
+    work, not capital currently at risk or already resolved. `all_loans`
+    should be active+defaulted+repaid combined for a true total.
+    """
+    total = 0.0
+    for l in all_loans:
+        if l.get("lender") != wallet:
+            continue
+        if since is not None:
+            try:
+                created_at = datetime.fromisoformat(l["createdAt"].replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                continue
+            if created_at < since:
+                continue
+        meta = l.get("metadata") or {}
+        total += meta.get("startPrincipalAmountUsd") or 0.0
+    return total
 
 
 def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decimals: dict, now: datetime) -> list[dict]:
@@ -462,6 +494,7 @@ def _fmt_utc1(dt: datetime | None) -> str:
 def print_wallet_report(
     wallet: str, sol_balance: int, usdc_wallet: int, usdc_escrow: int,
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
+    volume_week_usd: float, volume_all_time_usd: float,
 ) -> None:
     log.info("")
     log.info("=" * 100)
@@ -471,6 +504,10 @@ def print_wallet_report(
         "Balances — SOL: %.4f   USDC wallet: %.2f   USDC escrow: %.2f   USDC total: %.2f",
         sol_balance / 10 ** SOL_DECIMALS, usdc_wallet / 10 ** USDC_DECIMALS,
         usdc_escrow / 10 ** USDC_DECIMALS, (usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS,
+    )
+    log.info(
+        "Volume — last %d days: $%.2f   all-time: $%.2f",
+        VOLUME_WINDOW_DAYS, volume_week_usd, volume_all_time_usd,
     )
 
     total_active_principal = sum(r["principal_usd"] or 0 for r in active_rows)
@@ -538,8 +575,14 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_defaulted = sum(w["pnl"]["defaulted_count"] for w in per_wallet)
     resolved = total_repaid + total_defaulted
     default_rate = (total_defaulted / resolved * 100) if resolved else None
+    total_volume_week = sum(w["volume_week_usd"] for w in per_wallet)
+    total_volume_all_time = sum(w["volume_all_time_usd"] for w in per_wallet)
 
     log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
+    log.info(
+        "Total volume — last %d days: $%.2f   all-time: $%.2f",
+        VOLUME_WINDOW_DAYS, total_volume_week, total_volume_all_time,
+    )
     log.info("Total active loans: %d   Outstanding principal: $%.2f   At-risk: %d", total_active, total_outstanding, total_at_risk)
     log.info("Total unrealized profit (accrued interest on active loans): $%.2f", total_unrealized)
     log.info(
@@ -593,6 +636,9 @@ def main() -> None:
     prices, decimals = fetch_current_prices(list(collateral_mints))
 
     now = datetime.now(timezone.utc)
+    all_loans = active + defaulted + repaid
+    volume_since = now - timedelta(days=VOLUME_WINDOW_DAYS)
+
     per_wallet = []
     for wallet in wallets:
         sol_balance = fetch_wallet_sol_balance(wallet)
@@ -600,14 +646,18 @@ def main() -> None:
         usdc_escrow = fetch_escrow_balance(wallet, USDC_MINT)
         active_rows = build_active_loan_rows(active, wallet, prices, decimals, now)
         pnl = compute_realized_pnl(repaid, defaulted, wallet)
+        volume_week_usd = compute_volume(all_loans, wallet, volume_since)
+        volume_all_time_usd = compute_volume(all_loans, wallet, None)
 
         print_wallet_report(
             wallet, sol_balance, usdc_wallet, usdc_escrow, active_rows, pnl,
             args.risk_ltv, args.underwater_ltv, args.expiry_hours,
+            volume_week_usd, volume_all_time_usd,
         )
         per_wallet.append({
             "wallet": wallet, "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
             "active_rows": active_rows, "pnl": pnl, "risk_ltv": args.risk_ltv,
+            "volume_week_usd": volume_week_usd, "volume_all_time_usd": volume_all_time_usd,
         })
 
     if len(per_wallet) > 1:

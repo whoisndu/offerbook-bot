@@ -5,15 +5,15 @@ __pycache__/
 .DS_Store
 api-1.json
 api-1 (2).json
-underwater.py
-defaulter_config.yaml
-tg_watchlist.json
-lender_capital_state.json
-competitor_timing_state.json
+monitoring/underwater.py
+monitoring/defaulter_config.yaml
+monitoring/tg_watchlist.json
+reporting/lender_capital_state.json
+reporting/competitor_timing_state.json
 *.png
-create_targeted_offers.py
-allocation_config.yaml
-portfolio_reminder_state.json
-portfolio_reminder_sync_plan.json
-google_calendar_credentials.json
-google_calendar_token.json
+strategy/create_targeted_offers.py
+strategy/allocation_config.yaml
+reporting/portfolio_reminder_state.json
+reporting/portfolio_reminder_sync_plan.json
+lib/google_calendar_credentials.json
+lib/google_calendar_token.json

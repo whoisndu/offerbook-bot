@@ -32,6 +32,9 @@ import sys
 
 import requests
 
+# Shared modules live in ../lib — see README's repo-layout note.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+
 import defaulter_capture as dc
 import offerbook_common as _common
 

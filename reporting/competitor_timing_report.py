@@ -108,6 +108,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Shared modules live in ../lib — see README's repo-layout note.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+
 import offerbook_common as _common
 from offerbook_common import _mint_from_asset
 

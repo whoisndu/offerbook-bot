@@ -23,7 +23,7 @@ jobs:
       - name: Restore prior report state
         uses: actions/cache/restore@v4
         with:
-          path: competitor_timing_state.json
+          path: reporting/competitor_timing_state.json
           key: competitor-timing-state-${{ github.run_id }}
           restore-keys: |
             competitor-timing-state-
@@ -39,7 +39,7 @@ jobs:
         # recommended-hour output means the same thing here as it does locally.
         # --chart-output uses a repo-relative path (not ~/Desktop, which doesn't
         # exist on the runner) so the artifact-upload step below can find it.
-        run: python3 competitor_timing_report.py --tz Africa/Lagos --chart-output ./competitor_top_lenders_heatmap.png
+        run: python3 reporting/competitor_timing_report.py --tz Africa/Lagos --chart-output ./competitor_top_lenders_heatmap.png
 
       - name: Upload heatmap chart
         if: always()
@@ -53,5 +53,5 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: competitor_timing_state.json
+          path: reporting/competitor_timing_state.json
           key: competitor-timing-state-${{ github.run_id }}

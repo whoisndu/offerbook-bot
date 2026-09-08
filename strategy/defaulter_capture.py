@@ -56,6 +56,13 @@ from typing import Any
 import requests
 import yaml  # pip install pyyaml
 
+# Shared modules live in ../lib, and defaulter_watch.py lives in ../monitoring
+# (it's a standalone watchlist scanner in its own right) — see README's
+# repo-layout note.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_THIS_DIR, "..", "lib"))
+sys.path.insert(0, os.path.join(_THIS_DIR, "..", "monitoring"))
+
 from defaulter_watch import (
     compute_defaulted_stats,
     compute_late_repayer_stats,

@@ -25,12 +25,16 @@ Required env vars (set as GitHub Actions secrets — never committed):
 import json
 import os
 import smtplib
+import sys
 import time
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
+
+# Shared modules live in ../lib — see README's repo-layout note.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 import offerbook_common as _common
 

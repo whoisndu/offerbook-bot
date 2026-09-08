@@ -42,6 +42,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +52,9 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+# Shared modules live in ../lib — see README's repo-layout note.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 import offerbook_common as _common
 

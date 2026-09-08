@@ -2,6 +2,17 @@
 
 An automated lending bot for the [Offerbook](https://offerbook.jup.ag) protocol on Solana. It scans active lending offers, posts competitive lending offers sized to your per-collateral allocation, and sizes collateral against a **dynamic, per-token LTV target** using real-time prices from Jupiter and DexScreener.
 
+## Repository layout
+
+Scripts are grouped by what they do, so every `python <folder>/<script>.py` command below is a repo-root-relative path:
+
+- **`lib/`** — shared modules, never run directly: `offerbook_common.py` (helpers used by nearly everything), `ledger_signer.py` (Ledger hardware wallet signing), `google_calendar_client.py` (OAuth wrapper for `portfolio_health.py`'s reminder sync).
+- **`strategy/`** — scripts that place, fill, or cancel live offers: `strategy.py`, `defaulter_capture.py`, `create_targeted_offers.py` (gitignored), `cancel_offers.py`, `fill_offer.py`, `update_config.py`. Also holds `allocation_config.yaml` (gitignored).
+- **`monitoring/`** — watchers and scanners, mostly run unattended via `.github/workflows/`: `arbitrage_scanner.py`, `borrow_offer_watch.py`, `loan_watch_notify.py`, `wallet_tx_watch.py`, `tg_deposit_watch.py`, `defaulter_watch.py`, `soon_to_expire.py`, `underwater.py` (gitignored). Also holds `defaulter_config.yaml`/`tg_watchlist.json` (gitignored).
+- **`reporting/`** — read-only analytics, never signs anything: `pnl_leaderboard.py`, `lender_capital_scan.py`, `competitor_timing_report.py`, `offer_posting_times.py`, `borrower_loan_timeline.py`, `verify_offers.py`, `portfolio_health.py`.
+
+Each script that imports a `lib/` module has a one-line `sys.path` shim near its imports pointing at `../lib` (and, for `defaulter_capture.py` specifically, also `../monitoring` — it depends on `defaulter_watch.py`). Each config/state file is loaded relative to its owning script's own location (`Path(__file__).parent / "..."`), so it lives alongside that script in the same folder, not at the repo root.
+
 ## Strategies
 
 One script, `strategy.py`, covering four calibrated loan durations — it prompts for which one(s) to run (or accepts `--days`), and can run more than one in the same invocation (e.g. `--days 1,3,7`). It also prompts for whether to run across every allocated pair or target specific token(s) only (or accepts `--collateral`) — see [Targeting specific collateral](#targeting-specific-collateral) below. Each offer listing expires after **24 hours** and is re-posted on the next run.
@@ -197,10 +208,10 @@ Set a token to `0.0` to skip it entirely. Since Offerbook uses a **shared escrow
 
 ```bash
 # Preview new tokens discovered on Offerbook without writing
-python update_config.py --dry-run
+python strategy/update_config.py --dry-run
 
 # Add new tokens and resolve unknown-token comments
-python update_config.py
+python strategy/update_config.py
 ```
 
 `update_config.py` fetches all currently active collateral mints from Offerbook, resolves symbol/name for every mint (both new ones and any already in the file), and:
@@ -215,13 +226,13 @@ Scans all active loans **platform-wide** and surfaces the ones already past thei
 
 ```bash
 # Default: next 48h + already-expired bucket
-python soon_to_expire.py
+python monitoring/soon_to_expire.py
 
 # Next 24h + already-expired
-python soon_to_expire.py --hours 24
+python monitoring/soon_to_expire.py --hours 24
 
 # Only the soon-to-expire window, skip the already-expired bucket
-python soon_to_expire.py --no-expired
+python monitoring/soon_to_expire.py --no-expired
 ```
 
 Exit code `1` if anything is in the expired/soon-to-expire window, `0` otherwise. `loan_watch_notify.py` (below) automates the "already expired" half of this on a schedule via email; this script is for an ad-hoc/manual look, including the "expiring soon but not yet due" window that the email watcher doesn't cover.
@@ -232,14 +243,14 @@ Run this immediately after placing orders to confirm every live offer has correc
 
 ```bash
 # Interactive prompt — asks which strategy to check
-python verify_offers.py
+python reporting/verify_offers.py
 
 # Skip the prompt via flag
-python verify_offers.py --days 1
-python verify_offers.py --days 3
-python verify_offers.py --days 7
-python verify_offers.py --days 15
-python verify_offers.py --days all
+python reporting/verify_offers.py --days 1
+python reporting/verify_offers.py --days 3
+python reporting/verify_offers.py --days 7
+python reporting/verify_offers.py --days 15
+python reporting/verify_offers.py --days all
 ```
 
 For each offer the script prints a table row:
@@ -255,9 +266,9 @@ For each offer the script prints a table row:
 Exit code is `1` if any LTV violations are found, `0` otherwise — safe to use in shell pipelines:
 
 ```bash
-python cancel_offers.py --days all
-python strategy.py --days 3,7,15 --yes
-python verify_offers.py   # non-zero exit = something is wrong
+python strategy/cancel_offers.py --days all
+python strategy/strategy.py --days 3,7,15 --yes
+python reporting/verify_offers.py   # non-zero exit = something is wrong
 ```
 
 ## Bulk offer cancellation (`cancel_offers.py`)
@@ -266,20 +277,20 @@ Cancels open offers for a specific strategy or all at once. Always cancel before
 
 ```bash
 # Interactive prompt — asks which strategy to cancel
-python cancel_offers.py
+python strategy/cancel_offers.py
 
 # Skip prompt via flag
-python cancel_offers.py --days 1
-python cancel_offers.py --days 3
-python cancel_offers.py --days 7
-python cancel_offers.py --days 15
-python cancel_offers.py --days all
+python strategy/cancel_offers.py --days 1
+python strategy/cancel_offers.py --days 3
+python strategy/cancel_offers.py --days 7
+python strategy/cancel_offers.py --days 15
+python strategy/cancel_offers.py --days all
 
 # Also withdraw funds back to wallet after cancellation
-python cancel_offers.py --days all --withdraw
+python strategy/cancel_offers.py --days all --withdraw
 
 # Dry run — preview only
-DRY_RUN=true python cancel_offers.py
+DRY_RUN=true python strategy/cancel_offers.py
 ```
 
 The script identifies each strategy's offers by their `duration` field (86 400 / 259 200 / 604 800 / 1 296 000 seconds) so only the right orders are touched. Offers are cancelled in batches of **15** per transaction (`BATCH_SIZE`) — tested against the live builder API at 955 bytes/tx, comfortably under Solana's 1232-byte transaction limit (20/batch was tested too but left too little headroom, only 3%, given offers can vary slightly in account count).
@@ -293,11 +304,11 @@ Fetches the offer fresh right before building the fill transaction (so amounts r
 In Ledger mode you're interactively prompted which account to sign with (unless `--ledger-path` is given) — this script has no "right" account, it depends what you're filling and with what. Same `KNOWN_LEDGER_ACCOUNTS` labels as `cancel_offers.py`'s picker (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), plus a custom-path option.
 
 ```bash
-python fill_offer.py --offer <pubkey>
-python fill_offer.py --offer <pubkey> --ledger-path "44'/501'/1'"   # skip the account prompt
-python fill_offer.py --offer <pubkey> --private-key
-python fill_offer.py --offer <pubkey> --yes
-DRY_RUN=true python fill_offer.py --offer <pubkey>   # preview without submitting
+python strategy/fill_offer.py --offer <pubkey>
+python strategy/fill_offer.py --offer <pubkey> --ledger-path "44'/501'/1'"   # skip the account prompt
+python strategy/fill_offer.py --offer <pubkey> --private-key
+python strategy/fill_offer.py --offer <pubkey> --yes
+DRY_RUN=true python strategy/fill_offer.py --offer <pubkey>   # preview without submitting
 ```
 
 ## Collateral-coverage watchlist (`defaulter_watch.py`)
@@ -309,13 +320,13 @@ A read-only analytics scanner over the platform's full loan history (defaulted a
 
 ```bash
 # Any borrower with positive historical collateral coverage
-python defaulter_watch.py
+python monitoring/defaulter_watch.py
 
 # Only borrowers with more than $100 in aggregate historical surplus
-python defaulter_watch.py --min-surplus 100
+python monitoring/defaulter_watch.py --min-surplus 100
 
 # Limit the reference table to the top 15 rows
-python defaulter_watch.py --top 15
+python monitoring/defaulter_watch.py --top 15
 ```
 
 For each watchlisted borrower, the report flags two actionable conditions: an open borrow request right now, or an active loan expiring within 24h (they may return to borrow again). Never signs or submits anything — meant to be run periodically to catch these while they're still relevant. Exit code `1` if either condition applies to any watchlisted borrower, `0` otherwise.
@@ -334,13 +345,13 @@ A collateral not listed in `allocation_config.yaml` (or listed at 0%) is skipped
 
 ```bash
 # DRY_RUN is respected exactly like every other script here (see .env)
-python defaulter_capture.py
+python strategy/defaulter_capture.py
 
 # Only act on borrowers above a surplus threshold, matching defaulter_watch.py
-python defaulter_capture.py --min-surplus 100
+python strategy/defaulter_capture.py --min-surplus 100
 
 # Skip the signing-mode confirmation prompt
-python defaulter_capture.py --yes
+python strategy/defaulter_capture.py --yes
 ```
 
 Every offer's principal, collateral, target LTV, and target APY is logged in full immediately before signing — one transaction at a time, so each can be verified before it lands on-chain. Exit code `1` if nothing was actionable (nothing to do), `0` otherwise.
@@ -363,7 +374,7 @@ NOTIFY_EMAIL_TO     - recipient address
 
 ```bash
 # Manual local run (uses the same env vars, or logs "skipping email" if unset)
-python loan_watch_notify.py
+python monitoring/loan_watch_notify.py
 
 # Manually trigger the GitHub Actions workflow instead of waiting for its schedule
 gh workflow run loan_watch.yml
@@ -376,10 +387,10 @@ Emails on every newly-appearing open borrow request platform-wide — every prin
 Runs every 15 minutes via `.github/workflows/borrow_offer_watch.yml`. Dedup works like `arbitrage_scanner.py`'s: state is the set of currently-open borrow-offer pubkeys, persisted to `borrow_offer_watch_state.json` (committed back to the repo by the workflow — these are public open offers, not competitive intel, so unlike `competitor_timing_state.json` there's nothing here worth keeping private). Each run only emails offers not already in that set, then overwrites the state with exactly this run's live set — anything no longer open (filled, cancelled, expired) simply stops appearing next run.
 
 ```bash
-python borrow_offer_watch.py                        # all open borrow requests, email if new ones found
-python borrow_offer_watch.py --min-size 20           # ignore requests under $20 principal
-python borrow_offer_watch.py --principal-mint <mint> # only this principal token
-python borrow_offer_watch.py --no-email              # console output only, skip email + state
+python monitoring/borrow_offer_watch.py                        # all open borrow requests, email if new ones found
+python monitoring/borrow_offer_watch.py --min-size 20           # ignore requests under $20 principal
+python monitoring/borrow_offer_watch.py --principal-mint <mint> # only this principal token
+python monitoring/borrow_offer_watch.py --no-email              # console output only, skip email + state
 ```
 
 Required env vars for email (GitHub Actions secrets, shared with `loan_watch_notify.py`): `SMTP_FROM_EMAIL`, `SMTP_APP_PASSWORD`, `NOTIFY_EMAIL_TO`. `OFFERBOOK_WALLET` is used to exclude our own borrow requests, if any — a warning is logged (not skipped) if unset, same as the other scan scripts.
@@ -393,9 +404,9 @@ State (the watchlist + last-seen transaction signature per wallet + a Telegram u
 Manage the watchlist two ways — from your machine, or live from Telegram (commands land on the next scheduled run, so there's up to ~15 min latency):
 
 ```bash
-python wallet_tx_watch.py --watch <address> [--label <name>]
-python wallet_tx_watch.py --unwatch <address>
-python wallet_tx_watch.py --list
+python monitoring/wallet_tx_watch.py --watch <address> [--label <name>]
+python monitoring/wallet_tx_watch.py --unwatch <address>
+python monitoring/wallet_tx_watch.py --list
 ```
 
 ```
@@ -419,11 +430,11 @@ TELEGRAM_CHAT_ID    - your chat id
 The platform's own "Spread" stat (Best Lend APY − Best Borrow APY) mixes completely different collateral quality tiers — e.g. 9% to borrow against a blue-chip token vs. 90% to lend against an illiquid one. That's not a capturable arbitrage, just the market's risk curve. This scans for the real thing: **fungible tokens** where you could borrow cheaply (a live lending offer, low APY) and simultaneously lend into an existing borrow request for that *same* token at a materially higher APY.
 
 ```bash
-python arbitrage_scanner.py                  # top 15 spreads, email if new ones found
-python arbitrage_scanner.py --top 30
-python arbitrage_scanner.py --min-spread 20   # only spreads >= 20 APY points
-python arbitrage_scanner.py --min-size 50     # ignore legs under $50 available
-python arbitrage_scanner.py --no-email        # console output only
+python monitoring/arbitrage_scanner.py                  # top 15 spreads, email if new ones found
+python monitoring/arbitrage_scanner.py --top 30
+python monitoring/arbitrage_scanner.py --min-spread 20   # only spreads >= 20 APY points
+python monitoring/arbitrage_scanner.py --min-size 50     # ignore legs under $50 available
+python monitoring/arbitrage_scanner.py --no-email        # console output only
 ```
 
 Runs every ~15 min via `.github/workflows/arbitrage_scan.yml`. Emails (reusing `loan_watch_notify.py`'s SMTP secrets) only for **newly appearing** spreads — deduped by the exact `(borrow-offer, lend-offer)` pubkey pair in `arbitrage_scanner_state.json` (committed back by the workflow), so a still-open opportunity doesn't re-email every run; state resets to exactly what's currently live each run, so filled/cancelled/expired offers drop out automatically.
@@ -438,15 +449,15 @@ Watches any number of wallets at once. The watchlist persists in `tg_watchlist.j
 
 ```bash
 # One-shot CLI (no need to have the watcher running)
-python tg_deposit_watch.py --add <wallet> [--mint <mint>] [--label <name>]
-python tg_deposit_watch.py --remove <wallet>
-python tg_deposit_watch.py --list
+python monitoring/tg_deposit_watch.py --add <wallet> [--mint <mint>] [--label <name>]
+python monitoring/tg_deposit_watch.py --remove <wallet>
+python monitoring/tg_deposit_watch.py --list
 
 # Interactive console menu
-python tg_deposit_watch.py
+python monitoring/tg_deposit_watch.py
 
 # Start the live watcher (long-running)
-python tg_deposit_watch.py --watch
+python monitoring/tg_deposit_watch.py --watch
 ```
 
 While `--watch` is running, the bot also takes live commands sent to it on Telegram, so you can manage the watchlist from your phone without touching a terminal:
@@ -473,16 +484,16 @@ Reports wallet + escrow USDC for every wallet that is or has ever been a lender 
 
 ```bash
 # Everyone, sorted by total descending
-python lender_capital_scan.py
+python reporting/lender_capital_scan.py
 
 # Only lenders with more than $5,000 total
-python lender_capital_scan.py --min-total 5000
+python reporting/lender_capital_scan.py --min-total 5000
 
 # Limit the printed table to the top 20 rows
-python lender_capital_scan.py --top 20
+python reporting/lender_capital_scan.py --top 20
 
 # Compare against saved state without overwriting it
-python lender_capital_scan.py --no-save
+python reporting/lender_capital_scan.py --no-save
 ```
 
 Every run's balances persist to `lender_capital_state.json` (gitignored, like `defaulter_config.yaml`/`tg_watchlist.json` — this reveals your own competitive-intelligence tracking) and are compared against the previous run, so each report shows a **Δ since last** column per lender plus an overall change in the grand total. The very first run has nothing to compare against, so every lender shows `NEW`.
@@ -501,8 +512,8 @@ Realized PNL per lender =
 - **+ collateral kept on defaulted loans**, valued at default time (`endCollateralAmountUsd`), minus the principal that was lent out and not recovered (`startPrincipalAmountUsd`). This is a mark-to-market figure at the moment of default, not necessarily cash actually realized — if the lender is still holding the seized collateral, it's unrealized from here.
 
 ```bash
-python pnl_leaderboard.py              # top 25 by realized PNL
-python pnl_leaderboard.py --top 50
+python reporting/pnl_leaderboard.py              # top 25 by realized PNL
+python reporting/pnl_leaderboard.py --top 50
 ```
 
 Read-only, never signs or submits anything.
@@ -512,10 +523,10 @@ Read-only, never signs or submits anything.
 Plots one borrower's full loan history for a given collateral as a Gantt-style timeline (one bar per loan, colored by outcome — on-time/late/defaulted/active, labeled with each loan's principal size) plus a concurrent-open-loans step chart underneath, so gaps in activity are easy to spot and label with their length in days directly on the chart. Useful for answering "does this borrower take breaks, and how often" at a glance rather than by reading a table.
 
 ```bash
-python borrower_loan_timeline.py                      # interactive prompts for collateral/borrower
-python borrower_loan_timeline.py --collateral USELESS
-python borrower_loan_timeline.py --collateral USELESS --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ
-python borrower_loan_timeline.py --collateral USELESS --output /some/other/path.png
+python reporting/borrower_loan_timeline.py                      # interactive prompts for collateral/borrower
+python reporting/borrower_loan_timeline.py --collateral USELESS
+python reporting/borrower_loan_timeline.py --collateral USELESS --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ
+python reporting/borrower_loan_timeline.py --collateral USELESS --output /some/other/path.png
 ```
 
 Omitting `--borrower` auto-picks the largest borrower (by total USD principal) for that collateral. Charts save to `~/Desktop/borrower_timeline_<borrower8>.png` by default. Read-only, no signing.
@@ -525,12 +536,12 @@ Omitting `--borrower` auto-picks the largest borrower (by total USD principal) f
 Charts WHEN competing lenders post their offers for a given collateral, so you can time `strategy.py` runs to land after most of the day's competing volume is already on the book, instead of undercutting a thin, partially-posted market. Pulls every lending offer for that collateral across every status (active/partiallyFilled/fulfilled/cancelled/expired) over a lookback window — not just what's live right now, since currently-live offers alone are capped by the platform's 24h expiry and only show a partial day. Your own offers are excluded by default.
 
 ```bash
-python offer_posting_times.py                      # prompts for collateral
-python offer_posting_times.py --collateral PUMP
-python offer_posting_times.py --collateral all      # every collateral together
-python offer_posting_times.py --collateral PUMP --days-back 14
-python offer_posting_times.py --collateral PUMP --tz America/New_York
-python offer_posting_times.py --collateral PUMP --coverage 0.9
+python reporting/offer_posting_times.py                      # prompts for collateral
+python reporting/offer_posting_times.py --collateral PUMP
+python reporting/offer_posting_times.py --collateral all      # every collateral together
+python reporting/offer_posting_times.py --collateral PUMP --days-back 14
+python reporting/offer_posting_times.py --collateral PUMP --tz America/New_York
+python reporting/offer_posting_times.py --collateral PUMP --coverage 0.9
 ```
 
 Plots a scatter of posting time (date vs. hour-of-day, colored by status) to show whether the daily rhythm is consistent, plus an hourly histogram with a cumulative-%-of-USD-volume line to make the busiest posting hours obvious. Prints a recommended "post after HH:00" time — the first hour by whose end `--coverage` (default 80%) of a typical day's competing USD volume has historically posted. Charts save to `~/Desktop/offer_posting_times_<label>.png` by default. Read-only, no signing.
@@ -540,13 +551,13 @@ Plots a scatter of posting time (date vs. hour-of-day, colored by status) to sho
 `strategy.py` posts ALL of its offers in one batch run rather than trickling them out — so the timing question that matters isn't "when do most offers for one token get posted" (that's `offer_posting_times.py`), it's "when has essentially every top competitor across the WHOLE market already posted for the day," so a single run can undercut everyone's fresh pricing at once. This pulls every lending offer platform-wide (every collateral pair) over a rolling lookback window, ranks lenders by total USD volume in that window, and profiles both the aggregate market rhythm and each top lender's individual posting hours. Two local ML techniques (no external API, no billing) turn that into more than a bigger table: **k-means clustering** (scikit-learn) groups top lenders by the *shape* of their 24-hour posting profile into behavioral archetypes ("morning poster", "evening poster", etc. — K chosen automatically via silhouette score, scaling up to 6 clusters as more lenders become available rather than a fixed small ceiling), and **linear regression** (numpy) fits day-index vs. daily competing USD volume to report whether competition is intensifying or cooling off. Clustering is used for the hour-of-day question specifically because it's circular (23:00 and 00:00 are adjacent) — a plain regression would mishandle that, and even the archetype label itself is derived from each cluster's centroid rather than averaging members' individual peak hours, for the same reason. Lenders with fewer than 3 offers in the window are excluded from clustering (not enough data for a meaningful shape) but still appear in the ranked list with their own post-after time.
 
 ```bash
-python competitor_timing_report.py                    # 14-day lookback, top 20 lenders, emails the report
-python competitor_timing_report.py --days-back 21
-python competitor_timing_report.py --top-lenders 15
-python competitor_timing_report.py --tz America/New_York
-python competitor_timing_report.py --no-email          # console output only, skip email + state
-python competitor_timing_report.py --heatmap-top 5     # chart more than the top 3 lenders
-python competitor_timing_report.py --no-chart          # skip the heatmap PNG
+python reporting/competitor_timing_report.py                    # 14-day lookback, top 20 lenders, emails the report
+python reporting/competitor_timing_report.py --days-back 21
+python reporting/competitor_timing_report.py --top-lenders 15
+python reporting/competitor_timing_report.py --tz America/New_York
+python reporting/competitor_timing_report.py --no-email          # console output only, skip email + state
+python reporting/competitor_timing_report.py --heatmap-top 5     # chart more than the top 3 lenders
+python reporting/competitor_timing_report.py --no-chart          # skip the heatmap PNG
 ```
 
 Also saves a heatmap PNG (hour-of-day x top-3-lenders by default, `~/Desktop/competitor_top_lenders_heatmap.png`) — each row is normalized to that lender's own daily volume (not raw dollars), so the #1 lender's much larger absolute volume doesn't wash out everyone else's row, and a dashed line marks the market-wide recommended post-after hour for direct comparison. Chart saving is best-effort — a failure (e.g. no writable Desktop) logs a warning rather than failing the run, since the email is the primary deliverable.
@@ -603,17 +614,17 @@ ALLOCATION_CONFIG=path/to/allocation_config.yaml
 
 ```bash
 # Safe preview — no transactions submitted (Ledger signing by default, see below)
-DRY_RUN=true python strategy.py --days 7
+DRY_RUN=true python strategy/strategy.py --days 7
 
 # Live — cancel first, then run all four durations in one invocation
-python cancel_offers.py --days all
-python strategy.py --days 1,3,7,15
+python strategy/cancel_offers.py --days all
+python strategy/strategy.py --days 1,3,7,15
 
 # Omit --days and --collateral to be prompted interactively for both instead
-python strategy.py
+python strategy/strategy.py
 
 # Prefer the hot wallet key instead of the Ledger?
-python strategy.py --days 7 --private-key
+python strategy/strategy.py --days 7 --private-key
 ```
 
 ## Environment variables
@@ -627,7 +638,7 @@ python strategy.py --days 7 --private-key
 | `OFFERBOOK_TX_API_BASE` | No | — | Transaction builder API base URL |
 | `SOLANA_RPC` | No | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
 | `MAX_OFFER_PRINCIPAL_USDC` | No | `0` | Per-offer USDC cap (0 = full allocation) |
-| `ALLOCATION_CONFIG` | No | `allocation_config.yaml` | Path to allocation config file |
+| `ALLOCATION_CONFIG` | No | `strategy/allocation_config.yaml` | Path to allocation config file |
 | `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py`, `strategy.py`, `fill_offer.py`, and `defaulter_capture.py` |
 | `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing — in `strategy.py`, `cancel_offers.py`, and `fill_offer.py` this is only the fallback offered at the interactive account prompt (see "Signing modes" below), not used silently |
 | `TELEGRAM_BOT_TOKEN` | No | — | Bot token from @BotFather — used by `wallet_tx_watch.py` and `tg_deposit_watch.py` |
@@ -680,12 +691,12 @@ before approving: a mismatch means the bytes about to be signed aren't the
 ones printed to the console.
 
 ```bash
-python cancel_offers.py                 # Ledger signing (default), prompts for strategy AND account
-python cancel_offers.py --private-key   # hot wallet signing
-python cancel_offers.py --ledger --days 7 --yes
-python strategy.py --days 7                          # prompts which Ledger account to run on
-python strategy.py --days 7 --ledger-path "44'/501'/1'"  # skip that prompt
-python strategy.py --days 7 --private-key --yes
+python strategy/cancel_offers.py                 # Ledger signing (default), prompts for strategy AND account
+python strategy/cancel_offers.py --private-key   # hot wallet signing
+python strategy/cancel_offers.py --ledger --days 7 --yes
+python strategy/strategy.py --days 7                          # prompts which Ledger account to run on
+python strategy/strategy.py --days 7 --ledger-path "44'/501'/1'"  # skip that prompt
+python strategy/strategy.py --days 7 --private-key --yes
 ```
 
 ## Targeting specific collateral
@@ -699,11 +710,11 @@ tokens); pass it and every pair in `allocation_config.yaml` is processed as
 usual.
 
 ```bash
-python strategy.py --days 1 --collateral HYPE --yes
-python strategy.py --days 3 --collateral HYPE --yes
-python strategy.py --days 3,7 --collateral HYPE --yes
-python strategy.py --days 1,3,7 --collateral CARDS,ANSEM,URANUS --yes
-MAX_OFFER_PRINCIPAL_USDC=50 python strategy.py --days 3 --collateral HYPE --yes
+python strategy/strategy.py --days 1 --collateral HYPE --yes
+python strategy/strategy.py --days 3 --collateral HYPE --yes
+python strategy/strategy.py --days 3,7 --collateral HYPE --yes
+python strategy/strategy.py --days 1,3,7 --collateral CARDS,ANSEM,URANUS --yes
+MAX_OFFER_PRINCIPAL_USDC=50 python strategy/strategy.py --days 3 --collateral HYPE --yes
 ```
 
 Note: with specific pairs selected, the full per-pair allocation budget
@@ -720,7 +731,7 @@ Requires `--collateral` — it refuses to blanket-override every token in the
 config at once.
 
 ```bash
-python strategy.py --days 1,3,7 --collateral CARDS,ANSEM,URANUS --full-alloc --yes
+python strategy/strategy.py --days 1,3,7 --collateral CARDS,ANSEM,URANUS --full-alloc --yes
 ```
 
 If `--collateral` is omitted (interactive mode), you're also prompted

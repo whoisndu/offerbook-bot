@@ -24,12 +24,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 wallet_tx_watch.py
+        run: python3 monitoring/wallet_tx_watch.py
 
       - name: Commit updated state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add wallet_watch_state.json
+          git add monitoring/wallet_watch_state.json
           git diff --staged --quiet || git commit -m "Update wallet watch state [skip ci]"
           git push

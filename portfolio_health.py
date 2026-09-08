@@ -89,6 +89,12 @@ REMINDER_SYNC_PLAN_PATH = os.path.join(os.path.dirname(__file__), "portfolio_rem
 VOLUME_WINDOW_DAYS = 7  # "this week" volume = loans originated in the trailing N days (rolling
                           # window from now, not calendar-week-aligned)
 
+INTEREST_REPAY_FEE_RATE = 0.10  # platform fee taken from interest at repayment — measured directly
+                                  # off 158 of your own repaid loans (mean/median both 0.100001,
+                                  # range 0.09992-0.10005 — a flat 10%, not APY/market dependent).
+                                  # Applied to active loans' committed interest since Offerbook makes
+                                  # the full term's interest due regardless of early repayment.
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -310,22 +316,19 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
         except (KeyError, ValueError):
             pass
 
-        # Unrealized profit: interest accrued so far but not yet collected
-        # (only realized on repayment; lost — replaced by whatever collateral
-        # is seized instead — if the loan defaults first). Pro-rated by
-        # elapsed time vs. the loan's full duration, converted to USD via the
-        # same proportional formula compute_realized_pnl uses for actually-
-        # collected interest.
+        # Unrealized profit: interest on this platform is NOT prorated by
+        # elapsed time — a borrower owes the FULL interest for the loan's
+        # whole term regardless of when (or whether, before default) they
+        # repay. So the entire committed interest counts from the moment the
+        # loan is active, net of the platform's repay fee (a flat 10% of
+        # gross interest — confirmed empirically across historical repaid
+        # loans, see INTEREST_REPAY_FEE_RATE), only lost — replaced by
+        # whatever collateral is seized instead — if the loan defaults.
+        interest = l.get("interest") or 0
         accrued_interest_usd = None
-        try:
-            created_at = datetime.fromisoformat(l["createdAt"].replace("Z", "+00:00"))
-            duration_secs = l.get("duration") or 0
-            interest = l.get("interest") or 0
-            if duration_secs > 0 and principal_raw > 0 and start_principal_usd:
-                fraction = max(0.0, min(1.0, (now - created_at).total_seconds() / duration_secs))
-                accrued_interest_usd = (interest * fraction / principal_raw) * start_principal_usd
-        except (KeyError, ValueError):
-            pass
+        if principal_raw > 0 and start_principal_usd and interest:
+            gross_interest_usd = (interest / principal_raw) * start_principal_usd
+            accrued_interest_usd = gross_interest_usd * (1 - INTEREST_REPAY_FEE_RATE)
 
         rows.append({
             "loan_id": l.get("pubkey", ""),
@@ -513,7 +516,7 @@ def print_wallet_report(
     total_active_principal = sum(r["principal_usd"] or 0 for r in active_rows)
     total_unrealized_usd = sum(r["accrued_interest_usd"] or 0 for r in active_rows)
     log.info("Active loans: %d   Outstanding principal: $%.2f", len(active_rows), total_active_principal)
-    log.info("Unrealized profit (interest accrued on active loans, not yet collected): $%.2f", total_unrealized_usd)
+    log.info("Unrealized profit (interest owed on active loans, net of repay fee, not yet collected): $%.2f", total_unrealized_usd)
 
     at_risk = [r for r in active_rows if r["live_ltv"] is not None and r["live_ltv"] >= risk_ltv]
     expiring = [r for r in active_rows if r["hrs_left"] is not None and r["hrs_left"] <= expiry_hours]
@@ -584,7 +587,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
         VOLUME_WINDOW_DAYS, total_volume_week, total_volume_all_time,
     )
     log.info("Total active loans: %d   Outstanding principal: $%.2f   At-risk: %d", total_active, total_outstanding, total_at_risk)
-    log.info("Total unrealized profit (accrued interest on active loans): $%.2f", total_unrealized)
+    log.info("Total unrealized profit (interest owed on active loans, net of repay fee): $%.2f", total_unrealized)
     log.info(
         "All-time: repaid=%d  defaulted=%d  default rate=%s",
         total_repaid, total_defaulted, f"{default_rate:.1f}%" if default_rate is not None else "n/a",

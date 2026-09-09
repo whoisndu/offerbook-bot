@@ -51,7 +51,6 @@ import json
 import logging
 import os
 import sys
-import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass

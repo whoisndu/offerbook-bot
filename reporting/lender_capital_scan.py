@@ -9,11 +9,19 @@ has ever been one on the platform — "lender" means anyone who:
   - appears as the lender on ANY resolved loan (repaid or defaulted) —
     a past lender is included even with no current activity at all.
 
-For each, reports wallet USDC, escrow USDC, and the combined total — the
+For each, reports wallet USDC, escrow USDC, and the combined idle total — the
 free/redeployable capital a competitor could bring to bear, not just what's
-already committed — plus a "last seen" column: the most recent createdAt/
+already committed — plus their currently-OUTSTANDING borrowed principal
+(summed from active loans only) and their own utilization rate (borrowed /
+(borrowed + idle)), and a "last seen" column: the most recent createdAt/
 updatedAt across all of their Offerbook loan/offer records, i.e. purely
 platform activity, not general wallet activity elsewhere.
+
+The summary footer also reports a PROTOCOL UTILIZATION figure — total
+borrowed / total capital (borrowed + idle) across every lender in the report
+(after --min-total/staleness filtering, before --top truncates the printed
+table) — the single-number answer to "how much of the protocol's lending
+capital is currently deployed vs. sitting idle."
 
 Also tracks each lender's all-time loan count (active + repaid + defaulted
 loans where they're the lender — open offers that haven't been matched yet
@@ -105,17 +113,20 @@ def _note_last_seen(last_seen: dict[str, datetime], addr: str, record: dict) -> 
             last_seen[addr] = ts
 
 
-def fetch_all_lenders() -> tuple[set[str], dict[str, datetime], dict[str, int]]:
+def fetch_all_lenders() -> tuple[set[str], dict[str, datetime], dict[str, int], dict[str, float]]:
     """Union of everyone who is or has ever been a lender: active-loan lenders,
     open-lending-offer creators, and lenders from ALL resolved loan history
     (repaid + defaulted) — so a past lender shows up even if they currently have
     no active loan or open offer at all. Also returns each lender's most recent
     createdAt/updatedAt across all of those records, as a "last seen" signal,
-    and their all-time loan count (active + repaid + defaulted only — open
-    offers aren't loans yet) — both computed for free from data already being
-    fetched, no extra API calls."""
+    their all-time loan count (active + repaid + defaulted only — open
+    offers aren't loans yet), and their currently-OUTSTANDING borrowed
+    principal (USD) — summed only from active loans, since that's capital
+    presently out with a borrower, not yet returned — all computed for free
+    from data already being fetched, no extra API calls."""
     last_seen: dict[str, datetime] = {}
     loan_counts: Counter[str] = Counter()
+    borrowed_usd: dict[str, float] = Counter()
 
     log.info("Fetching active loans …")
     active_loans = _fetch_all_pages("/loans/status/active")
@@ -125,6 +136,7 @@ def fetch_all_lenders() -> tuple[set[str], dict[str, datetime], dict[str, int]]:
         if l.get("lender"):
             _note_last_seen(last_seen, l["lender"], l)
             loan_counts[l["lender"]] += 1
+            borrowed_usd[l["lender"]] += (l.get("principalAmount") or 0) / 1e6
 
     log.info("Fetching open lending offers …")
     open_offers: list[dict] = []
@@ -157,7 +169,7 @@ def fetch_all_lenders() -> tuple[set[str], dict[str, datetime], dict[str, int]]:
             _note_last_seen(last_seen, l["lender"], l)
             loan_counts[l["lender"]] += 1
 
-    return lenders, last_seen, dict(loan_counts)
+    return lenders, last_seen, dict(loan_counts), dict(borrowed_usd)
 
 
 def wallet_usdc(wallet: str) -> float:
@@ -189,10 +201,27 @@ class LenderBalance:
     wallet_usd: float
     escrow_usd: float
     loan_count: int
+    borrowed_usd: float = 0.0  # outstanding principal currently out on active loans
 
     @property
     def total_usd(self) -> float:
+        """Idle, redeployable capital — wallet + escrow. Does NOT include
+        borrowed_usd, which is already out with a borrower, not free to deploy."""
         return self.wallet_usd + self.escrow_usd
+
+    @property
+    def capital_usd(self) -> float:
+        """Idle + currently-deployed capital combined — the denominator for
+        this lender's own utilization rate."""
+        return self.total_usd + self.borrowed_usd
+
+    @property
+    def utilization(self) -> float | None:
+        """Fraction of this lender's total capital (idle + deployed) currently
+        out on active loans. None if they have zero capital of either kind."""
+        if self.capital_usd <= 0:
+            return None
+        return self.borrowed_usd / self.capital_usd
 
 
 def load_state() -> dict:
@@ -209,15 +238,19 @@ def save_state(balances: list[LenderBalance], previous: dict) -> None:
             "wallet_usd": b.wallet_usd,
             "escrow_usd": b.escrow_usd,
             "total_usd": b.total_usd,
+            "borrowed_usd": b.borrowed_usd,
             "loan_count": b.loan_count,
             "last_updated": now_iso,
         }
     STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
-def scan_balances(lenders: set[str], loan_counts: dict[str, int]) -> list[LenderBalance]:
+def scan_balances(lenders: set[str], loan_counts: dict[str, int], borrowed_usd: dict[str, float]) -> list[LenderBalance]:
     def fetch_one(lender: str) -> LenderBalance:
-        return LenderBalance(lender, wallet_usdc(lender), escrow_usdc(lender), loan_counts.get(lender, 0))
+        return LenderBalance(
+            lender, wallet_usdc(lender), escrow_usdc(lender),
+            loan_counts.get(lender, 0), borrowed_usd.get(lender, 0.0),
+        )
 
     log.info("Fetching wallet + escrow USDC balances for %d lender(s) …", len(lenders))
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -269,9 +302,12 @@ def print_report(
     log.info("=" * 100)
     log.info("Lender capital (wallet + escrow USDC) — everyone who is or has ever been a lender")
     log.info("=" * 100)
-    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}  {:>11}  {:>14}"
-    log.info(col.format("lender", "wallet $", "escrow $", "total $", "Δ since last", "new loans", "last seen"))
-    log.info("-" * 124)
+    col = "{:<46}  {:>14}  {:>14}  {:>14}  {:>14}  {:>8}  {:>14}  {:>11}  {:>14}"
+    log.info(col.format(
+        "lender", "wallet $", "escrow $", "idle $", "borrowed $", "util %",
+        "Δ since last", "new loans", "last seen",
+    ))
+    log.info("-" * 155)
     for b in balances[:top]:
         prev = previous.get(b.lender)
         if prev is None:
@@ -282,12 +318,19 @@ def print_report(
             delta_str = f"{delta:+,.2f}"
             loan_delta_str = str(b.loan_count - prev.get("loan_count", 0))
         seen_str = format_last_seen(last_seen.get(b.lender))
-        log.info(col.format(b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}", delta_str, loan_delta_str, seen_str))
-    log.info("-" * 124)
+        util_str = f"{b.utilization * 100:.1f}%" if b.utilization is not None else "n/a"
+        log.info(col.format(
+            b.lender, f"{b.wallet_usd:,.2f}", f"{b.escrow_usd:,.2f}", f"{b.total_usd:,.2f}",
+            f"{b.borrowed_usd:,.2f}", util_str, delta_str, loan_delta_str, seen_str,
+        ))
+    log.info("-" * 155)
 
     total_wallet = sum(b.wallet_usd for b in balances)
     total_escrow = sum(b.escrow_usd for b in balances)
+    total_borrowed = sum(b.borrowed_usd for b in balances)
     grand_total = total_wallet + total_escrow
+    protocol_capital = grand_total + total_borrowed
+    protocol_utilization = (total_borrowed / protocol_capital) if protocol_capital > 0 else None
     # Change for this same filtered set of lenders (not an independently-filtered
     # previous total, which could mismatch if --min-total excludes different lenders
     # than it did last run).
@@ -296,7 +339,13 @@ def print_report(
     log.info("Lenders shown        : %d", len(balances[:top]))
     log.info("Total wallet USDC    : $%s", f"{total_wallet:,.2f}")
     log.info("Total escrow USDC    : $%s", f"{total_escrow:,.2f}")
-    log.info("GRAND TOTAL USDC     : $%s", f"{grand_total:,.2f}")
+    log.info("Total idle USDC      : $%s", f"{grand_total:,.2f}")
+    log.info("Total borrowed USDC  : $%s", f"{total_borrowed:,.2f}")
+    log.info("Total capital        : $%s  (idle + borrowed)", f"{protocol_capital:,.2f}")
+    log.info(
+        "PROTOCOL UTILIZATION : %s",
+        f"{protocol_utilization * 100:.1f}%" if protocol_utilization is not None else "n/a",
+    )
     if previous:
         log.info("Change since last run: $%s", f"{change:+,.2f}")
     log.info("=" * 100)
@@ -311,9 +360,9 @@ def main() -> None:
 
     previous = load_state()
 
-    lenders, last_seen, loan_counts = fetch_all_lenders()
+    lenders, last_seen, loan_counts, borrowed_usd = fetch_all_lenders()
     log.info("Distinct lenders (active loan, open offer, or resolved loan history): %d", len(lenders))
-    balances = scan_balances(lenders, loan_counts)
+    balances = scan_balances(lenders, loan_counts, borrowed_usd)
     print_report(balances, previous, last_seen, args.min_total, args.top)
 
     if not args.no_save:

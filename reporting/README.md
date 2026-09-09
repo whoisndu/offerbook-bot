@@ -58,6 +58,8 @@ Every run's balances persist to `lender_capital_state.json` (gitignored, like `.
 
 Also shows **last seen**: the most recent `createdAt`/`updatedAt` across all of a lender's Offerbook loan/offer records (active, open offer, repaid, or defaulted) — purely platform activity, not general wallet activity elsewhere. Computed for free from data already being fetched, no extra API calls. Distinguishes a currently-dominant lender from one who's actually gone quiet (e.g. large balance, but last active weeks ago).
 
+**Borrowed $ / util %** — each lender's currently-outstanding principal (summed from their active loans only — repaid/defaulted principal is no longer outstanding) alongside their own utilization rate: `borrowed / (borrowed + idle)`. The summary footer reports a single **PROTOCOL UTILIZATION** figure the same way, aggregated across every lender in the report (after `--min-total`/staleness filtering, before `--top` truncates the printed table) — how much of the protocol's total lending capital is currently deployed vs. sitting idle.
+
 Read-only, no signing. Exit code is always `0` — this is an informational report, not a pass/fail check.
 
 ## Realized PNL leaderboard (`pnl_leaderboard.py`)

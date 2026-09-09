@@ -37,7 +37,7 @@ Read-only: never signs or submits anything.
 
 Usage:
   python lender_capital_scan.py                  # all lenders, sorted by total desc
-  python lender_capital_scan.py --min-total 100   # only show lenders with > $100 total
+  python lender_capital_scan.py --min-total 100   # only show lenders with > $100 total capital (idle + borrowed)
   python lender_capital_scan.py --top 20          # limit output to the top 20 rows
   python lender_capital_scan.py --no-save         # compare against saved state but don't overwrite it
 
@@ -284,7 +284,10 @@ def _is_stale(b: LenderBalance, last_seen: dict[str, datetime]) -> bool:
 def print_report(
     balances: list[LenderBalance], previous: dict, last_seen: dict[str, datetime], min_total: float, top: int
 ) -> None:
-    balances = [b for b in balances if b.total_usd > min_total]
+    # capital_usd (idle + borrowed), not just idle total_usd — a lender fully
+    # deployed right now (e.g. $0 idle but $50K out on active loans) is
+    # obviously not a $0 lender and shouldn't be filtered out as one.
+    balances = [b for b in balances if b.capital_usd > min_total]
     stale_count = sum(1 for b in balances if _is_stale(b, last_seen))
     if stale_count:
         log.info("Excluding %d lender(s) inactive > %d days with no escrow balance",
@@ -353,7 +356,7 @@ def print_report(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Report wallet+escrow USDC balances for every current Offerbook lender.")
-    parser.add_argument("--min-total", type=float, default=0.0, help="Only show lenders with > this much total USDC (default: 0)")
+    parser.add_argument("--min-total", type=float, default=0.0, help="Only show lenders with > this much total capital, idle + borrowed (default: 0)")
     parser.add_argument("--top", type=int, default=1000, help="Limit the report to the top N rows by total (default: 1000, effectively all)")
     parser.add_argument("--no-save", action="store_true", help="Compare against saved state but don't overwrite it with this run's results")
     args = parser.parse_args()

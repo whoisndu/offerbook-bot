@@ -241,7 +241,7 @@ HARD_LTV_CEILING = 0.75                    # never exceeded, no matter what, reg
 LONG_DURATION_COLLATERAL_PREMIUM = 1.25
 LONG_DURATION_PREMIUM_DAYS = 15            # duration tier(s) >= this get the premium
 
-MIN_APY_BPS = 10             # never go below 0.10% APY (10 bps) – sanity floor
+MIN_APY_BPS = 500            # never go below 5.00% APY (500 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 
 MIN_FILL_USDC = 10.0         # minimum a borrower must take in a partial fill, across every offer

@@ -92,7 +92,7 @@ LEDGER_PATH: str = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes")
 
 OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24h
-MIN_APY_BPS = 10
+MIN_APY_BPS = 500  # never go below 5.00% APY (500 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True
 MIN_FILL_USDC = 10.0  # minimum a borrower must take in a partial fill, across every offer
 PAGE_SIZE = 100

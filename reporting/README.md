@@ -22,7 +22,7 @@ For each offer the script prints a table row:
 
 | Column | What is checked |
 |---|---|
-| `APY bps` / `APY %` | Must be ≥ 10 bps (the floor) |
+| `APY bps` / `APY %` | Must be ≥ 500 bps / 5% (the floor) |
 | `LTV %` | Recomputed from fresh Jupiter/DexScreener prices; must be ≤ `Target%` |
 | `Target%` | The dynamic LTV target ([§4 in strategy/README.md](../strategy/README.md#4-dynamic-ltv-target-and-safe-collateral-sizing)) recomputed *right now* from fresh market-wide offer/loan data for that collateral token — not a fixed per-strategy number, and not necessarily the same value the strategy script computed at offer-creation time, since market conditions move |
 | `Vol USDC` | Principal amount; flagged if dust (< 1 000 raw units) |

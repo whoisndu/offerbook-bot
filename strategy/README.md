@@ -101,7 +101,7 @@ $$r^{\ast} = \tilde{r}^{(d)} \cdot (1 + \delta)$$
 | 7 days | 7 days | $-0.10$ | Mid duration; slight undercut to attract flow |
 | 15 days | 15 days | $-0.12$ | Long duration; deeper undercut offsets illiquidity |
 
-A hard floor $r^{\ast} \geq r_{\min} = 0.001$ (10 bps) prevents posting at zero or negative yield.
+A hard floor $r^{\ast} \geq r_{\min} = 0.05$ (500 bps / 5%) prevents posting at zero, negative, or near-zero yield.
 
 **Cheapest-comparable-offer guardrail.** Let $\mathcal{C} \subseteq \mathcal{O}_d$ be the same-duration, size-band-preferred set from §1 (excluding our own offers), and $r_{\min}(\mathcal{C}) = \min_{i \in \mathcal{C}} r_i$ the lowest (cheapest, most borrower-friendly) APY among them. The final target is capped **down**, never up:
 

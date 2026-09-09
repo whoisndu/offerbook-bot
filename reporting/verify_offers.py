@@ -5,7 +5,7 @@ Run this after placing orders to verify that every live offer has:
   - LTV within the dynamic per-token target the strategy would compute right now
     (using fresh on-chain prices and fresh market data — mirrors effective_target_ltv()
     in strategy.py)
-  - APY above the 10 bps floor
+  - APY above the 500 bps (5%) floor
   - Correct duration for the chosen strategy
   - Non-dust principal amount
 
@@ -59,7 +59,7 @@ DEXSCREENER_API   = "https://api.dexscreener.com/latest/dex/tokens"
 
 USDC_MINT     = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
-MIN_APY_BPS   = 10
+MIN_APY_BPS   = 500  # never go below 5.00% APY (500 bps) – sanity floor
 PAGE_SIZE     = 100
 
 # ---------------------------------------------------------------------------

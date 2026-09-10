@@ -41,7 +41,7 @@ Optional overrides:
 OFFERBOOK_API_BASE=https://api.offerbook.jup.ag/api/v1
 OFFERBOOK_TX_API_BASE=https://builder.offerbook.jup.ag/api/v1
 SOLANA_RPC=https://api.mainnet-beta.solana.com
-MAX_OFFER_PRINCIPAL_USDC=50    # cap each offer at 50 USDC (0 = use full allocation)
+MAX_OFFER_PRINCIPAL_USDC=50    # cap each offer at 50 USDC (default 10000; 0 = uncapped)
 ALLOCATION_CONFIG=path/to/allocation_config.yaml
 ```
 
@@ -71,7 +71,7 @@ See [strategy/README.md](strategy/README.md) for the full strategy breakdown, th
 | `OFFERBOOK_API_BASE` | No | `https://api.offerbook.jup.ag/api/v1` | Read API base URL |
 | `OFFERBOOK_TX_API_BASE` | No | — | Transaction builder API base URL |
 | `SOLANA_RPC` | No | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
-| `MAX_OFFER_PRINCIPAL_USDC` | No | `0` | Per-offer USDC cap (0 = full allocation) |
+| `MAX_OFFER_PRINCIPAL_USDC` | No | `10000` | Per-offer USDC cap in `strategy.py` (0 = uncapped). `defaulter_capture.py` and `create_targeted_offers.py` each enforce their own hardcoded $10,000 per-offer cap, not driven by this env var. |
 | `ALLOCATION_CONFIG` | No | `strategy/allocation_config.yaml` | Path to allocation config file |
 | `OFFERBOOK_SIGNING_MODE` | No | `ledger` | `ledger` or `private_key` — used by `cancel_offers.py`, `strategy.py`, `fill_offer.py`, and `defaulter_capture.py` (all in `strategy/`) |
 | `OFFERBOOK_LEDGER_PATH` | No | `44'/501'/0'` | BIP32 derivation path for Ledger signing — in `strategy.py`, `cancel_offers.py`, and `fill_offer.py` this is only the fallback offered at the interactive account prompt (see [strategy/README.md's Signing modes](strategy/README.md#signing-modes)), not used silently |

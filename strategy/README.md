@@ -257,7 +257,7 @@ Reacts to the actionable conditions from [`../monitoring/defaulter_watch.py`](..
 - **LTV**: a small edge above the largest offer's LTV, capped by the same `effective_target_ltv()` safety ceiling used in `strategy.py` (§4) — a borrower's historical profitability never overrides this cap.
 - **Duration**: matches the largest offer's own duration, since that's the specific listing being targeted.
 
-A collateral not listed in `allocation_config.yaml` (or listed at 0%) is skipped, same as a normal strategy run.
+A collateral not listed in `allocation_config.yaml` (or listed at 0%) is skipped, same as a normal strategy run. The sized principal is also hard-capped at $10,000 (`MAX_PRINCIPAL_USDC`) regardless of allocation fraction — a fixed constant in this script, not driven by `MAX_OFFER_PRINCIPAL_USDC`.
 
 ```bash
 # DRY_RUN is respected exactly like every other script here (see .env)

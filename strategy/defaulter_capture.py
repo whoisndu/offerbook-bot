@@ -95,6 +95,7 @@ OFFER_EXPIRY_SECS = 1 * 24 * 60 * 60  # offer listing expires in 24h
 MIN_APY_BPS = 500  # never go below 5.00% APY (500 bps) – sanity floor
 ALLOW_PARTIAL_FILL = True
 MIN_FILL_USDC = 10.0  # minimum a borrower must take in a partial fill, across every offer
+MAX_PRINCIPAL_USDC = 10_000.0  # hard cap on EACH offer's principal
 PAGE_SIZE = 100
 
 # How much better than the pool's single largest live offer to target — a
@@ -597,6 +598,9 @@ def main() -> None:
             continue
 
         principal_raw = int(available_usdc_raw * fraction)
+        cap_raw = int(MAX_PRINCIPAL_USDC * 10 ** USDC_DECIMALS)
+        if principal_raw > cap_raw:
+            principal_raw = cap_raw
         principal_usdc = principal_raw / 10 ** USDC_DECIMALS
         min_fill_raw = max(1001, int(MIN_FILL_USDC * 10 ** USDC_DECIMALS))
         # minFillAmount must be <= half of principalAmount (API constraint) —

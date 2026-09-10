@@ -267,7 +267,7 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
 
 # Optional hard cap per individual offer, in whole USDC (0 = use market median)
-_cap_env = os.getenv("MAX_OFFER_PRINCIPAL_USDC", "0")
+_cap_env = os.getenv("MAX_OFFER_PRINCIPAL_USDC", "10000")
 MAX_OFFER_PRINCIPAL_USDC: int | None = int(_cap_env) if _cap_env.strip() not in ("", "0") else None
 
 # Jupiter Price API — used to get real-time collateral token prices so that

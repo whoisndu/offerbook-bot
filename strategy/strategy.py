@@ -311,6 +311,7 @@ SYMBOL_TO_MINT: dict[str, str] = {
     "URANUS": "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
     "CARDS": "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp",
     "ANSEM": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+    "JIMOTHY": "Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump",
 }
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,10 @@ Read-only lender-side report across one or more of your own wallets:
     actual repay fee charged) plus collateral kept on defaulted loans
     (valued at default time) minus the principal lost — same formula
     pnl_leaderboard.py uses platform-wide, scoped here to your wallets.
+    Also broken out into trailing realized-earnings windows (last 24h/7d/
+    14d) using each resolved loan's updatedAt as a proxy for when it was
+    repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
+    alongside the existing all-time total.
   - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
   - Capital freeing up: principal (USD) of active loans due within the next
     24h / 48h — an optimistic estimate (assumes on-schedule repayment, not
@@ -225,13 +229,30 @@ def compute_live_ltv(
 # Per-loan / per-wallet stats
 # ---------------------------------------------------------------------------
 
-def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str) -> dict:
+def _resolved_at(l: dict) -> datetime | None:
+    """When a repaid/defaulted loan was resolved. The API has no dedicated
+    repaidAt/defaultedAt field, so updatedAt is used as the proxy — same
+    convention defaulter_watch.py relies on for repaid loans."""
+    try:
+        return datetime.fromisoformat(l["updatedAt"].replace("Z", "+00:00"))
+    except (KeyError, ValueError, AttributeError):
+        return None
+
+
+def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str, since: datetime | None = None) -> dict:
     """Realized PNL for one wallet as lender — same formula as pnl_leaderboard.py:
     net interest on repaid loans (interest/principalAmount * startPrincipalAmountUsd,
     minus the actual repay fee charged), plus kept collateral on defaults (valued at
-    default time) minus the principal lost."""
+    default time) minus the principal lost.
+
+    If `since` is given, only counts loans resolved (see _resolved_at) on/after
+    that time — used for the trailing 24h/7d/14d realized-earnings windows,
+    as opposed to the default all-time figure (since=None)."""
     mine_repaid = [l for l in repaid if l.get("lender") == wallet]
     mine_defaulted = [l for l in defaulted if l.get("lender") == wallet]
+    if since is not None:
+        mine_repaid = [l for l in mine_repaid if (ts := _resolved_at(l)) is not None and ts >= since]
+        mine_defaulted = [l for l in mine_defaulted if (ts := _resolved_at(l)) is not None and ts >= since]
 
     interest_usd = fees_usd = defaulted_pnl_usd = principal_repaid_usd = 0.0
     for l in mine_repaid:
@@ -532,6 +553,7 @@ def print_wallet_report(
     wallet: str, sol_balance: int, usdc_wallet: int, usdc_escrow: int,
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
     volume_week_usd: float, volume_all_time_usd: float,
+    pnl_24h: dict, pnl_7d: dict, pnl_14d: dict,
 ) -> None:
     log.info("")
     log.info("=" * 100)
@@ -600,6 +622,12 @@ def print_wallet_report(
         pnl["interest_usd"], pnl["fees_usd"], pnl["defaulted_pnl_usd"],
     )
     log.info("  NET REALIZED PNL: $%.2f", pnl["net_pnl_usd"])
+    log.info(
+        "  Realized earnings — last 24h: $%.2f (%d resolved)   last 7d: $%.2f (%d resolved)   last 14d: $%.2f (%d resolved)",
+        pnl_24h["net_pnl_usd"], pnl_24h["repaid_count"] + pnl_24h["defaulted_count"],
+        pnl_7d["net_pnl_usd"], pnl_7d["repaid_count"] + pnl_7d["defaulted_count"],
+        pnl_14d["net_pnl_usd"], pnl_14d["repaid_count"] + pnl_14d["defaulted_count"],
+    )
 
 
 def print_portfolio_summary(per_wallet: list[dict]) -> None:
@@ -625,6 +653,9 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     default_rate = (total_defaulted / resolved * 100) if resolved else None
     total_volume_week = sum(w["volume_week_usd"] for w in per_wallet)
     total_volume_all_time = sum(w["volume_all_time_usd"] for w in per_wallet)
+    total_pnl_24h = sum(w["pnl_24h"]["net_pnl_usd"] for w in per_wallet)
+    total_pnl_7d = sum(w["pnl_7d"]["net_pnl_usd"] for w in per_wallet)
+    total_pnl_14d = sum(w["pnl_14d"]["net_pnl_usd"] for w in per_wallet)
 
     log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
     log.info(
@@ -643,6 +674,10 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
         total_repaid, total_defaulted, f"{default_rate:.1f}%" if default_rate is not None else "n/a",
     )
     log.info("TOTAL NET REALIZED PNL ACROSS PORTFOLIO: $%.2f", total_net_pnl)
+    log.info(
+        "TOTAL realized earnings — last 24h: $%.2f   last 7d: $%.2f   last 14d: $%.2f",
+        total_pnl_24h, total_pnl_7d, total_pnl_14d,
+    )
     log.info("=" * 100)
 
 # ---------------------------------------------------------------------------
@@ -699,6 +734,9 @@ def main() -> None:
         usdc_escrow = fetch_escrow_balance(wallet, USDC_MINT)
         active_rows = build_active_loan_rows(active, wallet, prices, decimals, now)
         pnl = compute_realized_pnl(repaid, defaulted, wallet)
+        pnl_24h = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(hours=24))
+        pnl_7d = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(days=7))
+        pnl_14d = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(days=14))
         volume_week_usd = compute_volume(all_loans, wallet, volume_since)
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
 
@@ -706,11 +744,13 @@ def main() -> None:
             wallet, sol_balance, usdc_wallet, usdc_escrow, active_rows, pnl,
             args.risk_ltv, args.underwater_ltv, args.expiry_hours,
             volume_week_usd, volume_all_time_usd,
+            pnl_24h, pnl_7d, pnl_14d,
         )
         per_wallet.append({
             "wallet": wallet, "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
             "active_rows": active_rows, "pnl": pnl, "risk_ltv": args.risk_ltv,
             "volume_week_usd": volume_week_usd, "volume_all_time_usd": volume_all_time_usd,
+            "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d,
         })
 
     if len(per_wallet) > 1:

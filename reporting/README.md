@@ -140,7 +140,7 @@ Wallets to check come from `OFFERBOOK_PORTFOLIO_WALLETS` in `.env` (comma-separa
 Per wallet, and combined across the portfolio:
 
 - **Open loan risk** — live LTV recomputed from current prices (not the stale LTV at origination) vs. `--risk-ltv`/`--underwater-ltv` thresholds, plus a days-to-expiry (or already-overdue) table.
-- **Realized PNL** — same formula as `pnl_leaderboard.py`, scoped to just these wallets.
+- **Realized PNL** — same formula as `pnl_leaderboard.py`, scoped to just these wallets. Also broken out into trailing realized-earnings windows (last 24h / 7d / 14d), alongside the all-time total — each resolved loan's `updatedAt` is used as a proxy for when it was repaid/defaulted (the API has no dedicated `repaidAt`/`defaultedAt` field).
 - **Unrealized profit** — interest owed on active loans, net of Offerbook's flat 10% repay fee (measured empirically off real repaid loans, not assumed). Offerbook charges the full term's interest regardless of early repayment, so this is the full committed amount, not a naive time-prorated fraction. Shown two ways: raw, and net of any *current* underwater loss (`principal − live collateral value`, zero for healthy positions) — the second number is the one that reflects real risk.
 - **Capital freeing up** — principal of active loans due within the next 24h / 48h (optimistic: assumes on-schedule repayment, not default), for planning how much you'll have free to redeploy.
 - **Volume** — total USD principal lent, counted the moment a loan originates regardless of outcome; trailing-7-day and all-time.

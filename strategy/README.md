@@ -337,6 +337,15 @@ you're prompted interactively (run across everything, or name specific
 tokens); pass it and every pair in `allocation_config.yaml` is processed as
 usual.
 
+A ticker resolves in three steps, via `resolve_collateral_token()`: (1) this
+file's own hardcoded `SYMBOL_TO_MINT` table, (2) failing that,
+`allocation_config.yaml`'s own comments (`# SYMBOL — Description  (ltv ~x%)`),
+scraped via the shared `offerbook_common.build_symbol_to_mint_from_allocation_config()`
+— so a token already in your allocation config resolves by name even if it
+was never added to `SYMBOL_TO_MINT`, (3) otherwise treated as a raw mint
+address unchanged, with a warning logged so a genuine typo doesn't silently
+match zero live pairs later.
+
 ```bash
 python strategy/strategy.py --days 1 --collateral HYPE --yes
 python strategy/strategy.py --days 3 --collateral HYPE --yes

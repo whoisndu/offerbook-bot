@@ -15,6 +15,7 @@ Logic that used to be copy-pasted across scripts now lives in one place and gets
 - **`size_filtered_volume_weighted_median()`** — wraps the above with the 0.5×–2× size-band preference, shared by `strategy.py`'s APY and LTV benchmarks.
 - **`round_principal_raw()`** — rounds a raw principal amount down to a round whole-dollar figure ($500 step, or $100 if under one step), used by `strategy.py` so offer sizes read like 11,500.00 rather than 11,800.35.
 - **`_mint_from_asset()`** — extracts a mint address from an OfferAsset, used anywhere offer/loan JSON needs parsing.
+- **`parse_allocation_config_symbols()`** / **`build_symbol_to_mint_from_allocation_config()`** — scrapes `# SYMBOL — Description (ltv ~x%)`-style comments out of an `allocation_config.yaml` (the YAML loader itself strips comments). `create_targeted_offers.py` uses the mint→symbol direction for display; `strategy.py`'s `resolve_collateral_token()` uses the reverse (symbol→mint) as a fallback when a `--collateral` ticker isn't in its own hardcoded `SYMBOL_TO_MINT` table — see [strategy/README.md's Targeting specific collateral](../strategy/README.md#targeting-specific-collateral).
 
 Each script that's itself imported elsewhere for these helpers (e.g. `create_targeted_offers.py` calling `defaulter_capture.resolve_signer_wallet()`) keeps a thin same-signature wrapper around the shared function, so nothing calling into it had to change.
 

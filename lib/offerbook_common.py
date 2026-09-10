@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 
@@ -305,3 +306,81 @@ def resolve_signing_mode(cli_signing_mode: str | None, current_signing_mode: str
         log.error("Invalid signing mode %r — must be 'ledger' or 'private_key'", signing_mode)
         sys.exit(1)
     return signing_mode
+
+
+# ---------------------------------------------------------------------------
+# allocation_config.yaml symbol scraping — shared by create_targeted_offers.py
+# (mint -> symbol, for display) and strategy.py (symbol -> mint, to resolve a
+# --collateral ticker that isn't in a script's own hardcoded SYMBOL_TO_MINT
+# table, without needing a code change every time a new token shows up).
+# ---------------------------------------------------------------------------
+
+_ALLOCATION_MINT_LINE_RE = re.compile(r"^\s*([1-9A-HJ-NP-Za-km-z]{32,44}):\s*[0-9.]+\s*$")
+_ALLOCATION_COMMENT_LINE_RE = re.compile(r"^\s*#\s*(.*)$")
+
+
+def _extract_symbol_from_allocation_comment(text: str) -> str | None:
+    """"SYMBOL — description (ltv ...)" -> SYMBOL. "(ltv ...) — SYMBOL" -> SYMBOL,
+    but only when that tail is a single clean token, not a sentence or
+    "unknown token". "SYMBOL (description)" -> SYMBOL when there's no dash at
+    all. Returns None if nothing resembling a clean symbol can be pulled out."""
+    if "—" in text:
+        before, _, after = text.partition("—")
+        before = before.strip()
+        if before and not before.startswith("("):
+            return before.split()[0].lstrip("$")
+        tail = after.strip()
+        if "—" in tail:
+            tail = tail.split("—", 1)[1].strip()
+        tail = re.sub(r"\(ltv[^)]*\)", "", tail).strip()
+        if tail and " " not in tail and tail.lower() not in ("unknown", "unknown token"):
+            return tail.lstrip("$")
+        return None
+    first = text.split()[0].strip("()") if text.split() else ""
+    return first.lstrip("$") if first else None
+
+
+def parse_allocation_config_symbols(path: str) -> dict[str, str]:
+    """
+    Best-effort mint -> human symbol map scraped from an allocation_config.yaml's
+    own comments (the YAML loader strips comments, so this reads the raw text
+    instead). Most entries are commented directly above as
+    "# SYMBOL — Description  (ltv ~xx%)"; a handful use
+    "# (ltv ~xx%)  — SYMBOL" when the symbol wasn't known up front. Comments
+    that carry no real symbol (blank, a divider, a section header, or
+    "unknown token") are skipped.
+    """
+    try:
+        with open(path) as fh:
+            lines = fh.readlines()
+    except (FileNotFoundError, OSError):
+        return {}
+
+    result: dict[str, str] = {}
+    last_comment: str | None = None
+    for line in lines:
+        comment_match = _ALLOCATION_COMMENT_LINE_RE.match(line)
+        if comment_match:
+            text = comment_match.group(1).strip()
+            last_comment = text if text and not text.startswith(("=", "-")) else None
+            continue
+
+        mint_match = _ALLOCATION_MINT_LINE_RE.match(line)
+        if mint_match and last_comment:
+            symbol = _extract_symbol_from_allocation_comment(last_comment)
+            if symbol:
+                result[mint_match.group(1)] = symbol
+
+        if line.strip():
+            last_comment = None  # only the comment immediately above a mint line counts
+
+    return result
+
+
+def build_symbol_to_mint_from_allocation_config(path: str) -> dict[str, str]:
+    """Reverse of parse_allocation_config_symbols(): {SYMBOL (uppercased): mint}
+    — for resolving a --collateral ticker that isn't in a script's own
+    hardcoded table. If two mints happen to scrape to the same symbol, the
+    later one in the file wins (matches dict-building order, not a documented
+    guarantee either way — ambiguous tickers should be passed as a raw mint)."""
+    return {symbol.upper(): mint for mint, symbol in parse_allocation_config_symbols(path).items()}

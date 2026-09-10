@@ -188,7 +188,7 @@ def prompt_for_collateral() -> tuple[str | None, list[str] | None]:
     if not raw:
         return None, None
     resolved = [
-        SYMBOL_TO_MINT.get(tok.strip().upper(), tok.strip())
+        resolve_collateral_token(tok)
         for tok in raw.split(",") if tok.strip()
     ]
     return raw, resolved or None
@@ -343,6 +343,41 @@ _CONFIG_PATH = os.getenv(
     os.path.join(os.path.dirname(__file__), "allocation_config.yaml"),
 )
 ALLOCATION_CONFIG: dict[str, float] = _load_allocation_config(_CONFIG_PATH)
+
+_allocation_symbol_to_mint_cache: dict[str, str] | None = None
+
+
+def resolve_collateral_token(tok: str) -> str:
+    """
+    Resolve a --collateral entry (ticker or raw mint) to a mint address:
+      1. SYMBOL_TO_MINT (this file's hardcoded table) — fastest, most common.
+      2. allocation_config.yaml's own comments, scraped for "SYMBOL — ..."
+         (shared with create_targeted_offers.py's mint->symbol direction via
+         offerbook_common.parse_allocation_config_symbols) — so a token
+         that's already in your allocation config but not yet added here
+         still resolves by name, instead of silently matching zero pairs
+         (SYMBOL_TO_MINT.get() used to fall back to the literal ticker
+         string, which can never equal a real mint).
+      3. Otherwise, assumed to already be a raw mint address, unchanged —
+         --collateral's documented format is "<SYMBOL|mint>".
+    """
+    global _allocation_symbol_to_mint_cache
+    tok = tok.strip()
+    upper = tok.upper()
+    if upper in SYMBOL_TO_MINT:
+        return SYMBOL_TO_MINT[upper]
+
+    if _allocation_symbol_to_mint_cache is None:
+        _allocation_symbol_to_mint_cache = _common.build_symbol_to_mint_from_allocation_config(_CONFIG_PATH)
+    if upper in _allocation_symbol_to_mint_cache:
+        return _allocation_symbol_to_mint_cache[upper]
+
+    log.warning(
+        "Collateral token '%s' isn't in SYMBOL_TO_MINT or named in allocation_config.yaml's "
+        "comments — treating it as a raw mint address. If that's a typo, this will silently "
+        "match zero live pairs.", tok,
+    )
+    return tok
 
 # Populated in main() from --full-alloc — collateral mints in this set get
 # 100% allocation for this run only, regardless of what allocation_config.yaml
@@ -1304,7 +1339,7 @@ def main() -> None:
         # Given on the CLI — non-interactive (cron/automation), so --full-alloc
         # is respected exactly as passed and we never prompt below.
         collateral_filters = [
-            SYMBOL_TO_MINT.get(tok.strip().upper(), tok.strip())
+            resolve_collateral_token(tok)
             for tok in args.collateral.split(",") if tok.strip()
         ]
     else:

@@ -257,6 +257,47 @@ def fetch_current_price(mint: str) -> tuple[float | None, int | None]:
     return price, KNOWN_DECIMALS.get(mint)
 
 
+def fetch_current_prices_batched(mints: list[str]) -> tuple[dict[str, float], dict[str, int]]:
+    """Same result as calling fetch_current_price() once per mint, but as one
+    batched Jupiter request (comma-separated ids) instead of N sequential
+    ones — mirrors strategy.py's fetch_current_prices(). Calling
+    fetch_current_price() in a per-asset loop (as create_targeted_offers.py
+    used to) fires one Jupiter request per asset in quick succession, which
+    reliably 429s once a run covers more than a handful of assets; batching
+    avoids that. Falls back to DexScreener per-mint only for whatever
+    Jupiter didn't return."""
+    if not mints:
+        return {}, {}
+
+    prices: dict[str, float] = {}
+    decimals: dict[str, int] = {}
+
+    try:
+        headers = {"x-api-key": JUPITER_API_KEY} if JUPITER_API_KEY else {}
+        resp = SESSION.get(JUPITER_PRICE_API, params={"ids": ",".join(mints)}, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        prices = {mint: float(info["usdPrice"]) for mint, info in data.items() if info.get("usdPrice")}
+        decimals = {mint: int(info["decimals"]) for mint, info in data.items() if info.get("decimals") is not None}
+        log.info("Jupiter prices fetched for %d/%d mint(s)", len(prices), len(mints))
+    except Exception as exc:
+        log.warning("Could not fetch batched Jupiter prices: %s", exc)
+
+    missing = [m for m in mints if m not in prices]
+    if missing:
+        log.info("Trying DexScreener for %d mint(s) not on Jupiter …", len(missing))
+        for mint in missing:
+            price = _fetch_dexscreener_price(mint)
+            if price:
+                prices[mint] = price
+                log.info("  DexScreener  %s…  $%.6g", mint[:8], price)
+            else:
+                log.warning("  No live price for %s… (Jupiter + DexScreener both failed)", mint[:8])
+            decimals.setdefault(mint, KNOWN_DECIMALS.get(mint))
+
+    return prices, decimals
+
+
 _token_age_cache: dict[str, float | None] = {}
 
 

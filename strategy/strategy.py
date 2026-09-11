@@ -246,7 +246,7 @@ ALLOW_PARTIAL_FILL = True    # let borrowers partially fill our offer
 
 MIN_FILL_USDC = 10.0         # minimum a borrower must take in a partial fill, across every offer
 
-WALLET_BUFFER_USDC = 100.0   # always leave at least this much USDC unallocated
+WALLET_BUFFER_USDC = 20.0   # always leave at least this much USDC unallocated
 
 # Below this total available balance, splitting capital by each token's
 # configured allocation fraction (e.g. 35%, 50%) produces offers too small to

@@ -5,23 +5,11 @@
     "lender": "CnnaudqeP1m8mJwFPPG6CJ8xYaPxDJbHE4byoTPgcKhe",
     "principal_usd": 306.8632164707976
   },
-  "3chfNgETuFSX9m1v2yPMyTif8T3RNUPedBN7u27hwT6o": {
-    "borrower": "3KgfCwhtV2JKhWB7XRrGg6sbXNYkn7R3icYduJWv4xr2",
-    "expiredAt": "2026-09-11T22:10:25Z",
-    "lender": "6ow3H7Fe9StJJsTutxLkeXRJjQYPBPDWy2XrYksWju9A",
-    "principal_usd": 456.98925885760355
-  },
   "4FtYEDRN7UpbnsdwfHLDwy7N1oN2jtYE26YMzwH6TZo6": {
     "borrower": "G8WRBZFfxTn7nNNB1Q6Gi3VAQzLBNyHzUytxA9cYmNCv",
     "expiredAt": "2026-08-08T12:39:49Z",
     "lender": "CnnaudqeP1m8mJwFPPG6CJ8xYaPxDJbHE4byoTPgcKhe",
     "principal_usd": 147.74253734615445
-  },
-  "4qCwTo6p84qbTVTS4NWdQxGkAuLi1sSmi2Drpwc2NdSu": {
-    "borrower": "Dxdp9DCYcykmnQL6vtB59WXiWed7Q676B3rCiVLeAAgW",
-    "expiredAt": "2026-09-12T07:03:06Z",
-    "lender": "6ow3H7Fe9StJJsTutxLkeXRJjQYPBPDWy2XrYksWju9A",
-    "principal_usd": 341.6252069165141
   },
   "4wDq4TY7szn8mddCwcMVXzhwYUtKzispdkh9keYs9Nsx": {
     "borrower": "hwpbMp6dw7C23i9HdzCC92nLKZFsBRLPErP2nbW2kan",

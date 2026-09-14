@@ -288,6 +288,78 @@ def print_summary(rows: list[dict], gaps: list[tuple[datetime, datetime, float]]
         log.info("  gap: %s -> %s  (%.1fd)", gs.date(), ge.date(), gd)
 
 
+def build_loan_detail_rows(loans: list[dict]) -> list[dict]:
+    """Per-loan lender/owed/collateral detail, one row per loan (chronological).
+    total_owed_usd = principal + the loan's full committed interest — interest
+    on this platform is NOT prorated by elapsed time, the whole term's
+    interest is due regardless of when (or whether, before default) the
+    borrower repays, same convention portfolio_health.py uses. Shown for
+    every loan in scope regardless of status, since this is a historical
+    per-loan record, not just a snapshot of what's currently outstanding."""
+    detail_rows = []
+    for l in loans:
+        meta = l.get("metadata") or {}
+        principal_amount = l.get("principalAmount") or 0
+        principal_usd = meta.get("startPrincipalAmountUsd") or 0.0
+        interest = l.get("interest") or 0
+        interest_usd = (interest / principal_amount) * principal_usd if principal_amount else 0.0
+        collateral_usd = meta.get("startCollateralAmountUsd") or 0.0
+        detail_rows.append({
+            "start": _parse_ts(l["createdAt"]),
+            "collateral_symbol": collateral_symbol_for(l),
+            "lender": l.get("lender", ""),
+            "status": l.get("_status", ""),
+            "principal_usd": principal_usd,
+            "interest_usd": interest_usd,
+            "total_owed_usd": principal_usd + interest_usd,
+            "collateral_usd": collateral_usd,
+        })
+    detail_rows.sort(key=lambda r: r["start"])
+    return detail_rows
+
+
+def print_loan_detail_table(detail_rows: list[dict]) -> None:
+    log.info("")
+    log.info("Per-loan detail — lender, amount owed, collateral posted:")
+    col = "{:<12}{:<10}{:<46}{:<11}{:>12}{:>12}{:>14}{:>16}"
+    log.info(col.format("start", "collat", "lender", "status", "principal", "interest", "total owed", "collateral $"))
+    for r in detail_rows:
+        log.info(col.format(
+            r["start"].date().isoformat(), r["collateral_symbol"], r["lender"], r["status"],
+            f"${r['principal_usd']:,.2f}", f"${r['interest_usd']:,.2f}",
+            f"${r['total_owed_usd']:,.2f}", f"${r['collateral_usd']:,.2f}",
+        ))
+    log.info(
+        "TOTAL — owed: $%.2f   collateral: $%.2f",
+        sum(r["total_owed_usd"] for r in detail_rows), sum(r["collateral_usd"] for r in detail_rows),
+    )
+
+
+def build_lender_summary(detail_rows: list[dict]) -> list[dict]:
+    """Roll the per-loan detail rows up into one row per lender — how much
+    this borrower owes/owed (across every loan, any status) and how much
+    collateral they've posted, broken down by which lender it's against.
+    Sorted by total owed descending, largest lender exposure first."""
+    by_lender: dict[str, dict] = {}
+    for r in detail_rows:
+        agg = by_lender.setdefault(r["lender"], {"lender": r["lender"], "loans": 0, "total_owed_usd": 0.0, "total_collateral_usd": 0.0})
+        agg["loans"] += 1
+        agg["total_owed_usd"] += r["total_owed_usd"]
+        agg["total_collateral_usd"] += r["collateral_usd"]
+    return sorted(by_lender.values(), key=lambda a: -a["total_owed_usd"])
+
+
+def print_lender_summary(summary_rows: list[dict]) -> None:
+    log.info("")
+    log.info("Summary by lender:")
+    col = "{:<46}{:>8}{:>16}{:>20}"
+    log.info(col.format("lender", "loans", "total owed", "total collateral $"))
+    for a in summary_rows:
+        log.info(col.format(
+            a["lender"], a["loans"], f"${a['total_owed_usd']:,.2f}", f"${a['total_collateral_usd']:,.2f}",
+        ))
+
+
 def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrower: str,
          collateral_label: str, now: datetime, output_path: str, subject_role: str | None = None) -> None:
     import matplotlib
@@ -422,6 +494,9 @@ def run_single_borrower_mode(scoped_loans: list[dict], all_collateral: bool, col
     rows = build_rows(loans, now)
     gaps, intervals = find_gaps(rows)
     print_summary(rows, gaps, intervals, now)
+    detail_rows = build_loan_detail_rows(loans)
+    print_loan_detail_table(detail_rows)
+    print_lender_summary(build_lender_summary(detail_rows))
 
     output_path = output_arg or str(DESKTOP_DIR / f"borrower_timeline_{borrower[:8]}.png")
     plot(rows, gaps, borrower, collateral_label, now, output_path)
@@ -464,6 +539,9 @@ def run_counterparty_mode(scoped_loans: list[dict], all_collateral: bool, collat
         gaps, intervals = find_gaps(rows)
         log.info("--- %s %s ---", counterparty_field, cp)
         print_summary(rows, gaps, intervals, now)
+        cp_detail_rows = build_loan_detail_rows(cp_loans)
+        print_loan_detail_table(cp_detail_rows)
+        print_lender_summary(build_lender_summary(cp_detail_rows))
 
         out_path = output_dir / f"{counterparty_field}_{cp[:8]}.png"
         plot(rows, gaps, cp, collateral_label, now, str(out_path), subject_role=counterparty_field)

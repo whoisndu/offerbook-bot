@@ -29,15 +29,16 @@ Read-only lender-side report across one or more of your own wallets:
     and, by default, directly syncs the result to your Google Calendar via
     google_calendar_client.py (its own OAuth client, independent of any
     Claude/MCP connector) — creating an "expires in 30min" popup reminder
-    for every active loan that doesn't have one yet, and deleting the
-    reminder for any previously-tracked loan that's since resolved
-    (repaid/defaulted). Requires one-time setup — see
+    for every active loan that doesn't have one yet, and marking the
+    reminder done (relabeled, popup cleared — not deleted, so there's still
+    a trail of past loans on the calendar) for any previously-tracked loan
+    that's since resolved (repaid/defaulted). Requires one-time setup — see
     google_calendar_client.py's docstring. Pass --no-calendar-sync to just
     refresh portfolio_reminder_sync_plan.json without touching Calendar
     (e.g. before you've done that setup).
 
 Never signs or submits anything on Offerbook — read-only there, no private
-key needed. (It does create/delete Google Calendar events, per the above.)
+key needed. (It does create/update Google Calendar events, per the above.)
 
 Wallets to check come from OFFERBOOK_PORTFOLIO_WALLETS in .env (comma-
 separated addresses) so the addresses themselves never appear in this
@@ -396,7 +397,8 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
 # (given the loans that are currently active vs. REMINDER_STATE_PATH, the
 # record of reminders already created) and writes that as a plan to
 # REMINDER_SYNC_PLAN_PATH. Whatever actually has Calendar access reads that
-# plan, creates/deletes the events, and is responsible for writing the
+# plan, creates new events and marks resolved loans' events done (never
+# deletes them — see mark_event_done), and is responsible for writing the
 # updated REMINDER_STATE_PATH back with the real event IDs — this script
 # only ever reads that state file, never writes it.
 
@@ -412,7 +414,7 @@ def load_reminder_state() -> dict:
         return {}
 
 
-def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: datetime) -> dict:
+def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: datetime, resolutions: dict[str, str] | None = None) -> dict:
     """
     Diff every currently-active loan (across all wallets checked this run)
     against the last-known reminder state:
@@ -420,9 +422,13 @@ def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: date
         (expiry - REMINDER_MINUTES_BEFORE) hasn't already passed — creating
         a reminder for a window that's already gone would just be a
         calendar event that never fires.
-      - "delete": previously-tracked loans no longer in the active list —
+      - "resolve": previously-tracked loans no longer in the active list —
         they must have resolved (repaid or defaulted) since the state was
-        last updated, so their reminder is now stale and should be removed.
+        last updated, so their reminder is now stale. Rather than deleting
+        it, it gets relabeled done on the calendar (see mark_event_done) so
+        there's still a visible trail of past loans instead of the event
+        just disappearing. `resolutions` (loan_id -> "repaid"/"defaulted"),
+        when given, tags each entry with how it actually resolved.
     """
     active_by_id = {r["loan_id"]: r for r in all_active_rows if r.get("loan_id")}
 
@@ -448,13 +454,17 @@ def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: date
             "expires_at_utc": r["expired_at"].isoformat(),
         })
 
-    to_delete = [
-        {"loan_id": loan_id, "event_id": entry.get("event_id"), "wallet": entry.get("wallet")}
+    resolutions = resolutions or {}
+    to_resolve = [
+        {
+            "loan_id": loan_id, "event_id": entry.get("event_id"), "wallet": entry.get("wallet"),
+            "resolution": resolutions.get(loan_id),
+        }
         for loan_id, entry in state.items()
         if loan_id not in active_by_id
     ]
 
-    return {"generated_at": now.isoformat(), "create": to_create, "delete": to_delete}
+    return {"generated_at": now.isoformat(), "create": to_create, "resolve": to_resolve}
 
 
 def write_reminder_sync_plan(plan: dict) -> None:
@@ -469,12 +479,18 @@ def save_reminder_state(state: dict) -> None:
 
 def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
     """
-    Actually creates/deletes the Google Calendar events for `plan` (see
-    build_reminder_sync_plan) via google_calendar_client, then updates and
-    persists REMINDER_STATE_PATH to match — this is the only place that
-    file gets written. Requires google_calendar_client's one-time OAuth
-    setup (see that module's docstring); the very first call may open a
-    browser window for you to grant access.
+    Actually creates new Google Calendar events and relabels resolved ones
+    for `plan` (see build_reminder_sync_plan) via google_calendar_client,
+    then updates and persists REMINDER_STATE_PATH to match — this is the
+    only place that file gets written. Requires google_calendar_client's
+    one-time OAuth setup (see that module's docstring); the very first call
+    may open a browser window for you to grant access.
+
+    Resolved loans are marked done (relabeled, reminder popup cleared) via
+    mark_event_done rather than deleted — the event stays on the calendar
+    as a trail of past loans instead of disappearing. Either way the loan
+    is dropped from `state` once handled, since it no longer needs diffing
+    against future active-loan snapshots.
     """
     try:
         import google_calendar_client as gcal
@@ -485,7 +501,7 @@ def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
         )
         return
 
-    created = deleted = errors = 0
+    created = resolved = errors = 0
     for entry in plan["create"]:
         try:
             start_dt = datetime.fromisoformat(entry["reminder_time_utc"])
@@ -499,18 +515,18 @@ def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
             log.error("Failed to create reminder for loan %s: %s", entry["loan_id"], exc)
             errors += 1
 
-    for entry in plan["delete"]:
+    for entry in plan["resolve"]:
         try:
             if entry.get("event_id"):
-                gcal.delete_event(entry["event_id"])
+                gcal.mark_event_done(entry["event_id"], entry.get("resolution"))
             state.pop(entry["loan_id"], None)
-            deleted += 1
+            resolved += 1
         except Exception as exc:
-            log.error("Failed to delete reminder for loan %s: %s", entry["loan_id"], exc)
+            log.error("Failed to mark reminder done for loan %s: %s", entry["loan_id"], exc)
             errors += 1
 
     save_reminder_state(state)
-    log.info("Calendar sync: created=%d  deleted=%d  errors=%d", created, deleted, errors)
+    log.info("Calendar sync: created=%d  marked done=%d  errors=%d", created, resolved, errors)
 
 # ---------------------------------------------------------------------------
 # Printing
@@ -757,12 +773,14 @@ def main() -> None:
         print_portfolio_summary(per_wallet)
 
     all_active_rows = [r for w in per_wallet for r in w["active_rows"]]
+    resolutions = {l["pubkey"]: "repaid" for l in repaid if l.get("pubkey")}
+    resolutions.update({l["pubkey"]: "defaulted" for l in defaulted if l.get("pubkey")})
     reminder_state = load_reminder_state()
-    reminder_plan = build_reminder_sync_plan(all_active_rows, reminder_state, now)
+    reminder_plan = build_reminder_sync_plan(all_active_rows, reminder_state, now, resolutions)
     write_reminder_sync_plan(reminder_plan)
     log.info(
-        "Reminder sync plan: %d to create, %d to delete.",
-        len(reminder_plan["create"]), len(reminder_plan["delete"]),
+        "Reminder sync plan: %d to create, %d to mark done.",
+        len(reminder_plan["create"]), len(reminder_plan["resolve"]),
     )
 
     if args.no_calendar_sync:

@@ -99,3 +99,33 @@ def delete_event(event_id: str) -> None:
     except HttpError as exc:
         if exc.resp.status not in (404, 410):
             raise
+
+
+DONE_MARKER = "✅ [DONE"  # summaries starting with this are treated as already marked done
+
+
+def mark_event_done(event_id: str, resolution: str | None = None) -> None:
+    """
+    Relabel a resolved loan's reminder event instead of deleting it, so past
+    reminders stay visible on the calendar as a trail rather than vanishing.
+    Prepends a done tag (plus the resolution — "repaid"/"defaulted" — if
+    known) to the summary, and clears the popup override so it can't still
+    fire for something that's already resolved.
+
+    No-ops (doesn't raise) if the event is already gone (404/410, e.g.
+    deleted manually) or already marked done (idempotent — safe to call more
+    than once for the same event_id).
+    """
+    try:
+        service = _calendar_service()
+        event = service.events().get(calendarId="primary", eventId=event_id).execute()
+        summary = event.get("summary", "")
+        if summary.startswith(DONE_MARKER):
+            return
+        tag = f"{DONE_MARKER} — {resolution}] " if resolution else f"{DONE_MARKER}] "
+        event["summary"] = f"{tag}{summary}"
+        event["reminders"] = {"useDefault": False, "overrides": []}
+        service.events().patch(calendarId="primary", eventId=event_id, body=event).execute()
+    except HttpError as exc:
+        if exc.resp.status not in (404, 410):
+            raise

@@ -466,6 +466,9 @@ class PairStats:
     global_lending_apys: list[int] = field(default_factory=list)        # all-duration offers (fallback)
     global_lending_offer_amounts: list[int] = field(default_factory=list)
     loan_apys: list[int] = field(default_factory=list)                  # existing loans
+    # principal_usd weight for each entry in loan_apys (same index), for
+    # volume-weighting the loan-derived APY fallback (see apy_benchmark_bps).
+    loan_apy_weights_usd: list[float] = field(default_factory=list)
     active_loan_count: int = 0
 
     # Amounts from existing offers – we'll size our offer similarly
@@ -507,18 +510,30 @@ class PairStats:
     largest_offer_ltv: float | None = None
 
     def apy_benchmark_bps(self, our_offer_usdc: float | None = None) -> tuple[float | None, bool]:
-        # Prefer same-duration offers; fall back to global cross-duration.
+        # Prefer same-duration offers; fall back to global cross-duration; if
+        # there are no live lending offers at all (either duration) but this
+        # pair has matched loans, fall back to those loans' APY — a pair
+        # nobody currently has an open offer on isn't necessarily untraded,
+        # it may just be between offers right now, and a matched loan is
+        # itself real market data (arguably stronger than an unfilled offer,
+        # since a borrower actually accepted that price). Never used for
+        # pairs with zero offers AND zero loans — those still return (None,
+        # False) below and get dropped, since there's no data of any kind.
         # Volume-weighted MEDIAN: the price level where the largest cluster
         # of real market volume actually sits, not a mean (which one large
         # outlier offer can drag far from where borrowers actually transact).
         # Also prefers offers within SIZE_BAND_MIN..SIZE_BAND_MAX x
         # our_offer_usdc, since a lender far smaller/larger than us isn't a
         # realistic comparison — falls back to the full set if none qualify.
-        apys = self.lending_apys if self.lending_apys else self.global_lending_apys
-        amounts = self.lending_offer_amounts if self.lending_apys else self.global_lending_offer_amounts
+        if self.lending_apys:
+            apys, weights = self.lending_apys, self.lending_offer_amounts
+        elif self.global_lending_apys:
+            apys, weights = self.global_lending_apys, self.global_lending_offer_amounts
+        else:
+            apys, weights = self.loan_apys, self.loan_apy_weights_usd
         if not apys:
             return None, False
-        return _common.size_filtered_volume_weighted_median(apys, amounts, our_offer_usdc)
+        return _common.size_filtered_volume_weighted_median(apys, weights, our_offer_usdc)
 
     def best_apy_bps(self, our_offer_usdc: float | None = None) -> tuple[int | None, bool]:
         """Cheapest (lowest) APY among comparable competing offers — same
@@ -547,6 +562,8 @@ class PairStats:
             return "live offers (same duration)"
         if self.global_lending_apys:
             return "live offers (global)"
+        if self.loan_apys:
+            return "matched loans (no live offers)"
         return "none"
 
     def target_apy_bps(self, our_offer_usdc: float | None = None) -> int | None:
@@ -1024,6 +1041,7 @@ def build_pair_stats(
             continue
         if loan.apy > 0:
             ps.loan_apys.append(loan.apy)
+            ps.loan_apy_weights_usd.append(loan.principal_usd or 0)
         if loan.principal_amount > 0:
             ps.loan_principal_amounts.append(loan.principal_amount)
         if loan.collateral_amount > 0:
@@ -1438,13 +1456,17 @@ def main() -> None:
         pair_stats = build_pair_stats(lending_offers, active_loans, MAX_DURATION_SECS, exclude_wallet=WALLET_PUBKEY)
         log.info("Unique (principal, collateral) pairs found: %d", len(pair_stats))
 
-        # 4. Only include pairs that have at least one live lending offer to benchmark APY against
+        # 4. Only include pairs with an APY benchmark to work from: a live
+        # lending offer (same-duration or global), or — if there's no open
+        # offer at all right now — at least one matched loan (see
+        # apy_benchmark_bps's fallback order). A pair with neither has no
+        # market data of any kind and is rightly dropped.
         relevant_pairs = {
             pair: ps
             for pair, ps in pair_stats.items()
-            if ps.lending_apys or ps.global_lending_apys
+            if ps.lending_apys or ps.global_lending_apys or ps.loan_apys
         }
-        log.info("Pairs with live offers (APY benchmark available): %d", len(relevant_pairs))
+        log.info("Pairs with an APY benchmark (live offers or matched loans): %d", len(relevant_pairs))
 
         if collateral_filters:
             relevant_pairs = {

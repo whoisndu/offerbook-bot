@@ -3,10 +3,15 @@
     "4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ": "2x968Yur17ogaCB4fAuWviDkzATzJeK5k9hkDPFgUWbJRar5enb56xGMB5DLUUXRSaqhTG6TfQK5asDafP8i12ir",
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "4E1Bca5sMDXYFRsjadWhboyXZkhSv23QgU6zJJ7nkB1gG3rS6B3EMRtJyUPmHzR4SSu2hs8NVBX3REgvgd9BscAW"
   },
+  "telegram_offset": 19126157,
   "watchlist": {
     "4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ": {
       "added_at": "2026-07-31T13:04:00.590587+00:00",
       "label": "targeted borrower"
+    },
+    "Gk4T2iCaJ7JuKzsgnwuBZnBRcpdgHQRizX6zf2gM7eC5": {
+      "added_at": "2026-09-14T12:13:05.339933+00:00",
+      "label": null
     }
   }
 }

@@ -1,33 +1,9 @@
 {
-  "2h2zBmzt7S4jULvjwjmST1igJGzGxioNWNcK5Bc3m3zN": {
-    "borrower": "G8WRBZFfxTn7nNNB1Q6Gi3VAQzLBNyHzUytxA9cYmNCv",
-    "expiredAt": "2026-08-07T15:37:42Z",
-    "lender": "CnnaudqeP1m8mJwFPPG6CJ8xYaPxDJbHE4byoTPgcKhe",
-    "principal_usd": 306.8632164707976
-  },
-  "4FtYEDRN7UpbnsdwfHLDwy7N1oN2jtYE26YMzwH6TZo6": {
-    "borrower": "G8WRBZFfxTn7nNNB1Q6Gi3VAQzLBNyHzUytxA9cYmNCv",
-    "expiredAt": "2026-08-08T12:39:49Z",
-    "lender": "CnnaudqeP1m8mJwFPPG6CJ8xYaPxDJbHE4byoTPgcKhe",
-    "principal_usd": 147.74253734615445
-  },
   "4wDq4TY7szn8mddCwcMVXzhwYUtKzispdkh9keYs9Nsx": {
     "borrower": "hwpbMp6dw7C23i9HdzCC92nLKZFsBRLPErP2nbW2kan",
     "expiredAt": "2026-09-10T22:04:56Z",
     "lender": "13UHfjKr6rpKwRXQ1KGAMcwjtY7eYBA2B5m9RBgxrFBz",
     "principal_usd": 774.5999478751688
-  },
-  "66973WtBevreMLJcv5jBYFLfrYMHFcixEA8wxhXiH14U": {
-    "borrower": "4Uko3g7TosntZqAWvCyzW7dFtgX3agVTDefHpnMe7Fr3",
-    "expiredAt": "2026-09-14T05:04:59Z",
-    "lender": "6r6Pcw9vg2ZAx6XwtFh1mMByE1De7mRQrMgt851A1yMd",
-    "principal_usd": 720.8563662404914
-  },
-  "7t8bDNFFZfqxsMAefGZaZkKUAUmUyFpVcBzouePzx1V2": {
-    "borrower": "4Uko3g7TosntZqAWvCyzW7dFtgX3agVTDefHpnMe7Fr3",
-    "expiredAt": "2026-09-14T05:05:31Z",
-    "lender": "6r6Pcw9vg2ZAx6XwtFh1mMByE1De7mRQrMgt851A1yMd",
-    "principal_usd": 66.72868454676205
   },
   "AAdgyUYsmwwWrZtsxfmq4pUxFMbUJKN7om6pHvsgwQnn": {
     "borrower": "5P467oz5SLokknTxXPxazCNi65MpkQpqYkaSHYmKBYVm",
@@ -35,10 +11,22 @@
     "lender": "CxzmfgADE45SktN2uCwDjB2PSNg7qgTQm4GM1xtYK4er",
     "principal_usd": 9.99917340518372
   },
+  "CMPwEaDMJzfiZe4xNkG5VRVNLBDL3gquZnjtbn9bZJv2": {
+    "borrower": "hwpbMp6dw7C23i9HdzCC92nLKZFsBRLPErP2nbW2kan",
+    "expiredAt": "2026-09-15T11:50:20Z",
+    "lender": "FALGkHvCdXNTxNEy8XeJtnMKueRpDR7YxMNeXcUHb3ZH",
+    "principal_usd": 49.99500542464156
+  },
   "Fn8jtudqF8HP6secsSBT1YmfN6dtP7jwa1JP2vFPLUyh": {
     "borrower": "hwpbMp6dw7C23i9HdzCC92nLKZFsBRLPErP2nbW2kan",
     "expiredAt": "2026-09-10T22:08:49Z",
     "lender": "13UHfjKr6rpKwRXQ1KGAMcwjtY7eYBA2B5m9RBgxrFBz",
     "principal_usd": 43.99905759945249
+  },
+  "J2XNioCjjMJVKkpQkUP65eanQ62RshiAPp49Qdcbvy6p": {
+    "borrower": "hwpbMp6dw7C23i9HdzCC92nLKZFsBRLPErP2nbW2kan",
+    "expiredAt": "2026-09-15T11:50:33Z",
+    "lender": "FALGkHvCdXNTxNEy8XeJtnMKueRpDR7YxMNeXcUHb3ZH",
+    "principal_usd": 66.65375952123995
   }
 }

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -54,9 +55,21 @@ def _get_credentials() -> Credentials:
         creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
 
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except RefreshError:
+                # The refresh token itself is dead (revoked, or — most likely —
+                # Google's hard 7-day refresh-token expiry for OAuth consent
+                # screens still in "Testing" publishing status). Falling
+                # through to a fresh interactive flow below instead of raising
+                # means this self-heals (via a new browser prompt) rather than
+                # failing every single Calendar call until someone notices and
+                # manually deletes the token file.
+                pass
+        if not refreshed:
             if not os.path.exists(CREDENTIALS_PATH):
                 raise RuntimeError(
                     f"No Google OAuth client credentials found at {CREDENTIALS_PATH}. "

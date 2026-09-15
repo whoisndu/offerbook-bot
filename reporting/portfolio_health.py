@@ -17,9 +17,9 @@ Read-only lender-side report across one or more of your own wallets:
     alongside the existing all-time total.
   - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
   - Capital freeing up: principal (USD) of active loans due within the next
-    24h / 48h — an optimistic estimate (assumes on-schedule repayment, not
-    default) of how much capital should become available to redeploy, for
-    planning ahead on new lending.
+    24h / 48h / 72h — an optimistic estimate (assumes on-schedule repayment,
+    not default) of how much capital should become available to redeploy,
+    for planning ahead on new lending.
   - Volume: total USD principal (at origination) of every loan lent,
     counted the moment it's created regardless of current status —
     VOLUME_WINDOW_DAYS (7) trailing-day rolling total and all-time, per
@@ -590,8 +590,12 @@ def print_wallet_report(
     total_underwater_loss_usd = sum(r["underwater_loss_usd"] or 0 for r in active_rows)
     freeing_24h_usd = compute_capital_freeing_up(active_rows, 24)
     freeing_48h_usd = compute_capital_freeing_up(active_rows, 48)
+    freeing_72h_usd = compute_capital_freeing_up(active_rows, 72)
     log.info("Active loans: %d   Outstanding principal: $%.2f", len(active_rows), total_active_principal)
-    log.info("Capital freeing up — next 24h: $%.2f   next 48h: $%.2f", freeing_24h_usd, freeing_48h_usd)
+    log.info(
+        "Capital freeing up — next 24h: $%.2f   next 48h: $%.2f   next 72h: $%.2f",
+        freeing_24h_usd, freeing_48h_usd, freeing_72h_usd,
+    )
     log.info("Unrealized profit (interest owed on active loans, net of repay fee, not yet collected): $%.2f", total_unrealized_usd)
     log.info(
         "Unrealized profit net of current underwater losses (-$%.2f): $%.2f",
@@ -658,6 +662,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_underwater_loss = sum(sum(r["underwater_loss_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
     total_freeing_24h = sum(compute_capital_freeing_up(w["active_rows"], 24) for w in per_wallet)
     total_freeing_48h = sum(compute_capital_freeing_up(w["active_rows"], 48) for w in per_wallet)
+    total_freeing_72h = sum(compute_capital_freeing_up(w["active_rows"], 72) for w in per_wallet)
     total_at_risk = sum(
         len([r for r in w["active_rows"] if r["live_ltv"] is not None and r["live_ltv"] >= w["risk_ltv"]])
         for w in per_wallet
@@ -679,7 +684,10 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
         VOLUME_WINDOW_DAYS, total_volume_week, total_volume_all_time,
     )
     log.info("Total active loans: %d   Outstanding principal: $%.2f   At-risk: %d", total_active, total_outstanding, total_at_risk)
-    log.info("Total capital freeing up — next 24h: $%.2f   next 48h: $%.2f", total_freeing_24h, total_freeing_48h)
+    log.info(
+        "Total capital freeing up — next 24h: $%.2f   next 48h: $%.2f   next 72h: $%.2f",
+        total_freeing_24h, total_freeing_48h, total_freeing_72h,
+    )
     log.info("Total unrealized profit (interest owed on active loans, net of repay fee): $%.2f", total_unrealized)
     log.info(
         "Total unrealized profit net of current underwater losses (-$%.2f): $%.2f",

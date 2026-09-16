@@ -27,9 +27,18 @@ Counterparty mode (--address): instead of one borrower, give an address and
 whether it's a lender or a borrower (--role, or you'll be prompted after
 entering the address). Every OTHER party it currently shares an active loan
 with is treated as a counterparty (active loans only, since those are the
-relationships that are live right now) — then each counterparty's full loan
-timeline (every loan they've ever been party to on the other side, any
-status, scoped to --collateral) is charted to its own PNG.
+relationships that are live right now).
+
+Each counterparty gets its own full loan timeline charted to a PNG (every
+loan they've ever been party to on the other side, any status, scoped to
+--collateral) — same for both roles. --role lender additionally prints one
+extra aggregate section at the end: a combined per-loan table plus a
+summary-by-borrower table (total owed, total collateral posted, loan count)
+across every borrower currently owing this lender — scoped to just the
+loans between them and this lender (not those borrowers' history with other
+lenders), AND to currently OPEN (active) loans only, not past repaid/
+defaulted ones — a quick "who currently owes me what" answer without
+reading through every individual chart/table above it.
 
 Usage:
   python borrower_loan_timeline.py                      # prompts for borrower, then collateral
@@ -37,7 +46,7 @@ Usage:
   python borrower_loan_timeline.py --borrower 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --collateral USELESS
   python borrower_loan_timeline.py --collateral USELESS                      # auto-picks that token's largest borrower
   python borrower_loan_timeline.py --collateral USELESS --output /some/other/path.png
-  python borrower_loan_timeline.py --address 8pXq...9nZ --role lender        # one PNG per borrower they're actively lending to
+  python borrower_loan_timeline.py --address 8pXq...9nZ --role lender        # one PNG per borrower, plus an aggregate summary
   python borrower_loan_timeline.py --address 4nFM...DMrZ --role borrower     # one PNG per lender they're actively borrowing from
 
 Charts always save to ~/Desktop/borrower_timeline_<borrower8>.png by default
@@ -308,6 +317,7 @@ def build_loan_detail_rows(loans: list[dict]) -> list[dict]:
             "start": _parse_ts(l["createdAt"]),
             "collateral_symbol": collateral_symbol_for(l),
             "lender": l.get("lender", ""),
+            "borrower": l.get("borrower", ""),
             "status": l.get("_status", ""),
             "principal_usd": principal_usd,
             "interest_usd": interest_usd,
@@ -358,6 +368,36 @@ def print_lender_summary(summary_rows: list[dict]) -> None:
         log.info(col.format(
             a["lender"], a["loans"], f"${a['total_owed_usd']:,.2f}", f"${a['total_collateral_usd']:,.2f}",
         ))
+
+
+def build_borrower_summary(detail_rows: list[dict]) -> list[dict]:
+    """Mirror of build_lender_summary, grouped by borrower instead — how much
+    each borrower owes/owed a given lender (across every loan between just
+    that pair, any status) and how much collateral they've posted. Sorted by
+    total owed descending, largest borrower exposure first."""
+    by_borrower: dict[str, dict] = {}
+    for r in detail_rows:
+        agg = by_borrower.setdefault(r["borrower"], {"borrower": r["borrower"], "loans": 0, "total_owed_usd": 0.0, "total_collateral_usd": 0.0})
+        agg["loans"] += 1
+        agg["total_owed_usd"] += r["total_owed_usd"]
+        agg["total_collateral_usd"] += r["collateral_usd"]
+    return sorted(by_borrower.values(), key=lambda a: -a["total_owed_usd"])
+
+
+def print_borrower_summary(summary_rows: list[dict]) -> None:
+    log.info("")
+    log.info("Summary by borrower:")
+    col = "{:<46}{:>8}{:>16}{:>20}"
+    log.info(col.format("borrower", "loans", "total owed", "total collateral $"))
+    for a in summary_rows:
+        log.info(col.format(
+            a["borrower"], a["loans"], f"${a['total_owed_usd']:,.2f}", f"${a['total_collateral_usd']:,.2f}",
+        ))
+    log.info(
+        "TOTAL — owed: $%.2f   collateral: $%.2f   across %d borrower(s)",
+        sum(a["total_owed_usd"] for a in summary_rows), sum(a["total_collateral_usd"] for a in summary_rows),
+        len(summary_rows),
+    )
 
 
 def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrower: str,
@@ -506,9 +546,18 @@ def run_counterparty_mode(scoped_loans: list[dict], all_collateral: bool, collat
                            address: str, role: str, output_dir_arg: str | None) -> None:
     """Find every OTHER party `address` currently shares an active loan with
     (its counterparties), then chart each counterparty's full loan timeline
-    (every loan they've ever been on the other side of, any status) to its
-    own PNG. Counterparties are derived from active loans only — those are
-    the relationships that are actually live right now."""
+    (every loan they've ever been party to on the other side, any status,
+    scoped to --collateral) to its own PNG — same for both roles.
+    Counterparties are derived from active loans only — those are the
+    relationships that are actually live right now.
+
+    role == "lender" additionally prints one extra aggregate section at the
+    end: every currently OPEN (active) loan between `address` and each
+    borrower currently owing it (not those borrowers' history with OTHER
+    lenders, and not their past repaid/defaulted loans — this is "who
+    currently owes me," not a lifetime total), rolled up into one combined
+    per-loan table plus a summary-by-borrower table — for a quick answer
+    without reading through every individual chart/table above it."""
     own_field, counterparty_field = ("lender", "borrower") if role == "lender" else ("borrower", "lender")
 
     active_for_address = [l for l in scoped_loans if l.get("_status") == "active" and l.get(own_field) == address]
@@ -547,6 +596,21 @@ def run_counterparty_mode(scoped_loans: list[dict], all_collateral: bool, collat
         plot(rows, gaps, cp, collateral_label, now, str(out_path), subject_role=counterparty_field)
 
     log.info("Saved %d chart(s) to %s", len(counterparties), output_dir)
+
+    if role == "lender":
+        counterparty_set = set(counterparties)
+        relationship_loans = [
+            l for l in scoped_loans
+            if l.get("lender") == address and l.get("borrower") in counterparty_set
+            and l.get("_status") == "active"
+        ]
+        log.info("")
+        log.info("=" * 100)
+        log.info("AGGREGATE — currently OPEN loans between %s and each borrower above (scoped to this lender only):", address)
+        log.info("=" * 100)
+        detail_rows = build_loan_detail_rows(relationship_loans)
+        print_loan_detail_table(detail_rows)
+        print_borrower_summary(build_borrower_summary(detail_rows))
 
 
 def main() -> None:

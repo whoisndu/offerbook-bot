@@ -302,9 +302,11 @@ def build_loan_detail_rows(loans: list[dict]) -> list[dict]:
     total_owed_usd = principal + the loan's full committed interest — interest
     on this platform is NOT prorated by elapsed time, the whole term's
     interest is due regardless of when (or whether, before default) the
-    borrower repays, same convention portfolio_health.py uses. Shown for
-    every loan in scope regardless of status, since this is a historical
-    per-loan record, not just a snapshot of what's currently outstanding."""
+    borrower repays, same convention portfolio_health.py uses. Callers pass
+    in whatever status scope they want reflected in the table/summary — in
+    practice always pre-filtered to currently OPEN (active) loans, since
+    "what do they currently owe" is what these console tables answer (the
+    Gantt chart covers full history separately)."""
     detail_rows = []
     for l in loans:
         meta = l.get("metadata") or {}
@@ -330,7 +332,7 @@ def build_loan_detail_rows(loans: list[dict]) -> list[dict]:
 
 def print_loan_detail_table(detail_rows: list[dict]) -> None:
     log.info("")
-    log.info("Per-loan detail — lender, amount owed, collateral posted:")
+    log.info("Per-loan detail (currently OPEN loans only) — lender, amount owed, collateral posted:")
     col = "{:<12}{:<10}{:<46}{:<11}{:>12}{:>12}{:>14}{:>16}"
     log.info(col.format("start", "collat", "lender", "status", "principal", "interest", "total owed", "collateral $"))
     for r in detail_rows:
@@ -534,7 +536,11 @@ def run_single_borrower_mode(scoped_loans: list[dict], all_collateral: bool, col
     rows = build_rows(loans, now)
     gaps, intervals = find_gaps(rows)
     print_summary(rows, gaps, intervals, now)
-    detail_rows = build_loan_detail_rows(loans)
+    # Detail/summary tables are scoped to currently OPEN loans only — "what
+    # do they currently owe," not a lifetime history (the chart above still
+    # covers every status, since that's the point of a timeline).
+    active_loans = [l for l in loans if l.get("_status") == "active"]
+    detail_rows = build_loan_detail_rows(active_loans)
     print_loan_detail_table(detail_rows)
     print_lender_summary(build_lender_summary(detail_rows))
 
@@ -588,7 +594,8 @@ def run_counterparty_mode(scoped_loans: list[dict], all_collateral: bool, collat
         gaps, intervals = find_gaps(rows)
         log.info("--- %s %s ---", counterparty_field, cp)
         print_summary(rows, gaps, intervals, now)
-        cp_detail_rows = build_loan_detail_rows(cp_loans)
+        cp_active_loans = [l for l in cp_loans if l.get("_status") == "active"]
+        cp_detail_rows = build_loan_detail_rows(cp_active_loans)
         print_loan_detail_table(cp_detail_rows)
         print_lender_summary(build_lender_summary(cp_detail_rows))
 

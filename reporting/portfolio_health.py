@@ -15,6 +15,10 @@ Read-only lender-side report across one or more of your own wallets:
     14d) using each resolved loan's updatedAt as a proxy for when it was
     repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
     alongside the existing all-time total.
+  - Portfolio size: open principal (live value) + accrued interest owed on
+    active loans - current underwater losses. A single mark-to-market figure
+    for how much value the active book represents right now, not just the
+    raw principal outstanding.
   - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
   - Capital freeing up: principal (USD) of active loans due within the next
     24h / 48h / 72h — an optimistic estimate (assumes on-schedule repayment,
@@ -601,6 +605,10 @@ def print_wallet_report(
         "Unrealized profit net of current underwater losses (-$%.2f): $%.2f",
         total_underwater_loss_usd, total_unrealized_usd - total_underwater_loss_usd,
     )
+    log.info(
+        "Portfolio size (open principal + accrued interest - underwater losses): $%.2f",
+        total_active_principal + total_unrealized_usd - total_underwater_loss_usd,
+    )
 
     at_risk = [r for r in active_rows if r["live_ltv"] is not None and r["live_ltv"] >= risk_ltv]
     expiring = [r for r in active_rows if r["hrs_left"] is not None and r["hrs_left"] <= expiry_hours]
@@ -692,6 +700,10 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info(
         "Total unrealized profit net of current underwater losses (-$%.2f): $%.2f",
         total_underwater_loss, total_unrealized - total_underwater_loss,
+    )
+    log.info(
+        "TOTAL PORTFOLIO SIZE (open principal + accrued interest - underwater losses): $%.2f",
+        total_outstanding + total_unrealized - total_underwater_loss,
     )
     log.info(
         "All-time: repaid=%d  defaulted=%d  default rate=%s",

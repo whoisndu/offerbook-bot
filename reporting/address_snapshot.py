@@ -12,16 +12,18 @@ reported separately — handy when the same person/desk controls more than
 one wallet and you want their combined exposure, not N separate numbers to
 add up yourself.
 
-  --role borrower (default): the given addresses are borrowers. Shows every
-    loan they owe, grouped by LENDER — "who do they owe, and how much".
+  --role borrower: the given addresses are borrowers. Shows every loan they
+    owe, grouped by LENDER — "who do they owe, and how much".
   --role lender: the given addresses are lenders. Shows every loan owed to
     them, grouped by BORROWER — "who owes them, and how much".
+  Omit --role to be prompted (no silent default — mixing this up gets you a
+  meaningless zero-loans result instead of an answer).
 
 Usage:
-  python address_snapshot.py --addresses 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ,Gk4T2iCaJ7JuKzsgnwuBZnBRcpdgHQRizX6zf2gM7eC5
-  python address_snapshot.py --addresses 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --status all
+  python address_snapshot.py --addresses 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ,Gk4T2iCaJ7JuKzsgnwuBZnBRcpdgHQRizX6zf2gM7eC5 --role borrower
+  python address_snapshot.py --addresses 4nFMipa1LwA6QQiVk29YqZeCvHixbWMMjcBR1h7jDMrZ --role borrower --status all
   python address_snapshot.py --addresses 8pXq...9nZ --role lender
-  python address_snapshot.py                                                          # prompts for addresses
+  python address_snapshot.py                                                          # prompts for addresses, then role
 
 Notes:
   - Defaults to currently ACTIVE loans only ("how much do they currently
@@ -212,12 +214,19 @@ def prompt_for_addresses() -> list[str]:
     return [a.strip() for a in raw.split(",") if a.strip()]
 
 
+def prompt_for_role() -> str:
+    raw = input("Are these address(es) a borrower or a lender? [borrower/lender]: ").strip().lower()
+    while raw not in ("borrower", "lender"):
+        raw = input("Please enter 'borrower' or 'lender': ").strip().lower()
+    return raw
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--addresses", default=None, help="Comma-separated address(es) to snapshot. Omit to be prompted.")
-    parser.add_argument("--role", default="borrower", choices=["borrower", "lender"],
-                         help='Whether the given addresses are "borrower" (default — shows who they owe, '
-                              'grouped by lender) or "lender" (shows who owes them, grouped by borrower).')
+    parser.add_argument("--role", default=None, choices=["borrower", "lender"],
+                         help='Whether the given addresses are "borrower" (shows who they owe, grouped by '
+                              'lender) or "lender" (shows who owes them, grouped by borrower). Omit to be prompted.')
     parser.add_argument("--status", default="active", choices=["active", "repaid", "defaulted", "all"],
                          help='Loan status to include (default "active" — currently outstanding only).')
     args = parser.parse_args()
@@ -232,21 +241,22 @@ def main() -> None:
         sys.exit(1)
     address_set = set(addresses)
 
-    own_field = "borrower" if args.role == "borrower" else "lender"
-    group_key = "lender" if args.role == "borrower" else "borrower"
+    role = args.role if "--role" in sys.argv else prompt_for_role()
+    own_field = "borrower" if role == "borrower" else "lender"
+    group_key = "lender" if role == "borrower" else "borrower"
 
     statuses = ["active", "repaid", "defaulted"] if args.status == "all" else [args.status]
     log.info("Fetching loans (%s) platform-wide…", ", ".join(statuses))
     loans = fetch_loans(statuses)
     relevant = [l for l in loans if l.get(own_field) in address_set]
     if not relevant:
-        log.error("No %s loans found for %s (%s).", args.status, args.role, ", ".join(addresses))
+        log.error("No %s loans found for %s (%s).", args.status, role, ", ".join(addresses))
         sys.exit(1)
 
     resolve_collateral_symbols(relevant)
     log.info(
         "Snapshot — %d address(es) as %s, %d %s loan(s): %s",
-        len(addresses), args.role, len(relevant), args.status, ", ".join(addresses),
+        len(addresses), role, len(relevant), args.status, ", ".join(addresses),
     )
 
     rows = build_detail_rows(relevant)

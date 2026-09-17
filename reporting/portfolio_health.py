@@ -16,9 +16,11 @@ Read-only lender-side report across one or more of your own wallets:
     repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
     alongside the existing all-time total.
   - Portfolio size: open principal (live value) + accrued interest owed on
-    active loans - current underwater losses. A single mark-to-market figure
-    for how much value the active book represents right now, not just the
-    raw principal outstanding.
+    active loans - current underwater losses + idle balance (USDC and SOL,
+    wallet + escrow, SOL valued at its current price). A single
+    mark-to-market figure for total value under your control right now —
+    capital actively lent out plus capital just sitting idle — not just the
+    raw active-loan principal.
   - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
   - Capital freeing up: principal (USD) of active loans due within the next
     24h / 48h / 72h — an optimistic estimate (assumes on-schedule repayment,
@@ -570,7 +572,8 @@ def compute_capital_freeing_up(active_rows: list[dict], window_hours: float) -> 
 
 
 def print_wallet_report(
-    wallet: str, sol_balance: int, usdc_wallet: int, usdc_escrow: int,
+    wallet: str, sol_balance: int, sol_escrow: int, usdc_wallet: int, usdc_escrow: int,
+    idle_balance_usd: float,
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
     volume_week_usd: float, volume_all_time_usd: float,
     pnl_24h: dict, pnl_7d: dict, pnl_14d: dict,
@@ -580,10 +583,14 @@ def print_wallet_report(
     log.info("WALLET: %s", wallet)
     log.info("=" * 100)
     log.info(
-        "Balances — SOL: %.4f   USDC wallet: %.2f   USDC escrow: %.2f   USDC total: %.2f",
-        sol_balance / 10 ** SOL_DECIMALS, usdc_wallet / 10 ** USDC_DECIMALS,
+        "Balances — SOL wallet: %.4f   SOL escrow: %.4f   SOL total: %.4f   "
+        "USDC wallet: %.2f   USDC escrow: %.2f   USDC total: %.2f",
+        sol_balance / 10 ** SOL_DECIMALS, sol_escrow / 10 ** SOL_DECIMALS,
+        (sol_balance + sol_escrow) / 10 ** SOL_DECIMALS,
+        usdc_wallet / 10 ** USDC_DECIMALS,
         usdc_escrow / 10 ** USDC_DECIMALS, (usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS,
     )
+    log.info("Idle balance (USDC + SOL, wallet + escrow, at current SOL price): $%.2f", idle_balance_usd)
     log.info(
         "Volume — last %d days: $%.2f   all-time: $%.2f",
         VOLUME_WINDOW_DAYS, volume_week_usd, volume_all_time_usd,
@@ -606,8 +613,8 @@ def print_wallet_report(
         total_underwater_loss_usd, total_unrealized_usd - total_underwater_loss_usd,
     )
     log.info(
-        "Portfolio size (open principal + accrued interest - underwater losses): $%.2f",
-        total_active_principal + total_unrealized_usd - total_underwater_loss_usd,
+        "Portfolio size (open principal + accrued interest - underwater losses + idle balance): $%.2f",
+        total_active_principal + total_unrealized_usd - total_underwater_loss_usd + idle_balance_usd,
     )
 
     at_risk = [r for r in active_rows if r["live_ltv"] is not None and r["live_ltv"] >= risk_ltv]
@@ -664,6 +671,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info("PORTFOLIO SUMMARY (%d wallet(s))", len(per_wallet))
     log.info("=" * 100)
     total_usdc = sum(w["usdc_wallet"] + w["usdc_escrow"] for w in per_wallet)
+    total_idle_balance = sum(w["idle_balance_usd"] for w in per_wallet)
     total_active = sum(len(w["active_rows"]) for w in per_wallet)
     total_outstanding = sum(sum(r["principal_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
     total_unrealized = sum(sum(r["accrued_interest_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
@@ -687,6 +695,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_pnl_14d = sum(w["pnl_14d"]["net_pnl_usd"] for w in per_wallet)
 
     log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
+    log.info("Total idle balance (USDC + SOL, wallet + escrow, at current SOL price): $%.2f", total_idle_balance)
     log.info(
         "Total volume — last %d days: $%.2f   all-time: $%.2f",
         VOLUME_WINDOW_DAYS, total_volume_week, total_volume_all_time,
@@ -702,8 +711,8 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
         total_underwater_loss, total_unrealized - total_underwater_loss,
     )
     log.info(
-        "TOTAL PORTFOLIO SIZE (open principal + accrued interest - underwater losses): $%.2f",
-        total_outstanding + total_unrealized - total_underwater_loss,
+        "TOTAL PORTFOLIO SIZE (open principal + accrued interest - underwater losses + idle balance): $%.2f",
+        total_outstanding + total_unrealized - total_underwater_loss + total_idle_balance,
     )
     log.info(
         "All-time: repaid=%d  defaulted=%d  default rate=%s",
@@ -757,7 +766,13 @@ def main() -> None:
         l.get("collateralMint") or _mint_from_asset(l.get("collateral", {})) for l in my_active
     }
     collateral_mints.discard(None)
-    prices, decimals = fetch_current_prices(list(collateral_mints))
+    # SOL_MINT is fetched alongside collateral mints (one batch call) so idle
+    # SOL balances (wallet + escrow) can be valued in USD for the idle-balance
+    # / portfolio-size figures below — not because SOL is ever a collateral mint itself.
+    prices, decimals = fetch_current_prices(list(collateral_mints | {SOL_MINT}))
+    sol_price = prices.get(SOL_MINT)
+    if sol_price is None:
+        log.warning("No live SOL price — idle SOL balances will be valued at $0 in the idle-balance/portfolio-size figures.")
 
     now = datetime.now(timezone.utc)
     all_loans = active + defaulted + repaid
@@ -766,8 +781,12 @@ def main() -> None:
     per_wallet = []
     for wallet in wallets:
         sol_balance = fetch_wallet_sol_balance(wallet)
+        sol_escrow = fetch_escrow_balance(wallet, SOL_MINT)
         usdc_wallet = fetch_wallet_token_balance(wallet, USDC_MINT)
         usdc_escrow = fetch_escrow_balance(wallet, USDC_MINT)
+        idle_sol_usd = (sol_balance + sol_escrow) / 10 ** SOL_DECIMALS * (sol_price or 0.0)
+        idle_usdc_usd = (usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS
+        idle_balance_usd = idle_sol_usd + idle_usdc_usd
         active_rows = build_active_loan_rows(active, wallet, prices, decimals, now)
         pnl = compute_realized_pnl(repaid, defaulted, wallet)
         pnl_24h = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(hours=24))
@@ -777,13 +796,14 @@ def main() -> None:
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
 
         print_wallet_report(
-            wallet, sol_balance, usdc_wallet, usdc_escrow, active_rows, pnl,
+            wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, idle_balance_usd, active_rows, pnl,
             args.risk_ltv, args.underwater_ltv, args.expiry_hours,
             volume_week_usd, volume_all_time_usd,
             pnl_24h, pnl_7d, pnl_14d,
         )
         per_wallet.append({
             "wallet": wallet, "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
+            "idle_balance_usd": idle_balance_usd,
             "active_rows": active_rows, "pnl": pnl, "risk_ltv": args.risk_ltv,
             "volume_week_usd": volume_week_usd, "volume_all_time_usd": volume_all_time_usd,
             "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d,

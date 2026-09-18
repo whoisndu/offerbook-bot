@@ -67,6 +67,13 @@ Notes:
     expiry), "on-time" (repaid at or before expiry, but less than
     EARLY_REPAY_HOURS ahead of it), and "late" (repaid after expiry) — each
     its own bar color.
+  - Defaulted loans are split into "underwater" (the seized collateral's
+    value at default time was less than the debt owed — a rational default,
+    repaying would have cost the borrower more than walking away) and
+    "collateral covered debt" (collateral was still worth at least the debt
+    — an irrational default; the lender still comes out ahead, but it's
+    worth telling apart from the "priced out by the market" case) — each
+    its own bar color, and counted separately in the console summary.
 """
 from __future__ import annotations
 
@@ -117,7 +124,15 @@ SESSION = requests.Session()
 COLOR_EARLY = "#06b6d4"
 COLOR_ON_TIME = "#22c55e"
 COLOR_LATE = "#f97316"
-COLOR_DEFAULTED = "#ef4444"
+# Defaults are split into two colors by whether the collateral seized was
+# actually worth less than the debt at default time ("underwater" — a
+# rational default: repaying would have cost more than what they lose) vs.
+# collateral that still covered the debt ("covered" — an irrational default;
+# the lender still comes out fine, but it signals a borrower who walked away
+# despite being able to cover it, worth flagging separately from ordinary
+# underwater defaults).
+COLOR_DEFAULTED_UNDERWATER = "#ef4444"
+COLOR_DEFAULTED_COVERED = "#7c3aed"
 COLOR_ACTIVE = "#3b82f6"
 
 MIN_GAP_DAYS_TO_LABEL = 0.05  # ignore sub-hour rounding noise between adjacent loans
@@ -206,6 +221,38 @@ def find_largest_borrower(loans: list[dict]) -> str:
     return max(totals.items(), key=lambda kv: kv[1])[0]
 
 
+def _defaulted_color_label(l: dict) -> tuple[str, str]:
+    """Classify a defaulted loan by whether the seized collateral's value AT
+    DEFAULT TIME actually covered the debt (principal + the loan's full
+    committed interest, same "total owed" convention used elsewhere in this
+    file) or not:
+      - collateral < total owed  -> "underwater" — a rational default: the
+        borrower loses less by walking away than they would repaying.
+      - collateral >= total owed -> "collateral covered debt" — an
+        irrational default from the borrower's side (the lender still nets a
+        profit from the seized collateral, but the borrower gave up more
+        value than they owed) — worth flagging separately since it doesn't
+        fit the "priced out by the market" explanation the first case does.
+    Falls back to startCollateralAmountUsd if endCollateralAmountUsd (the
+    value at resolution) isn't present, same fallback compute_realized_pnl()
+    in portfolio_health.py uses.
+    """
+    meta = l.get("metadata") or {}
+    principal_amount = l.get("principalAmount") or 0
+    principal_usd = meta.get("startPrincipalAmountUsd") or 0.0
+    interest = l.get("interest") or 0
+    interest_usd = (interest / principal_amount) * principal_usd if principal_amount else 0.0
+    total_owed_usd = principal_usd + interest_usd
+
+    collateral_usd = meta.get("endCollateralAmountUsd")
+    if collateral_usd is None:
+        collateral_usd = meta.get("startCollateralAmountUsd") or 0.0
+
+    if collateral_usd < total_owed_usd:
+        return COLOR_DEFAULTED_UNDERWATER, "defaulted (underwater)"
+    return COLOR_DEFAULTED_COVERED, "defaulted (collateral covered debt)"
+
+
 def build_rows(loans: list[dict], now: datetime) -> list[dict]:
     rows = []
     for l in loans:
@@ -217,7 +264,7 @@ def build_rows(loans: list[dict], now: datetime) -> list[dict]:
             color, label = COLOR_ACTIVE, "active"
         elif status == "defaulted":
             end = _parse_ts(l["updatedAt"]) if l.get("updatedAt") else expired
-            color, label = COLOR_DEFAULTED, "defaulted"
+            color, label = _defaulted_color_label(l)
         else:  # repaid
             end = _parse_ts(l["updatedAt"])
             if end > expired:
@@ -283,6 +330,15 @@ def print_summary(rows: list[dict], gaps: list[tuple[datetime, datetime, float]]
     log.info("Total loans: %d", len(rows))
     log.info("Date range: %s to %s", rows[0]["start"].date(), rows[-1]["end"].date())
     log.info("Total principal borrowed: $%.2f", sum(r["usd"] for r in rows))
+    underwater_defaults = [r for r in rows if r["label"] == "defaulted (underwater)"]
+    covered_defaults = [r for r in rows if r["label"] == "defaulted (collateral covered debt)"]
+    total_defaults = len(underwater_defaults) + len(covered_defaults)
+    if total_defaults:
+        log.info(
+            "Defaults: %d total — %d underwater (rational, collateral < debt owed)   "
+            "%d collateral covered debt (irrational — lender still made whole)",
+            total_defaults, len(underwater_defaults), len(covered_defaults),
+        )
     log.info("Busy intervals (continuous stretches with >=1 loan open): %d", len(intervals))
     log.info("Gaps (zero loans open): %d", len(gaps))
     if gaps:
@@ -445,7 +501,8 @@ def plot(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], borrowe
         plt.Rectangle((0, 0), 1, 1, color=COLOR_EARLY, label=f"early repaid (>={EARLY_REPAY_HOURS}h before expiry)"),
         plt.Rectangle((0, 0), 1, 1, color=COLOR_ON_TIME, label="on-time repaid"),
         plt.Rectangle((0, 0), 1, 1, color=COLOR_LATE, label="late repaid"),
-        plt.Rectangle((0, 0), 1, 1, color=COLOR_DEFAULTED, label="defaulted"),
+        plt.Rectangle((0, 0), 1, 1, color=COLOR_DEFAULTED_UNDERWATER, label="defaulted (underwater)"),
+        plt.Rectangle((0, 0), 1, 1, color=COLOR_DEFAULTED_COVERED, label="defaulted (collateral covered debt)"),
         plt.Rectangle((0, 0), 1, 1, color=COLOR_ACTIVE, label="active"),
     ]
     ax1.legend(handles=legend_handles, loc="upper left")

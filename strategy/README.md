@@ -78,13 +78,13 @@ Unlike a mean, one very large offer can only shift the median by contributing we
 
 ### 2. Duration-Stratified Benchmarking with Fallback
 
-Offers of different durations reflect different risk premia and should not be pooled blindly. The benchmark APY for strategy $d$ is:
+Offers of different durations reflect different risk premia and should not be pooled blindly. Let $\mathcal{M}_k$ be the set of **matched loans** (already-filled deals, any status) for collateral $k$ — a weaker but still real signal, used only when there's no live offer of any duration to go on. The benchmark APY for strategy $d$ is:
 
-$$\tilde{r}^{(d)} = \begin{cases} \tilde{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\ \tilde{r}_{vw}(\mathcal{O}) & \text{otherwise} \end{cases}$$
+$$\tilde{r}^{(d)} = \begin{cases} \tilde{r}_{vw}(\mathcal{O}_d) & \text{if } \mathcal{O}_d \neq \emptyset \\ \tilde{r}_{vw}(\mathcal{O}) & \text{else if } \mathcal{O} \neq \emptyset \\ \tilde{r}_{vw}(\mathcal{M}_k) & \text{else if } \mathcal{M}_k \neq \emptyset \end{cases}$$
 
-The log records which branch was taken (`[from live offers (same duration)]` vs `[from live offers (global)]`).
+weighted by each matched loan's principal-USD in the matched-loan case, same as every other tier. A pair with neither a live offer of any duration NOR a matched loan has no benchmark at all and is dropped. The log records which branch was taken (`[from live offers (same duration)]`, `[from live offers (global)]`, or `[from matched loans (no live offers)]`) — the third case matters because a pair can be genuinely traded (borrowers have taken and repaid/defaulted real loans against it) while simply having no offer open on the book *right now*; treating that as "no market" and skipping it discards real pricing information a naive same-duration/global-only check would miss.
 
-The LTV benchmark $\tilde\ell_k$ (§4) uses the identical same-duration/global-fallback split — it's at least as duration-sensitive as APY (the LTV floor alone spans 70% at 1 day down to 25% at 15 days), so pooling every duration's LTV together risked dragging, say, a 1-day target toward unrelated 15-day-style offers just because they happened to have more volume.
+The LTV benchmark $\tilde\ell_k$ (§4) uses the identical same-duration/global-fallback split (not the matched-loan third tier — LTV already separately falls back to loan-derived data via a different path, see `median_ltv_usd`) — it's at least as duration-sensitive as APY (the LTV floor alone spans 70% at 1 day down to 25% at 15 days), so pooling every duration's LTV together risked dragging, say, a 1-day target toward unrelated 15-day-style offers just because they happened to have more volume.
 
 ---
 
@@ -209,6 +209,25 @@ python strategy/update_config.py
 
 Symbol resolution tries **Jupiter's token search API** first (`api.jup.ag/tokens/v2/search`, batched) — it indexes far more long-tail/pump.fun/meme tokens than Offerbook's own `/tokens` endpoint — then falls back to Offerbook's registry, then the hardcoded `KNOWN_TOKENS` table (which always wins on conflict). Allocation values already set are never touched, regardless of source.
 
+## Fixed-terms multi-duration offers (`fixed_terms_offers.py`)
+
+Creates up to 4 USDC lending offers per run — fixed 1/3/5/7-day durations — against **one collateral given each run** (not every allocated pair like `strategy.py`), skipping any duration where a live (active/partiallyFilled) offer of ours already exists on that exact pair+duration. Re-running after e.g. a 7-day offer is already live only creates the missing 1/3/5-day ones.
+
+Unlike `strategy.py`, terms are **fixed**, not market-benchmarked:
+
+- **LTV**: fixed at 25% — collateral required from the borrower = principal / 0.25, at the collateral's current live price.
+- **APY**: fixed at 100.00% (10 000 bps), charged on every offer.
+- **Principal**: available USDC (wallet + escrow) / 3, rounded to the **nearest** $100 — not down, unlike every other script in this repo (`round_principal_raw()`). Every missing duration gets this same amount; each offer independently draws on the same shared escrow/wallet pool (rehypothecation — see `strategy.py`'s own docstring for why sizing every offer off the same balance is intentional, not a bug).
+
+```bash
+python strategy/fixed_terms_offers.py --collateral USELESS
+python strategy/fixed_terms_offers.py --collateral <mint address>
+python strategy/fixed_terms_offers.py                              # prompts for collateral
+DRY_RUN=true python strategy/fixed_terms_offers.py --collateral USELESS   # preview only
+```
+
+Self-contained — reuses `offerbook_common.py` for shared helpers and the same signing/submission pattern as `strategy.py` directly (not `defaulter_capture.py`), so it has no dependency on the gitignored `create_targeted_offers.py`. Same `--ledger`/`--private-key`/`--yes`/`--ledger-path` signing flags as every other script here (see [Signing modes](#signing-modes) below).
+
 ## Bulk offer cancellation (`cancel_offers.py`)
 
 Cancels open offers for a specific strategy or all at once. Always cancel before re-running strategies to avoid duplicate PDA conflicts.
@@ -276,7 +295,7 @@ Note: `defaulter_capture.py` depends on `../monitoring/defaulter_watch.py` direc
 
 ## Signing modes
 
-Every script (`cancel_offers.py`, `strategy.py`, `fill_offer.py`) supports two signing modes —
+Every script (`cancel_offers.py`, `strategy.py`, `fixed_terms_offers.py`, `fill_offer.py`) supports two signing modes —
 **Ledger is the default**:
 
 - `--ledger` (default): signs via a Ledger hardware wallet over USB. Requires

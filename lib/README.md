@@ -31,13 +31,19 @@ Raises `LedgerError` (not a raw `CommException`) for anything a caller should sh
 
 ## Google Calendar client (`google_calendar_client.py`)
 
-Thin OAuth wrapper around the Google Calendar API, used by `../reporting/portfolio_health.py` to create/delete loan-expiry reminder events — fully independent of any Claude/MCP connector, so it works standalone.
+Thin OAuth wrapper around the Google Calendar API, used by `../reporting/portfolio_health.py` to create loan-expiry reminder events and relabel them once resolved — fully independent of any Claude/MCP connector, so it works standalone.
 
 **One-time setup** (see the module's own docstring for full step-by-step Google Cloud Console instructions):
 
 1. Create a Google Cloud project, enable the **Google Calendar API**.
 2. Create an OAuth client ID (**Desktop app** type), download the credentials JSON.
 3. Save it as `lib/google_calendar_credentials.json` (gitignored — never commit it).
-4. The first time `create_event`/`delete_event` is called, a browser window opens for one-time consent; after that, a refresh token is cached in `lib/google_calendar_token.json` (also gitignored) and reused/refreshed silently.
+4. The first time `create_event`/`mark_event_done` is called, a browser window opens for one-time consent; after that, a refresh token is cached in `lib/google_calendar_token.json` (also gitignored) and reused/refreshed silently.
 
-Override the default file locations via `GOOGLE_CALENDAR_CREDENTIALS_PATH` / `GOOGLE_CALENDAR_TOKEN_PATH`. Exposes two functions: `create_event(summary, description, start_iso, end_iso, popup_minutes_before=0)` → event ID, and `delete_event(event_id)` (no-ops quietly if the event's already gone).
+Override the default file locations via `GOOGLE_CALENDAR_CREDENTIALS_PATH` / `GOOGLE_CALENDAR_TOKEN_PATH`. Exposes:
+
+- `create_event(summary, description, start_iso, end_iso, popup_minutes_before=0)` → event ID.
+- `mark_event_done(event_id, resolution=None)` — relabels a resolved loan's reminder (prepends a `✅ [DONE — repaid]`/`✅ [DONE — defaulted]` tag, clears the popup override) instead of deleting it, so `portfolio_health.py`'s Calendar stays a visible trail of past loans rather than losing events as they resolve. Idempotent (safe to call more than once on the same event) and a no-op if the event's already gone (404/410).
+- `delete_event(event_id)` — still exists (no-ops quietly if the event's already gone), but `portfolio_health.py`'s normal sync flow no longer calls it; it's not currently used by any script in this repo.
+
+**Refresh-token self-heal:** Google hard-expires refresh tokens after ~7 days for OAuth consent screens still in "Testing" publishing status — a real, recurring failure mode (`invalid_grant: Token has been expired or revoked`), not a hypothetical. `_get_credentials()` catches that (`RefreshError`) and falls through to a fresh interactive browser auth automatically, rather than failing every single Calendar call until someone notices and manually deletes the token file. If this keeps recurring, moving the OAuth consent screen to "In production" status (no Google verification needed for personal single-user use, just an "unverified app" warning during consent) removes the 7-day limit.

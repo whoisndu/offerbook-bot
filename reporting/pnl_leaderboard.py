@@ -18,6 +18,16 @@ Realized PNL per lender =
     the moment of default, not necessarily cash actually realized — if the
     lender is still holding the seized collateral, it's unrealized from here.
 
+If OFFERBOOK_PORTFOLIO_WALLETS is set (.env — the same var portfolio_health.py
+reads, comma-separated addresses), those specific lenders are merged into a
+single combined row before ranking, labeled "YOUR WALLETS (N combined)"
+rather than listed individually — so your own multi-wallet total ranks (and
+reads) as one entity instead of being split across several rows. The actual
+addresses never appear in the output or in this committed file; they only
+ever come from your local, gitignored .env. Leave the var unset and every
+wallet is ranked individually as before (the default for anyone else running
+this public script).
+
 Read-only: never signs or submits anything.
 
 Usage:
@@ -44,6 +54,14 @@ load_dotenv()
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 PAGE_SIZE = 100
 
+# Wallets to merge into a single combined row — see module docstring. Never
+# hardcoded here: only ever comes from the local, gitignored .env, so this
+# committed script never carries real addresses.
+MERGE_WALLETS: set[str] = {
+    w.strip() for w in os.getenv("OFFERBOOK_PORTFOLIO_WALLETS", "").split(",") if w.strip()
+}
+MERGE_LABEL = f"YOUR WALLETS ({len(MERGE_WALLETS)} combined)"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -60,11 +78,17 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
 
 def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]]]:
     """Returns (pnl_by_lender, counts_by_lender) where counts tracks how many
-    repaid/defaulted loans backed each lender's total, for context."""
+    repaid/defaulted loans backed each lender's total, for context.
+
+    Any lender address in MERGE_WALLETS is remapped to MERGE_LABEL before
+    ever being used as a dict key — so a merged wallet's real address never
+    appears anywhere in pnl/counts, not just in the final printed table."""
     pnl: dict[str, float] = {}
     counts: dict[str, dict[str, int]] = {}
 
     def bump(lender: str, amount: float, kind: str) -> None:
+        if lender in MERGE_WALLETS:
+            lender = MERGE_LABEL
         pnl[lender] = pnl.get(lender, 0.0) + amount
         c = counts.setdefault(lender, {"repaid": 0, "defaulted": 0})
         c[kind] += 1

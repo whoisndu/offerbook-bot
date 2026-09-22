@@ -16,12 +16,17 @@ Read-only lender-side report across one or more of your own wallets:
     repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
     alongside the existing all-time total.
   - Portfolio size: open principal (live value) + accrued interest owed on
-    active loans - current underwater losses + idle balance (USDC and SOL,
-    wallet + escrow, SOL valued at its current price). A single
-    mark-to-market figure for total value under your control right now —
-    capital actively lent out plus capital just sitting idle — not just the
-    raw active-loan principal.
-  - Wallet/escrow balances (SOL for gas, USDC for capital on hand).
+    active loans - current underwater losses + idle balance (USDC, SOL, and
+    every OTHER token sitting in wallet + escrow — e.g. collateral kept
+    after a default, priced live). A single mark-to-market figure for total
+    value under your control right now — capital actively lent out plus
+    capital just sitting idle, in whatever form — not just the raw
+    active-loan principal.
+  - Wallet/escrow balances (SOL for gas, USDC for capital on hand), plus a
+    breakdown of every OTHER token held (any nonzero balance, wallet or
+    escrow, that isn't SOL/USDC) with its live USD value — this is what
+    picks up default-seized collateral you're holding onto rather than
+    immediately selling.
   - Capital freeing up: principal (USD) of active loans due within the next
     24h / 48h / 72h — an optimistic estimate (assumes on-schedule repayment,
     not default) of how much capital should become available to redeploy,
@@ -90,6 +95,12 @@ USDC_DECIMALS = 6
 SOL_MINT = "So11111111111111111111111111111111111111112"
 SOL_DECIMALS = 9
 PAGE_SIZE = 100
+
+# Both classic SPL and Token-2022 mints show up as "other holdings" (e.g. a
+# defaulted loan's seized collateral) — getTokenAccountsByOwner needs a
+# separate call per token program, there's no single filter that covers both.
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 
 KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
@@ -169,6 +180,66 @@ def fetch_escrow_balance(wallet: str, mint: str) -> int:
         if entry.get("asset", {}).get("mint") == mint:
             return int(entry.get("amount", 0))
     return 0
+
+
+def fetch_wallet_all_token_balances(wallet: str) -> dict[str, int]:
+    """{mint: raw_amount} for every SPL/Token-2022 token account this wallet
+    holds, any mint — used to value "other holdings" (e.g. collateral kept
+    after a default) that aren't SOL or USDC. Zero-balance accounts are
+    skipped (a closed/emptied token account still shows up from the RPC
+    otherwise)."""
+    balances: dict[str, int] = {}
+    for program_id in (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID):
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+            "params": [wallet, {"programId": program_id}, {"encoding": "jsonParsed"}],
+        }
+        resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
+        resp.raise_for_status()
+        for a in resp.json().get("result", {}).get("value", []):
+            info = a.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
+            mint = info.get("mint")
+            amount = int(info.get("tokenAmount", {}).get("amount", "0"))
+            if mint and amount > 0:
+                balances[mint] = balances.get(mint, 0) + amount
+    return balances
+
+
+def fetch_escrow_all_holdings(wallet: str) -> dict[str, int]:
+    """{mint: raw_amount} for every asset this wallet has sitting in
+    Offerbook escrow, any mint. In practice this is only ever non-USDC if
+    you've posted a borrowing-type offer (collateral backing a borrow
+    proposal) — a lender who never borrows will only ever see USDC/SOL here,
+    same as fetch_escrow_balance's single-mint version, just all at once."""
+    resp = SESSION.get(f"{API_BASE}/escrows/holdings/{wallet}", timeout=30)
+    resp.raise_for_status()
+    balances: dict[str, int] = {}
+    for entry in resp.json():
+        mint = entry.get("asset", {}).get("mint")
+        amount = int(entry.get("amount", 0))
+        if mint and amount > 0:
+            balances[mint] = balances.get(mint, 0) + amount
+    return balances
+
+
+def fetch_mint_decimals_onchain(mint: str) -> int | None:
+    """Last-resort decimals lookup straight from the mint account, for a
+    token neither Jupiter's price response nor KNOWN_DECIMALS covers —
+    common for a long-tail/pump.fun token you only hold because you seized
+    it as collateral. Works for both classic SPL and Token-2022 mints."""
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [mint, {"encoding": "jsonParsed"}],
+    }
+    try:
+        resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
+        resp.raise_for_status()
+        value = (resp.json().get("result") or {}).get("value")
+        if value:
+            return value["data"]["parsed"]["info"]["decimals"]
+    except Exception as exc:
+        log.warning("Couldn't fetch decimals on-chain for %s…: %s", mint[:8], exc)
+    return None
 
 
 def fetch_current_prices(mints: list[str]) -> tuple[dict[str, float], dict[str, int]]:
@@ -571,9 +642,31 @@ def compute_capital_freeing_up(active_rows: list[dict], window_hours: float) -> 
     )
 
 
+def print_other_holdings_table(other_holdings: list[dict]) -> None:
+    """`other_holdings` entries: {mint, symbol, raw_amount, decimals, price, usd}
+    — usd/price/decimals may be None (unpriced). Skips printing entirely if
+    there's nothing to show."""
+    if not other_holdings:
+        return
+    log.info("")
+    log.info("Other holdings (non-SOL/USDC, wallet + escrow):")
+    col = "{:<16}{:<46}{:>18}{:>14}{:>16}"
+    log.info(col.format("symbol", "mint", "amount", "price $", "value $"))
+    unpriced = 0
+    for h in other_holdings:
+        amount_str = f"{h['raw_amount'] / 10 ** h['decimals']:,.4f}" if h["decimals"] is not None else f"{h['raw_amount']} (raw)"
+        if h["usd"] is not None:
+            log.info(col.format(h["symbol"], h["mint"], amount_str, f"{h['price']:,.6g}", f"{h['usd']:,.2f}"))
+        else:
+            log.info(col.format(h["symbol"], h["mint"], amount_str, "?", "?") + "  *** NO PRICE ***")
+            unpriced += 1
+    total_usd = sum(h["usd"] or 0 for h in other_holdings)
+    log.info("Other holdings total: $%.2f%s", total_usd, f"  ({unpriced} unpriced, excluded)" if unpriced else "")
+
+
 def print_wallet_report(
     wallet: str, sol_balance: int, sol_escrow: int, usdc_wallet: int, usdc_escrow: int,
-    idle_balance_usd: float,
+    other_holdings: list[dict], idle_balance_usd: float,
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
     volume_week_usd: float, volume_all_time_usd: float,
     pnl_24h: dict, pnl_7d: dict, pnl_14d: dict,
@@ -590,7 +683,8 @@ def print_wallet_report(
         usdc_wallet / 10 ** USDC_DECIMALS,
         usdc_escrow / 10 ** USDC_DECIMALS, (usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS,
     )
-    log.info("Idle balance (USDC + SOL, wallet + escrow, at current SOL price): $%.2f", idle_balance_usd)
+    print_other_holdings_table(other_holdings)
+    log.info("Idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%.2f", idle_balance_usd)
     log.info(
         "Volume — last %d days: $%.2f   all-time: $%.2f",
         VOLUME_WINDOW_DAYS, volume_week_usd, volume_all_time_usd,
@@ -672,6 +766,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info("=" * 100)
     total_usdc = sum(w["usdc_wallet"] + w["usdc_escrow"] for w in per_wallet)
     total_idle_balance = sum(w["idle_balance_usd"] for w in per_wallet)
+    total_other_holdings_usd = sum(w["other_holdings_usd"] for w in per_wallet)
     total_active = sum(len(w["active_rows"]) for w in per_wallet)
     total_outstanding = sum(sum(r["principal_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
     total_unrealized = sum(sum(r["accrued_interest_usd"] or 0 for r in w["active_rows"]) for w in per_wallet)
@@ -695,7 +790,8 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_pnl_14d = sum(w["pnl_14d"]["net_pnl_usd"] for w in per_wallet)
 
     log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
-    log.info("Total idle balance (USDC + SOL, wallet + escrow, at current SOL price): $%.2f", total_idle_balance)
+    log.info("Total other holdings (non-SOL/USDC, wallet + escrow, at current prices): $%.2f", total_other_holdings_usd)
+    log.info("Total idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%.2f", total_idle_balance)
     log.info(
         "Total volume — last %d days: $%.2f   all-time: $%.2f",
         VOLUME_WINDOW_DAYS, total_volume_week, total_volume_all_time,
@@ -766,27 +862,81 @@ def main() -> None:
         l.get("collateralMint") or _mint_from_asset(l.get("collateral", {})) for l in my_active
     }
     collateral_mints.discard(None)
-    # SOL_MINT is fetched alongside collateral mints (one batch call) so idle
-    # SOL balances (wallet + escrow) can be valued in USD for the idle-balance
-    # / portfolio-size figures below — not because SOL is ever a collateral mint itself.
-    prices, decimals = fetch_current_prices(list(collateral_mints | {SOL_MINT}))
-    sol_price = prices.get(SOL_MINT)
-    if sol_price is None:
-        log.warning("No live SOL price — idle SOL balances will be valued at $0 in the idle-balance/portfolio-size figures.")
 
     now = datetime.now(timezone.utc)
     all_loans = active + defaulted + repaid
     volume_since = now - timedelta(days=VOLUME_WINDOW_DAYS)
 
-    per_wallet = []
+    # First pass: fetch every wallet's raw balances (SOL, USDC, and every
+    # OTHER token held in wallet+escrow — e.g. collateral kept after a
+    # default) before pricing anything, so the batch price/decimals call
+    # below can cover every mint across every wallet in one shot instead of
+    # re-fetching prices per wallet.
+    log.info("Fetching wallet + escrow balances for %d wallet(s) …", len(wallets))
+    raw_balances: dict[str, dict] = {}
+    other_mints: set[str] = set()
     for wallet in wallets:
         sol_balance = fetch_wallet_sol_balance(wallet)
-        sol_escrow = fetch_escrow_balance(wallet, SOL_MINT)
         usdc_wallet = fetch_wallet_token_balance(wallet, USDC_MINT)
-        usdc_escrow = fetch_escrow_balance(wallet, USDC_MINT)
+        wallet_tokens = fetch_wallet_all_token_balances(wallet)
+        escrow_tokens = fetch_escrow_all_holdings(wallet)
+        sol_escrow = escrow_tokens.get(SOL_MINT, 0)
+        usdc_escrow = escrow_tokens.get(USDC_MINT, 0)
+
+        other_raw: dict[str, int] = {
+            mint: wallet_tokens.get(mint, 0) + escrow_tokens.get(mint, 0)
+            for mint in set(wallet_tokens) | set(escrow_tokens)
+            if mint not in (SOL_MINT, USDC_MINT)
+        }
+        other_mints.update(other_raw.keys())
+
+        raw_balances[wallet] = {
+            "sol_balance": sol_balance, "sol_escrow": sol_escrow,
+            "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
+            "other_raw": other_raw,
+        }
+
+    # SOL_MINT and every "other holdings" mint are fetched alongside
+    # collateral mints (one batch call) so idle SOL / non-SOL-non-USDC
+    # balances can be valued in USD for the idle-balance / portfolio-size
+    # figures below — not because SOL is ever a collateral mint itself.
+    prices, decimals = fetch_current_prices(list(collateral_mints | other_mints | {SOL_MINT}))
+    sol_price = prices.get(SOL_MINT)
+    if sol_price is None:
+        log.warning("No live SOL price — idle SOL balances will be valued at $0 in the idle-balance/portfolio-size figures.")
+
+    # Any "other holdings" mint neither Jupiter nor KNOWN_DECIMALS covered —
+    # fall back to reading decimals straight off the mint account. A
+    # long-tail/pump.fun token you only hold because you seized it as
+    # collateral is exactly the case Jupiter's curated price list is least
+    # likely to cover.
+    for mint in other_mints:
+        if mint not in decimals:
+            d = fetch_mint_decimals_onchain(mint)
+            if d is not None:
+                decimals[mint] = d
+
+    per_wallet = []
+    for wallet in wallets:
+        rb = raw_balances[wallet]
+        sol_balance, sol_escrow = rb["sol_balance"], rb["sol_escrow"]
+        usdc_wallet, usdc_escrow = rb["usdc_wallet"], rb["usdc_escrow"]
         idle_sol_usd = (sol_balance + sol_escrow) / 10 ** SOL_DECIMALS * (sol_price or 0.0)
         idle_usdc_usd = (usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS
-        idle_balance_usd = idle_sol_usd + idle_usdc_usd
+
+        other_holdings = []
+        for mint, raw_amount in rb["other_raw"].items():
+            price = prices.get(mint)
+            dec = decimals.get(mint)
+            usd = raw_amount / 10 ** dec * price if price is not None and dec is not None else None
+            other_holdings.append({
+                "mint": mint, "symbol": symbol_for(mint), "raw_amount": raw_amount,
+                "decimals": dec, "price": price, "usd": usd,
+            })
+        other_holdings.sort(key=lambda h: -(h["usd"] or 0))
+        other_holdings_usd = sum(h["usd"] or 0 for h in other_holdings)
+
+        idle_balance_usd = idle_sol_usd + idle_usdc_usd + other_holdings_usd
         active_rows = build_active_loan_rows(active, wallet, prices, decimals, now)
         pnl = compute_realized_pnl(repaid, defaulted, wallet)
         pnl_24h = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(hours=24))
@@ -796,14 +946,15 @@ def main() -> None:
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
 
         print_wallet_report(
-            wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, idle_balance_usd, active_rows, pnl,
+            wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, other_holdings, idle_balance_usd,
+            active_rows, pnl,
             args.risk_ltv, args.underwater_ltv, args.expiry_hours,
             volume_week_usd, volume_all_time_usd,
             pnl_24h, pnl_7d, pnl_14d,
         )
         per_wallet.append({
             "wallet": wallet, "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
-            "idle_balance_usd": idle_balance_usd,
+            "other_holdings_usd": other_holdings_usd, "idle_balance_usd": idle_balance_usd,
             "active_rows": active_rows, "pnl": pnl, "risk_ltv": args.risk_ltv,
             "volume_week_usd": volume_week_usd, "volume_all_time_usd": volume_all_time_usd,
             "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d,

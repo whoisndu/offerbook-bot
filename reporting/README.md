@@ -71,10 +71,14 @@ Realized PNL per lender =
 - **+ net interest earned on repaid loans.** Interest is converted to USD via the platform's documented proportional formula (`interest / principalAmount * startPrincipalAmountUsd`), then the actual protocol "repay" fee charged is subtracted — taken straight from `metadata.fees.repay.amountUsd` per loan, not assumed as a flat rate.
 - **+ collateral kept on defaulted loans**, valued at default time (`endCollateralAmountUsd`), minus the principal that was lent out and not recovered (`startPrincipalAmountUsd`). This is a mark-to-market figure at the moment of default, not necessarily cash actually realized — if the lender is still holding the seized collateral, it's unrealized from here.
 
+Also reports each lender's **total volume** — total USD principal (at origination) of every SETTLED (repaid or defaulted) loan they've made. Deliberately excludes active loans: this leaderboard is scoped to realized PNL, which only exists once a loan has resolved, so every number in it — including volume — describes the same settled-loan population rather than mixing in still-open positions. Shown alongside PNL, not used for ranking — a high-volume lender isn't necessarily a profitable one.
+
 ```bash
 python reporting/pnl_leaderboard.py              # top 25 by realized PNL
 python reporting/pnl_leaderboard.py --top 50
 ```
+
+If `OFFERBOOK_PORTFOLIO_WALLETS` is set (`.env` — the same var `portfolio_health.py` reads, comma-separated addresses), those specific lenders are merged into a single combined row before ranking, labeled `YOUR WALLETS (N combined)` rather than listed individually. The remap happens at the point each loan is aggregated, so the real addresses never become dict keys, let alone reach the printed output or the committed script — anyone else running this public script with the var unset gets every wallet ranked individually, unchanged.
 
 Read-only, never signs or submits anything.
 

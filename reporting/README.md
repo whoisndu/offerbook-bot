@@ -131,10 +131,19 @@ How much can you ACTUALLY borrow against a given collateral right now? A live le
 python reporting/liquidity_check.py --collateral USELESS
 python reporting/liquidity_check.py --collateral <mint address>
 python reporting/liquidity_check.py --collateral USELESS --principal SOL
+python reporting/liquidity_check.py --collateral USELESS --days-back 30
 python reporting/liquidity_check.py                                        # prompts for collateral
 ```
 
-Defaults to USDC principal. Flags any lender whose live offers exceed their real balance as `*** OVERSTATED ***`. Balance-check failures (RPC errors) are retried and, if still unresolved, excluded from totals and flagged `BALANCE CHECK FAILED` rather than silently counted as a confirmed $0. Read-only, no signing.
+Defaults to USDC principal. Flags any lender whose live offers exceed their real balance as `*** OVERSTATED ***`. Balance-check failures (RPC errors) are retried and, if still unresolved, excluded from totals and flagged `BALANCE CHECK FAILED` rather than silently counted as a confirmed $0.
+
+Also reports **loan size & pricing history** for the pair, from its full loan history (active + repaid + defaulted, platform-wide, any lender — not just live offers, so this section still runs even when the pair currently has zero live offers):
+
+- **Biggest loans ever** (top 10) — date, borrower, size, APY, duration, status.
+- **Biggest single day ever** — the one calendar day with the most total USD originated.
+- **Size vs. APY, last N days** (`--days-back`, default 14) — loans split into 4 equal-count quartiles by size, each showing count/total volume/median APY/max APY. This is the actionable signal for tuning your own offer's APY: if the biggest quartile's *median* APY is higher than the smallest's, big borrowers on this pair are price-insensitive and you likely have room to push APY higher on a large offer; if it's lower, they're shopping around and an aggressively-priced big offer risks sitting unfilled. Median and max are shown separately on purpose — a single large outlier fill (e.g. a whale who took one loan at 130% APY) can make the *max* column look great while the *median* tells you that's not representative of what similarly-sized borrowers typically pay.
+
+Read-only, no signing.
 
 ## Competing-offer posting-time chart (`offer_posting_times.py`)
 

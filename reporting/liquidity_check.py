@@ -20,10 +20,29 @@ pull from them on this pair right now, no more. Summed across every lender,
 that's the real available liquidity, shown alongside the naive raw total so
 the gap (if any) is obvious.
 
+It also answers a different question — not "how much liquidity is
+available" but "what do borrowers on this pair actually take, and at what
+price" — from that pair's full loan history (active + repaid + defaulted,
+platform-wide, any lender):
+  - Biggest loans EVER taken against this collateral (top 10).
+  - The single biggest calendar day EVER, by total USD originated.
+  - Size vs. APY over a recent window (quartiles by loan size, --days-back):
+    are the biggest loans paying MORE than the smallest ones right now (a
+    sign of price-insensitive large borrowers — room to push APY higher on
+    size) or LESS (large borrowers are shopping around — pushing APY too
+    high on a big offer risks it going unfilled)? This is the actionable
+    signal for tuning your own offer's APY against what this specific
+    market's big players are actually willing to pay, not a guess from a
+    handful of recent fills.
+  This section runs even if the pair currently has zero live offers — loan
+  history still exists, and still tells you something, even when nobody's
+  actively quoting right now.
+
 Usage:
   python liquidity_check.py --collateral USELESS
   python liquidity_check.py --collateral <mint address>
   python liquidity_check.py --collateral USELESS --principal SOL
+  python liquidity_check.py --collateral USELESS --days-back 30
   python liquidity_check.py                                        # prompts for collateral
 
 Notes:
@@ -32,8 +51,12 @@ Notes:
   - includeUnderfunded=true is required when fetching offers — without it,
     exactly the stacked/rehypothecated offers this script exists to account
     for are invisible (same reason strategy.py's own offer-fetching sets it).
-  - Only "active" and "partiallyFilled" offers count — expired/cancelled/
-    filled offers aren't real liquidity.
+  - Only "active" and "partiallyFilled" offers count for the liquidity
+    section — expired/cancelled/filled offers aren't real liquidity.
+  - The /loans/status/* endpoint ignores collateralMint/principalMint query
+    params server-side (confirmed: identical result totals with or without
+    them) — same limitation borrower_loan_timeline.py works around — so loan
+    history is fetched in full and filtered to this exact pair client-side.
 """
 from __future__ import annotations
 
@@ -42,6 +65,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 import base58
 import requests
@@ -57,6 +81,7 @@ import offerbook_common as _common
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 PAGE_SIZE = 100
+DAYS_BACK_DEFAULT = 14  # lookback window for the size-vs-APY quartile breakdown
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
@@ -151,6 +176,107 @@ def fetch_lending_offers(principal_mint: str, collateral_mint: str) -> list[dict
             "principalMint": principal_mint, "collateralMint": collateral_mint,
         })
     return offers
+
+
+def fetch_loans_for_pair(principal_mint: str, collateral_mint: str) -> list[dict]:
+    """Every loan (active/repaid/defaulted) ever matched for this exact
+    (principal, collateral) pair, platform-wide, any lender — see module
+    docstring for why this fetches everything and filters client-side
+    rather than relying on a server-side filter."""
+    loans: list[dict] = []
+    for status in ("active", "repaid", "defaulted"):
+        for l in _fetch_all_pages(f"/loans/status/{status}"):
+            pmint = l.get("principalMint") or _common._mint_from_asset(l.get("principal", {}))
+            cmint = l.get("collateralMint") or _common._mint_from_asset(l.get("collateral", {}))
+            if pmint == principal_mint and cmint == collateral_mint:
+                l["_status"] = status
+                loans.append(l)
+    return loans
+
+
+def biggest_loans_ever(loans: list[dict], top_n: int = 10) -> list[dict]:
+    """Top `top_n` loans by USD principal at origination, across all
+    statuses — origination size/price is real market behavior regardless of
+    whether the loan was later repaid or defaulted."""
+    rows = []
+    for l in loans:
+        meta = l.get("metadata") or {}
+        rows.append({
+            "created_at": (l.get("createdAt") or "")[:10],
+            "borrower": l.get("borrower", ""),
+            "principal_usd": meta.get("startPrincipalAmountUsd") or 0.0,
+            "apy_bps": l.get("apy", 0),
+            "duration_days": (l.get("duration") or 0) / 86400,
+            "status": l.get("_status", ""),
+        })
+    rows.sort(key=lambda r: -r["principal_usd"])
+    return rows[:top_n]
+
+
+def biggest_day_ever(loans: list[dict]) -> dict | None:
+    """The single calendar day (UTC) with the most total USD principal
+    originated against this pair, across all of history. None if no loan
+    has a usable createdAt."""
+    by_day: dict[str, dict] = {}
+    for l in loans:
+        day = (l.get("createdAt") or "")[:10]
+        if not day:
+            continue
+        meta = l.get("metadata") or {}
+        d = by_day.setdefault(day, {"day": day, "total_usd": 0.0, "count": 0})
+        d["total_usd"] += meta.get("startPrincipalAmountUsd") or 0.0
+        d["count"] += 1
+    if not by_day:
+        return None
+    return max(by_day.values(), key=lambda d: d["total_usd"])
+
+
+def size_vs_apy_quartiles(loans: list[dict], days_back: int) -> list[dict]:
+    """Loans originated in the last `days_back` days, split into 4 equal-
+    COUNT groups by USD principal (smallest to largest), each reporting its
+    size range, loan count, total volume, and median/max APY paid. Directly
+    answers "do bigger loans on this pair pay more or less than smaller
+    ones right now" — the size-vs-price-sensitivity signal, not just a
+    single number. Returns [] if nothing originated in the window."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    recent = []
+    for l in loans:
+        try:
+            created = datetime.fromisoformat(l["createdAt"].replace("Z", "+00:00"))
+        except (KeyError, ValueError, AttributeError):
+            continue
+        if created < cutoff:
+            continue
+        meta = l.get("metadata") or {}
+        principal_usd = meta.get("startPrincipalAmountUsd") or 0.0
+        if principal_usd <= 0:
+            continue
+        recent.append({"principal_usd": principal_usd, "apy_bps": l.get("apy", 0)})
+
+    if not recent:
+        return []
+    recent.sort(key=lambda r: r["principal_usd"])
+    n = len(recent)
+    step = max(1, n // 4)
+
+    quartiles = []
+    for i in range(4):
+        start = i * step
+        end = n if i == 3 else min((i + 1) * step, n)
+        bucket = recent[start:end]
+        if not bucket:
+            continue
+        apys = sorted(b["apy_bps"] for b in bucket)
+        quartiles.append({
+            "label": f"Q{i + 1}",
+            "size_min": bucket[0]["principal_usd"],
+            "size_max": bucket[-1]["principal_usd"],
+            "count": len(bucket),
+            "total_usd": sum(b["principal_usd"] for b in bucket),
+            "median_apy_bps": apys[len(apys) // 2],
+            "max_apy_bps": max(apys),
+        })
+    return quartiles
 
 
 def fetch_wallet_token_balance(wallet: str, mint: str, attempts: int = 3) -> int | None:
@@ -289,6 +415,70 @@ def print_report(rows: list[dict], principal_mint: str, collateral_mint: str) ->
         )
 
 
+def print_loan_history_report(loans: list[dict], principal_mint: str, collateral_mint: str, days_back: int) -> None:
+    sym = symbol_for(principal_mint)
+
+    log.info("")
+    log.info("=" * 100)
+    log.info(
+        "LOAN SIZE & PRICING HISTORY — %s/%s collateral (%d loan(s) ever matched, any lender)",
+        sym, symbol_for(collateral_mint), len(loans),
+    )
+    log.info("=" * 100)
+
+    if not loans:
+        log.info("No loan history at all for this pair — nobody's ever borrowed against it.")
+        return
+
+    top = biggest_loans_ever(loans)
+    log.info("")
+    log.info("Biggest loans EVER (top %d):", len(top))
+    col = "{:<12}{:<46}{:>16}{:>10}{:>10}  {:<10}"
+    log.info(col.format("date", "borrower", f"principal {sym}", "APY", "duration", "status"))
+    for r in top:
+        log.info(col.format(
+            r["created_at"], r["borrower"], f"{r['principal_usd']:,.2f}",
+            f"{r['apy_bps'] / 100:.2f}%", f"{r['duration_days']:.0f}d", r["status"],
+        ))
+
+    day = biggest_day_ever(loans)
+    log.info("")
+    if day:
+        log.info("Biggest single day EVER: %s — $%.2f across %d loan(s)", day["day"], day["total_usd"], day["count"])
+
+    quartiles = size_vs_apy_quartiles(loans, days_back)
+    log.info("")
+    log.info("Size vs. APY — last %d day(s):", days_back)
+    if not quartiles:
+        log.info("  No loans originated in this window.")
+        return
+
+    col2 = "{:<8}{:>24}{:>8}{:>16}{:>14}{:>14}"
+    log.info(col2.format("quartile", "size range $", "count", "total vol $", "median APY", "max APY"))
+    for q in quartiles:
+        log.info(col2.format(
+            q["label"], f"{q['size_min']:,.0f} - {q['size_max']:,.0f}", q["count"],
+            f"{q['total_usd']:,.2f}", f"{q['median_apy_bps'] / 100:.2f}%", f"{q['max_apy_bps'] / 100:.2f}%",
+        ))
+
+    if len(quartiles) >= 2:
+        smallest, biggest = quartiles[0], quartiles[-1]
+        if biggest["median_apy_bps"] > smallest["median_apy_bps"]:
+            log.info(
+                "  → Biggest loans (%s, median $%.0f+) are paying MORE than the smallest (%s) — consistent with "
+                "price-insensitive large borrowers here. You may have room to push APY higher on a large offer.",
+                biggest["label"], biggest["size_min"], smallest["label"],
+            )
+        elif biggest["median_apy_bps"] < smallest["median_apy_bps"]:
+            log.info(
+                "  → Biggest loans (%s, median $%.0f+) are paying LESS than the smallest (%s) — large borrowers "
+                "here are shopping around. Pushing APY too high on a big offer risks it sitting unfilled.",
+                biggest["label"], biggest["size_min"], smallest["label"],
+            )
+        else:
+            log.info("  → No meaningful difference in APY paid between smallest and biggest loans in this window.")
+
+
 def prompt_for_collateral() -> str:
     raw = input("Enter collateral symbol (e.g. USELESS) or mint address: ").strip()
     while not raw:
@@ -300,6 +490,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--collateral", default=None, help="Collateral symbol or mint address. Omit to be prompted.")
     parser.add_argument("--principal", default="USDC", help='Principal symbol or mint address (default "USDC").')
+    parser.add_argument(
+        "--days-back", type=int, default=DAYS_BACK_DEFAULT,
+        help=f"Lookback window in days for the size-vs-APY quartile breakdown (default {DAYS_BACK_DEFAULT}).",
+    )
     args = parser.parse_args()
 
     collateral_mint = resolve_token(args.collateral or prompt_for_collateral())
@@ -311,16 +505,24 @@ def main() -> None:
     )
     offers = fetch_lending_offers(principal_mint, collateral_mint)
     if not offers:
-        log.error(
-            "No live lending offers found for principal=%s collateral=%s — nothing to check.",
+        log.warning(
+            "No live lending offers found for principal=%s collateral=%s — skipping the liquidity "
+            "section, but still checking loan history below.",
             args.principal, args.collateral or collateral_mint,
         )
-        sys.exit(1)
-    log.info("  → %d live offer(s) from %d unique lender(s)", len(offers), len({o.get("creator") for o in offers}))
+    else:
+        log.info("  → %d live offer(s) from %d unique lender(s)", len(offers), len({o.get("creator") for o in offers}))
+        log.info("Checking each lender's actual wallet+escrow balance …")
+        rows = compute_liquidity(offers, principal_mint)
+        print_report(rows, principal_mint, collateral_mint)
 
-    log.info("Checking each lender's actual wallet+escrow balance …")
-    rows = compute_liquidity(offers, principal_mint)
-    print_report(rows, principal_mint, collateral_mint)
+    log.info("Fetching loan history for %s/%s …", symbol_for(principal_mint), symbol_for(collateral_mint))
+    loans = fetch_loans_for_pair(principal_mint, collateral_mint)
+    print_loan_history_report(loans, principal_mint, collateral_mint, args.days_back)
+
+    if not offers and not loans:
+        log.error("No live offers AND no loan history for this pair at all — nothing to check.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

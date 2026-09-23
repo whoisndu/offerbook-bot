@@ -12,9 +12,21 @@ Read-only lender-side report across one or more of your own wallets:
     (valued at default time) minus the principal lost — same formula
     pnl_leaderboard.py uses platform-wide, scoped here to your wallets.
     Also broken out into trailing realized-earnings windows (last 24h/7d/
-    14d) using each resolved loan's updatedAt as a proxy for when it was
+    14d/YTD) using each resolved loan's updatedAt as a proxy for when it was
     repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
     alongside the existing all-time total.
+  - ROI: realized PNL (all-time and YTD) as a % of net capital deposited —
+    from Offerbook's own /users/{address}/escrow-summary endpoint
+    (netDepositedUsd = lifetime deposits minus withdrawals, in USD at each
+    movement's own price; interest credited to a lender is deliberately
+    excluded from this figure by the platform itself, so yield never gets
+    counted as capital). Summed across every wallet checked this run. If any
+    wallet has unpriced capital movements (a deposit/withdrawal the platform
+    couldn't price), that wallet's contribution is flagged as an
+    understatement rather than silently treated as complete. YTD = resolved
+    since Jan 1 of the current year — currently equal to all-time, since
+    Offerbook itself is younger than a year, but computed properly so it's
+    correct once that stops being true.
   - Portfolio size: open principal (live value) + accrued interest owed on
     active loans - current underwater losses + idle balance (USDC, SOL, and
     every OTHER token sitting in wallet + escrow — e.g. collateral kept
@@ -220,6 +232,23 @@ def fetch_escrow_all_holdings(wallet: str) -> dict[str, int]:
         if mint and amount > 0:
             balances[mint] = balances.get(mint, 0) + amount
     return balances
+
+
+def fetch_escrow_summary(wallet: str) -> dict | None:
+    """Offerbook's own rollup of this wallet's lifetime capital movements —
+    GET /users/{address}/escrow-summary. netDepositedUsd = lifetime deposits
+    minus withdrawals in USD (interest credited to a lender is deliberately
+    excluded from this figure by the platform itself, so it's a genuine
+    cost-basis figure, not conflated with yield). Returns None (not zeros)
+    if the request fails, so a transient error can't be mistaken for a
+    wallet that's never deposited anything."""
+    try:
+        resp = SESSION.get(f"{API_BASE}/users/{wallet}/escrow-summary", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        log.warning("Couldn't fetch escrow summary for %s: %s", wallet, exc)
+        return None
 
 
 def fetch_mint_decimals_onchain(mint: str) -> int | None:
@@ -669,7 +698,7 @@ def print_wallet_report(
     other_holdings: list[dict], idle_balance_usd: float,
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
     volume_week_usd: float, volume_all_time_usd: float,
-    pnl_24h: dict, pnl_7d: dict, pnl_14d: dict,
+    pnl_24h: dict, pnl_7d: dict, pnl_14d: dict, pnl_ytd: dict,
 ) -> None:
     log.info("")
     log.info("=" * 100)
@@ -752,10 +781,11 @@ def print_wallet_report(
     )
     log.info("  NET REALIZED PNL: $%.2f", pnl["net_pnl_usd"])
     log.info(
-        "  Realized earnings — last 24h: $%.2f (%d resolved)   last 7d: $%.2f (%d resolved)   last 14d: $%.2f (%d resolved)",
+        "  Realized earnings — last 24h: $%.2f (%d resolved)   last 7d: $%.2f (%d resolved)   last 14d: $%.2f (%d resolved)   YTD: $%.2f (%d resolved)",
         pnl_24h["net_pnl_usd"], pnl_24h["repaid_count"] + pnl_24h["defaulted_count"],
         pnl_7d["net_pnl_usd"], pnl_7d["repaid_count"] + pnl_7d["defaulted_count"],
         pnl_14d["net_pnl_usd"], pnl_14d["repaid_count"] + pnl_14d["defaulted_count"],
+        pnl_ytd["net_pnl_usd"], pnl_ytd["repaid_count"] + pnl_ytd["defaulted_count"],
     )
 
 
@@ -788,6 +818,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_pnl_24h = sum(w["pnl_24h"]["net_pnl_usd"] for w in per_wallet)
     total_pnl_7d = sum(w["pnl_7d"]["net_pnl_usd"] for w in per_wallet)
     total_pnl_14d = sum(w["pnl_14d"]["net_pnl_usd"] for w in per_wallet)
+    total_pnl_ytd = sum(w["pnl_ytd"]["net_pnl_usd"] for w in per_wallet)
 
     log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
     log.info("Total other holdings (non-SOL/USDC, wallet + escrow, at current prices): $%.2f", total_other_holdings_usd)
@@ -816,9 +847,50 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     )
     log.info("TOTAL NET REALIZED PNL ACROSS PORTFOLIO: $%.2f", total_net_pnl)
     log.info(
-        "TOTAL realized earnings — last 24h: $%.2f   last 7d: $%.2f   last 14d: $%.2f",
-        total_pnl_24h, total_pnl_7d, total_pnl_14d,
+        "TOTAL realized earnings — last 24h: $%.2f   last 7d: $%.2f   last 14d: $%.2f   YTD: $%.2f",
+        total_pnl_24h, total_pnl_7d, total_pnl_14d, total_pnl_ytd,
     )
+    log.info("=" * 100)
+
+
+def print_roi_summary(per_wallet: list[dict], total_net_pnl_usd: float, total_pnl_ytd_usd: float) -> None:
+    """Realized PNL as a % of net capital deposited (Offerbook's own
+    escrow-summary rollup — see fetch_escrow_summary), summed across every
+    wallet checked this run. Skipped entirely if no wallet's escrow summary
+    could be fetched, or if net deposited is <= 0 (a portfolio that's a net
+    withdrawer, or brand new, doesn't have a meaningful ROI %% yet)."""
+    known = [w for w in per_wallet if w.get("net_deposited_usd") is not None]
+    if not known:
+        log.info("")
+        log.info("ROI: couldn't fetch escrow-summary for any wallet this run — skipping.")
+        return
+
+    total_net_deposited = sum(w["net_deposited_usd"] for w in known)
+    unpriced_wallets = [w["wallet"] for w in known if w.get("unpriced_movement_count")]
+    missing_wallets = [w["wallet"] for w in per_wallet if w.get("net_deposited_usd") is None]
+
+    log.info("")
+    log.info("=" * 100)
+    log.info("ROI (net capital deposited, per Offerbook's own escrow-summary)")
+    log.info("=" * 100)
+    log.info("Net capital deposited (all-time, deposits - withdrawals): $%.2f", total_net_deposited)
+    if missing_wallets:
+        log.info("  (%d wallet(s) excluded above — escrow-summary fetch failed: %s)", len(missing_wallets), ", ".join(missing_wallets))
+    if unpriced_wallets:
+        log.info(
+            "  *** %d wallet(s) have unpriced capital movements — the figure above UNDERSTATES: %s ***",
+            len(unpriced_wallets), ", ".join(unpriced_wallets),
+        )
+
+    if total_net_deposited <= 0:
+        log.info("Net deposited is <= $0 (net withdrawer, or nothing deposited yet) — ROI %% isn't meaningful.")
+        log.info("=" * 100)
+        return
+
+    roi_all_time = total_net_pnl_usd / total_net_deposited * 100
+    roi_ytd = total_pnl_ytd_usd / total_net_deposited * 100
+    log.info("Realized PNL (all-time): $%.2f   -> ROI: %.1f%%", total_net_pnl_usd, roi_all_time)
+    log.info("Realized PNL (YTD):      $%.2f   -> ROI: %.1f%%", total_pnl_ytd_usd, roi_ytd)
     log.info("=" * 100)
 
 # ---------------------------------------------------------------------------
@@ -866,6 +938,7 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     all_loans = active + defaulted + repaid
     volume_since = now - timedelta(days=VOLUME_WINDOW_DAYS)
+    since_ytd = datetime(now.year, 1, 1, tzinfo=timezone.utc)
 
     # First pass: fetch every wallet's raw balances (SOL, USDC, and every
     # OTHER token held in wallet+escrow — e.g. collateral kept after a
@@ -942,26 +1015,38 @@ def main() -> None:
         pnl_24h = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(hours=24))
         pnl_7d = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(days=7))
         pnl_14d = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(days=14))
+        pnl_ytd = compute_realized_pnl(repaid, defaulted, wallet, since=since_ytd)
         volume_week_usd = compute_volume(all_loans, wallet, volume_since)
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
+
+        escrow_summary = fetch_escrow_summary(wallet)
+        net_deposited_usd = escrow_summary.get("netDepositedUsd") if escrow_summary else None
+        unpriced_movement_count = escrow_summary.get("unpricedMovementCount", 0) if escrow_summary else 0
 
         print_wallet_report(
             wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, other_holdings, idle_balance_usd,
             active_rows, pnl,
             args.risk_ltv, args.underwater_ltv, args.expiry_hours,
             volume_week_usd, volume_all_time_usd,
-            pnl_24h, pnl_7d, pnl_14d,
+            pnl_24h, pnl_7d, pnl_14d, pnl_ytd,
         )
         per_wallet.append({
             "wallet": wallet, "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
             "other_holdings_usd": other_holdings_usd, "idle_balance_usd": idle_balance_usd,
             "active_rows": active_rows, "pnl": pnl, "risk_ltv": args.risk_ltv,
             "volume_week_usd": volume_week_usd, "volume_all_time_usd": volume_all_time_usd,
-            "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d,
+            "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d, "pnl_ytd": pnl_ytd,
+            "net_deposited_usd": net_deposited_usd, "unpriced_movement_count": unpriced_movement_count,
         })
 
     if len(per_wallet) > 1:
         print_portfolio_summary(per_wallet)
+
+    print_roi_summary(
+        per_wallet,
+        sum(w["pnl"]["net_pnl_usd"] for w in per_wallet),
+        sum(w["pnl_ytd"]["net_pnl_usd"] for w in per_wallet),
+    )
 
     all_active_rows = [r for w in per_wallet for r in w["active_rows"]]
     resolutions = {l["pubkey"]: "repaid" for l in repaid if l.get("pubkey")}

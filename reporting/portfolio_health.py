@@ -15,7 +15,7 @@ Read-only lender-side report across one or more of your own wallets:
     14d/YTD) using each resolved loan's updatedAt as a proxy for when it was
     repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
     alongside the existing all-time total.
-  - ROI: realized PNL (all-time and YTD) as a % of net capital deposited —
+  - ROI: realized PNL (all-time and YTD) as a % of your capital base —
     from Offerbook's own /users/{address}/escrow-summary endpoint
     (netDepositedUsd = lifetime deposits minus withdrawals, in USD at each
     movement's own price; interest credited to a lender is deliberately
@@ -27,6 +27,15 @@ Read-only lender-side report across one or more of your own wallets:
     since Jan 1 of the current year — currently equal to all-time, since
     Offerbook itself is younger than a year, but computed properly so it's
     correct once that stops being true.
+
+    If you also spend out of the same wallet(s) (not just lending capital),
+    raw netDepositedUsd is misleading: every personal withdrawal shrinks it,
+    which inflates PNL/deposited even though nothing about trading
+    performance changed. Pass --reset-capital-baseline to lock in a snapshot
+    instead — from that point on, withdrawals are treated as coming out of
+    profit, not capital (new deposits still count), until you reset again.
+    State lives in portfolio_capital_baseline.json (gitignored, wallet-keyed
+    — same privacy treatment as portfolio_reminder_state.json).
   - Portfolio size: open principal (live value) + accrued interest owed on
     active loans - current underwater losses + idle balance (USDC, SOL, and
     every OTHER token sitting in wallet + escrow — e.g. collateral kept
@@ -74,6 +83,7 @@ Usage:
   python portfolio_health.py --wallets <addr1>,<addr2>
   python portfolio_health.py --risk-ltv 0.80 --expiry-hours 24
   python portfolio_health.py --no-calendar-sync
+  python portfolio_health.py --reset-capital-baseline   # lock in today's net deposited as the ROI baseline
 """
 from __future__ import annotations
 
@@ -128,6 +138,13 @@ DISPLAY_TZ = timezone(timedelta(hours=1))  # exact expiry timestamps in the expi
 REMINDER_MINUTES_BEFORE = 30  # how far ahead of a loan's expiry its calendar reminder should fire
 REMINDER_STATE_PATH = os.path.join(os.path.dirname(__file__), "portfolio_reminder_state.json")
 REMINDER_SYNC_PLAN_PATH = os.path.join(os.path.dirname(__file__), "portfolio_reminder_sync_plan.json")
+
+# {wallet: {"baseline_deposited_usd", "baseline_withdrawn_usd", "baseline_net_usd",
+# "captured_at"}} — a per-wallet snapshot of escrow-summary totals at the moment
+# --reset-capital-baseline was last run for that wallet. See compute_capital_base()
+# for how this turns "withdrawals don't reduce invested capital going forward"
+# into an actual number.
+CAPITAL_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "portfolio_capital_baseline.json")
 
 VOLUME_WINDOW_DAYS = 7  # "this week" volume = loans originated in the trailing N days (rolling
                           # window from now, not calendar-week-aligned)
@@ -495,6 +512,84 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
     return rows
 
 # ---------------------------------------------------------------------------
+# Capital baseline (for ROI that isn't inflated by personal-spending withdrawals)
+# ---------------------------------------------------------------------------
+#
+# Offerbook's own escrow-summary netDepositedUsd (deposits - withdrawals)
+# treats every withdrawal as reducing invested capital — fine if the only
+# withdrawals are ever "pulling my principal back out," but not if you also
+# run personal spending out of the same wallet: pnl / netDepositedUsd then
+# inflates as netDepositedUsd shrinks with every grocery run, even though
+# nothing about trading performance changed.
+#
+# The fix: let the user "lock in" a baseline (via --reset-capital-baseline)
+# — a snapshot of escrow-summary's raw totals at that moment. From then on,
+# withdrawals are assumed to come out of profit, not capital, and are simply
+# not subtracted; only NEW deposits (totalDepositedUsd rising above the
+# snapshot) still add to the capital base. Re-running --reset-capital-baseline
+# at any point re-anchors to the then-current live figure — e.g. right after
+# a withdrawal you actually DO want to count as pulling capital out.
+
+def load_capital_baseline() -> dict:
+    """{wallet: {"baseline_deposited_usd", "baseline_withdrawn_usd",
+    "baseline_net_usd", "captured_at"}} for every wallet that's ever had
+    --reset-capital-baseline run for it."""
+    if not os.path.exists(CAPITAL_BASELINE_PATH):
+        return {}
+    try:
+        with open(CAPITAL_BASELINE_PATH) as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_capital_baseline(state: dict) -> None:
+    with open(CAPITAL_BASELINE_PATH, "w") as fh:
+        json.dump(state, fh, indent=2)
+
+
+def reset_capital_baseline(wallets: list[str], state: dict, now: datetime) -> dict:
+    """Snapshots each wallet's CURRENT escrow-summary totals as its new
+    baseline, overwriting any previous one. Mutates and returns `state`;
+    caller is responsible for calling save_capital_baseline() with it."""
+    for wallet in wallets:
+        summary = fetch_escrow_summary(wallet)
+        if summary is None:
+            log.warning("  %s: couldn't fetch escrow-summary — baseline NOT reset for this wallet.", wallet)
+            continue
+        state[wallet] = {
+            "baseline_deposited_usd": summary.get("totalDepositedUsd", 0.0),
+            "baseline_withdrawn_usd": summary.get("totalWithdrawnUsd", 0.0),
+            "baseline_net_usd": summary.get("netDepositedUsd", 0.0),
+            "captured_at": now.isoformat(),
+        }
+        log.info("  %s: baseline set to $%.2f net deposited (as of now).", wallet, state[wallet]["baseline_net_usd"])
+    return state
+
+
+def compute_capital_base(wallet: str, escrow_summary: dict | None, baseline_state: dict) -> tuple[float | None, bool]:
+    """The capital-base figure to use for THIS wallet's ROI denominator, and
+    whether a baseline is actually active for it (vs. falling back to the
+    raw live netDepositedUsd, pre-reset behavior).
+
+    With a baseline: baseline_net + max(0, current_total_deposited -
+    baseline_total_deposited) — the frozen baseline, plus credit for any
+    genuinely NEW deposits made since the snapshot. Withdrawals since the
+    snapshot are NOT subtracted, by design (see section docstring above).
+
+    Without one (wallet was never reset, or the summary fetch failed):
+    falls back to escrow_summary's raw netDepositedUsd (or None if that
+    fetch also failed) — same as before this feature existed."""
+    baseline = baseline_state.get(wallet)
+    if escrow_summary is None:
+        return (baseline["baseline_net_usd"] if baseline else None), bool(baseline)
+    if baseline is None:
+        return escrow_summary.get("netDepositedUsd"), False
+
+    new_deposits = max(0.0, escrow_summary.get("totalDepositedUsd", 0.0) - baseline["baseline_deposited_usd"])
+    return baseline["baseline_net_usd"] + new_deposits, True
+
+# ---------------------------------------------------------------------------
 # Calendar reminder sync plan
 # ---------------------------------------------------------------------------
 #
@@ -854,26 +949,42 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
 
 
 def print_roi_summary(per_wallet: list[dict], total_net_pnl_usd: float, total_pnl_ytd_usd: float) -> None:
-    """Realized PNL as a % of net capital deposited (Offerbook's own
-    escrow-summary rollup — see fetch_escrow_summary), summed across every
-    wallet checked this run. Skipped entirely if no wallet's escrow summary
-    could be fetched, or if net deposited is <= 0 (a portfolio that's a net
-    withdrawer, or brand new, doesn't have a meaningful ROI %% yet)."""
-    known = [w for w in per_wallet if w.get("net_deposited_usd") is not None]
+    """Realized PNL as a % of capital base, summed across every wallet
+    checked this run. Capital base is compute_capital_base()'s per-wallet
+    figure — the frozen baseline (+ new deposits since) for a wallet that's
+    had --reset-capital-baseline run, otherwise the raw live netDepositedUsd
+    (pre-reset behavior). Skipped entirely if no wallet's capital base could
+    be determined, or if the total is <= 0 (a portfolio that's a net
+    withdrawer with no baseline set, or brand new, doesn't have a meaningful
+    ROI %% yet)."""
+    known = [w for w in per_wallet if w.get("capital_base_usd") is not None]
     if not known:
         log.info("")
-        log.info("ROI: couldn't fetch escrow-summary for any wallet this run — skipping.")
+        log.info("ROI: couldn't determine a capital base for any wallet this run — skipping.")
         return
 
-    total_net_deposited = sum(w["net_deposited_usd"] for w in known)
+    total_capital_base = sum(w["capital_base_usd"] for w in known)
     unpriced_wallets = [w["wallet"] for w in known if w.get("unpriced_movement_count")]
-    missing_wallets = [w["wallet"] for w in per_wallet if w.get("net_deposited_usd") is None]
+    missing_wallets = [w["wallet"] for w in per_wallet if w.get("capital_base_usd") is None]
+    baselined_wallets = [w["wallet"] for w in known if w.get("has_baseline")]
+    unbaselined_wallets = [w["wallet"] for w in known if not w.get("has_baseline")]
 
     log.info("")
     log.info("=" * 100)
-    log.info("ROI (net capital deposited, per Offerbook's own escrow-summary)")
+    log.info("ROI (capital base, see --reset-capital-baseline)")
     log.info("=" * 100)
-    log.info("Net capital deposited (all-time, deposits - withdrawals): $%.2f", total_net_deposited)
+    log.info("Capital base (all-time deposits, net of withdrawals PRE-baseline only): $%.2f", total_capital_base)
+    if baselined_wallets:
+        log.info(
+            "  %d wallet(s) have a locked baseline — withdrawals since it was set don't reduce this: %s",
+            len(baselined_wallets), ", ".join(baselined_wallets),
+        )
+    if unbaselined_wallets:
+        log.info(
+            "  %d wallet(s) have NO baseline — using raw net deposited (every withdrawal still reduces this). "
+            "Run --reset-capital-baseline to lock one in: %s",
+            len(unbaselined_wallets), ", ".join(unbaselined_wallets),
+        )
     if missing_wallets:
         log.info("  (%d wallet(s) excluded above — escrow-summary fetch failed: %s)", len(missing_wallets), ", ".join(missing_wallets))
     if unpriced_wallets:
@@ -882,13 +993,13 @@ def print_roi_summary(per_wallet: list[dict], total_net_pnl_usd: float, total_pn
             len(unpriced_wallets), ", ".join(unpriced_wallets),
         )
 
-    if total_net_deposited <= 0:
-        log.info("Net deposited is <= $0 (net withdrawer, or nothing deposited yet) — ROI %% isn't meaningful.")
+    if total_capital_base <= 0:
+        log.info("Capital base is <= $0 — ROI %% isn't meaningful.")
         log.info("=" * 100)
         return
 
-    roi_all_time = total_net_pnl_usd / total_net_deposited * 100
-    roi_ytd = total_pnl_ytd_usd / total_net_deposited * 100
+    roi_all_time = total_net_pnl_usd / total_capital_base * 100
+    roi_ytd = total_pnl_ytd_usd / total_capital_base * 100
     log.info("Realized PNL (all-time): $%.2f   -> ROI: %.1f%%", total_net_pnl_usd, roi_all_time)
     log.info("Realized PNL (YTD):      $%.2f   -> ROI: %.1f%%", total_pnl_ytd_usd, roi_ytd)
     log.info("=" * 100)
@@ -910,6 +1021,13 @@ def main() -> None:
         "--no-calendar-sync", action="store_true",
         help="Skip syncing reminders to Google Calendar — just refresh the local plan file.",
     )
+    parser.add_argument(
+        "--reset-capital-baseline", action="store_true",
+        help="Lock in each wallet's CURRENT escrow-summary totals as the new ROI capital base — "
+             "withdrawals from this point on are treated as profit distributions, not reductions "
+             "in invested capital (new deposits still count). Re-run any time to re-anchor, e.g. "
+             "right after a withdrawal you actually DO want to count as pulling capital out.",
+    )
     args = parser.parse_args()
 
     raw_wallets = args.wallets or os.getenv("OFFERBOOK_PORTFOLIO_WALLETS", "")
@@ -920,6 +1038,13 @@ def main() -> None:
             "or pass --wallets addr1,addr2. Aborting."
         )
         raise SystemExit(1)
+
+    now = datetime.now(timezone.utc)
+    capital_baseline = load_capital_baseline()
+    if args.reset_capital_baseline:
+        log.info("Resetting capital baseline for %d wallet(s) …", len(wallets))
+        capital_baseline = reset_capital_baseline(wallets, capital_baseline, now)
+        save_capital_baseline(capital_baseline)
 
     log.info("Checking portfolio health for %d wallet(s) …", len(wallets))
     log.info("Fetching full platform-wide loan history (active + defaulted + repaid) …")
@@ -935,7 +1060,6 @@ def main() -> None:
     }
     collateral_mints.discard(None)
 
-    now = datetime.now(timezone.utc)
     all_loans = active + defaulted + repaid
     volume_since = now - timedelta(days=VOLUME_WINDOW_DAYS)
     since_ytd = datetime(now.year, 1, 1, tzinfo=timezone.utc)
@@ -1020,8 +1144,8 @@ def main() -> None:
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
 
         escrow_summary = fetch_escrow_summary(wallet)
-        net_deposited_usd = escrow_summary.get("netDepositedUsd") if escrow_summary else None
         unpriced_movement_count = escrow_summary.get("unpricedMovementCount", 0) if escrow_summary else 0
+        capital_base_usd, has_baseline = compute_capital_base(wallet, escrow_summary, capital_baseline)
 
         print_wallet_report(
             wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, other_holdings, idle_balance_usd,
@@ -1036,7 +1160,8 @@ def main() -> None:
             "active_rows": active_rows, "pnl": pnl, "risk_ltv": args.risk_ltv,
             "volume_week_usd": volume_week_usd, "volume_all_time_usd": volume_all_time_usd,
             "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d, "pnl_ytd": pnl_ytd,
-            "net_deposited_usd": net_deposited_usd, "unpriced_movement_count": unpriced_movement_count,
+            "capital_base_usd": capital_base_usd, "has_baseline": has_baseline,
+            "unpriced_movement_count": unpriced_movement_count,
         })
 
     if len(per_wallet) > 1:

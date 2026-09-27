@@ -64,10 +64,20 @@ Read-only lender-side report across one or more of your own wallets:
     for every active loan that doesn't have one yet, and marking the
     reminder done (relabeled, popup cleared — not deleted, so there's still
     a trail of past loans on the calendar) for any previously-tracked loan
-    that's since resolved (repaid/defaulted). Requires one-time setup — see
-    google_calendar_client.py's docstring. Pass --no-calendar-sync to just
-    refresh portfolio_reminder_sync_plan.json without touching Calendar
-    (e.g. before you've done that setup).
+    that's since resolved (repaid/defaulted).
+
+    Also detects RENEWED loans: Offerbook lets a loan's term be extended in
+    place (same pubkey, stays "active", expiredAt/updatedAt move forward,
+    extensionCount ticks up) — confirmed against live data to affect ~12%
+    of active loans at any given time, not an edge case. A loan whose
+    tracked expiry no longer matches its current expiredAt gets its old
+    reminder marked done (tagged "renewed", not repaid/defaulted) AND a
+    fresh reminder created for the new deadline — otherwise the original
+    reminder silently keeps pointing at a date that no longer applies.
+
+    Requires one-time setup — see google_calendar_client.py's docstring.
+    Pass --no-calendar-sync to just refresh portfolio_reminder_sync_plan.json
+    without touching Calendar (e.g. before you've done that setup).
 
 Never signs or submits anything on Offerbook — read-only there, no private
 key needed. (It does create/update Google Calendar events, per the above.)
@@ -615,14 +625,40 @@ def load_reminder_state() -> dict:
         return {}
 
 
+def _build_reminder_create_entry(loan_id: str, r: dict, now: datetime) -> dict | None:
+    """The "create" plan entry for one active loan row, or None if its
+    reminder window (expiry - REMINDER_MINUTES_BEFORE) has already passed —
+    creating a reminder for a window that's already gone would just be a
+    calendar event that never fires. Shared by brand-new loans and loans
+    that just got extended (see build_reminder_sync_plan)."""
+    if r["expired_at"] is None:
+        return None
+    reminder_time = r["expired_at"] - timedelta(minutes=REMINDER_MINUTES_BEFORE)
+    if reminder_time <= now:
+        return None
+    borrower = r["borrower"]
+    borrower_short = f"{borrower[:6]}…{borrower[-4:]}" if borrower else "unknown"
+    return {
+        "loan_id": loan_id,
+        "wallet": r["wallet"],
+        "summary": f"Offerbook loan expiring in {REMINDER_MINUTES_BEFORE}min — {r['collateral_symbol']} ({borrower_short})",
+        "description": (
+            f"Wallet: {r['wallet']}\nBorrower: {borrower}\nCollateral: {r['collateral_symbol']}\n"
+            f"Principal: ${r['principal_usd']:.2f}\nAPY: {r['apy_bps']/100:.2f}%\n"
+            f"Live LTV: {_fmt_pct(r['live_ltv'])}\nExpires: {_fmt_utc1(r['expired_at'])}"
+        ),
+        "reminder_time_utc": reminder_time.isoformat(),
+        "expires_at_utc": r["expired_at"].isoformat(),
+    }
+
+
 def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: datetime, resolutions: dict[str, str] | None = None) -> dict:
     """
     Diff every currently-active loan (across all wallets checked this run)
     against the last-known reminder state:
-      - "create": active loans with no tracked reminder yet, whose
-        (expiry - REMINDER_MINUTES_BEFORE) hasn't already passed — creating
-        a reminder for a window that's already gone would just be a
-        calendar event that never fires.
+      - "create": active loans with no tracked reminder yet (brand new, OR
+        just extended — see "renewed" below), whose
+        (expiry - REMINDER_MINUTES_BEFORE) hasn't already passed.
       - "resolve": previously-tracked loans no longer in the active list —
         they must have resolved (repaid or defaulted) since the state was
         last updated, so their reminder is now stale. Rather than deleting
@@ -630,30 +666,32 @@ def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: date
         there's still a visible trail of past loans instead of the event
         just disappearing. `resolutions` (loan_id -> "repaid"/"defaulted"),
         when given, tags each entry with how it actually resolved.
+      - Renewed loans: Offerbook lets a loan's term be EXTENDED in place —
+        same pubkey, same "active" status throughout, extensionCount ticks
+        up and expiredAt/updatedAt move forward (confirmed against live
+        loans: ~12% of active loans on the platform have extensionCount > 0
+        at any given time — not a rare edge case). A loan_id staying in
+        `state` while its expiredAt changes is exactly this: the OLD
+        calendar reminder now points at a deadline that no longer applies.
+        These loan_ids get BOTH a "resolve" entry (old reminder relabeled
+        done, tagged "renewed" — not repaid/defaulted, since the loan is
+        still very much open) AND a fresh "create" entry for the new expiry.
     """
     active_by_id = {r["loan_id"]: r for r in all_active_rows if r.get("loan_id")}
 
+    renewed_ids = {
+        loan_id for loan_id, r in active_by_id.items()
+        if loan_id in state and r["expired_at"] is not None
+        and state[loan_id].get("expires_at") != r["expired_at"].isoformat()
+    }
+
     to_create = []
     for loan_id, r in active_by_id.items():
-        if loan_id in state or r["expired_at"] is None:
+        if loan_id in state and loan_id not in renewed_ids:
             continue
-        reminder_time = r["expired_at"] - timedelta(minutes=REMINDER_MINUTES_BEFORE)
-        if reminder_time <= now:
-            continue
-        borrower = r["borrower"]
-        borrower_short = f"{borrower[:6]}…{borrower[-4:]}" if borrower else "unknown"
-        to_create.append({
-            "loan_id": loan_id,
-            "wallet": r["wallet"],
-            "summary": f"Offerbook loan expiring in {REMINDER_MINUTES_BEFORE}min — {r['collateral_symbol']} ({borrower_short})",
-            "description": (
-                f"Wallet: {r['wallet']}\nBorrower: {borrower}\nCollateral: {r['collateral_symbol']}\n"
-                f"Principal: ${r['principal_usd']:.2f}\nAPY: {r['apy_bps']/100:.2f}%\n"
-                f"Live LTV: {_fmt_pct(r['live_ltv'])}\nExpires: {_fmt_utc1(r['expired_at'])}"
-            ),
-            "reminder_time_utc": reminder_time.isoformat(),
-            "expires_at_utc": r["expired_at"].isoformat(),
-        })
+        entry = _build_reminder_create_entry(loan_id, r, now)
+        if entry is not None:
+            to_create.append(entry)
 
     resolutions = resolutions or {}
     to_resolve = [
@@ -663,6 +701,13 @@ def build_reminder_sync_plan(all_active_rows: list[dict], state: dict, now: date
         }
         for loan_id, entry in state.items()
         if loan_id not in active_by_id
+    ]
+    to_resolve += [
+        {
+            "loan_id": loan_id, "event_id": state[loan_id].get("event_id"), "wallet": state[loan_id].get("wallet"),
+            "resolution": "renewed",
+        }
+        for loan_id in renewed_ids
     ]
 
     return {"generated_at": now.isoformat(), "create": to_create, "resolve": to_resolve}
@@ -690,8 +735,12 @@ def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
     Resolved loans are marked done (relabeled, reminder popup cleared) via
     mark_event_done rather than deleted — the event stays on the calendar
     as a trail of past loans instead of disappearing. Either way the loan
-    is dropped from `state` once handled, since it no longer needs diffing
-    against future active-loan snapshots.
+    is dropped from `state` once handled — EXCEPT a "renewed" resolution
+    (see build_reminder_sync_plan), where the same loan_id also appears in
+    plan["create"] for its new expiry. Resolve runs BEFORE create for
+    exactly this reason: popping the old entry first, then letting create
+    set the fresh one straight after, avoids the fresh entry getting
+    immediately wiped by its own loan_id's resolve step.
     """
     try:
         import google_calendar_client as gcal
@@ -703,6 +752,16 @@ def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
         return
 
     created = resolved = errors = 0
+    for entry in plan["resolve"]:
+        try:
+            if entry.get("event_id"):
+                gcal.mark_event_done(entry["event_id"], entry.get("resolution"))
+            state.pop(entry["loan_id"], None)
+            resolved += 1
+        except Exception as exc:
+            log.error("Failed to mark reminder done for loan %s: %s", entry["loan_id"], exc)
+            errors += 1
+
     for entry in plan["create"]:
         try:
             start_dt = datetime.fromisoformat(entry["reminder_time_utc"])
@@ -714,16 +773,6 @@ def sync_reminders_to_calendar(plan: dict, state: dict) -> None:
             created += 1
         except Exception as exc:
             log.error("Failed to create reminder for loan %s: %s", entry["loan_id"], exc)
-            errors += 1
-
-    for entry in plan["resolve"]:
-        try:
-            if entry.get("event_id"):
-                gcal.mark_event_done(entry["event_id"], entry.get("resolution"))
-            state.pop(entry["loan_id"], None)
-            resolved += 1
-        except Exception as exc:
-            log.error("Failed to mark reminder done for loan %s: %s", entry["loan_id"], exc)
             errors += 1
 
     save_reminder_state(state)

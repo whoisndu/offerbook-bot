@@ -153,7 +153,7 @@ def describe(loan: dict) -> str:
         f"pubkey: {loan['pubkey']}\n"
         f"borrower: {loan['borrower']}\n"
         f"lender: {loan['lender']}\n"
-        f"principal: {loan['principalAmount'] / 10**6:.2f} (~${_start_usd(loan):.2f} at origination)\n"
+        f"principal: {loan['principalAmount'] / 10**6:,.2f} (~${_start_usd(loan):,.2f} at origination)\n"
         f"collateralMint: {loan['collateralMint']}\n"
         f"apy: {loan['apy'] / 100:.2f}%   duration: {loan['duration'] / 86400:.1f}d\n"
         f"expiredAt: {loan['expiredAt']}\n"
@@ -201,13 +201,13 @@ def main() -> None:
         }
         hrs_late = (now - expired_at).total_seconds() / 3600
         send_email(
-            f"Offerbook: loan expired w/ surplus ({hrs_late:.1f}h late) — ${surplus_usd:+.2f} surplus",
+            f"Offerbook: loan expired w/ surplus ({hrs_late:.1f}h late) — ${surplus_usd:+,.2f} surplus",
             "This loan is past its due date, still unresolved, and its collateral "
-            f"is currently worth ${surplus_usd:.2f} more than what's owed:\n\n"
+            f"is currently worth ${surplus_usd:,.2f} more than what's owed:\n\n"
             + describe(loan)
-            + f"\nOwed (principal+interest): ${owed_usd:.2f}\n"
-            + f"Collateral value now: ${collateral_usd:.2f}\n"
-            + f"Surplus: ${surplus_usd:+.2f}\n"
+            + f"\nOwed (principal+interest): ${owed_usd:,.2f}\n"
+            + f"Collateral value now: ${collateral_usd:,.2f}\n"
+            + f"Surplus: ${surplus_usd:+,.2f}\n"
             + f"Late by: {hrs_late:.1f}h so far.",
         )
         newly_expired += 1
@@ -229,7 +229,7 @@ def main() -> None:
         delta_hrs = (resolved_at - expired_at).total_seconds() / 3600
         verb = "REPAID" if status == "repaid" else "DEFAULTED (collateral claimed)"
         send_email(
-            f"Offerbook: loan {verb} — ${_start_usd(loan):.2f}",
+            f"Offerbook: loan {verb} — ${_start_usd(loan):,.2f}",
             f"{verb}\n\n" + describe(loan) + f"\nResolved at: {loan['updatedAt']}  ({delta_hrs:+.2f}h vs expiry)",
         )
         del state[pubkey]

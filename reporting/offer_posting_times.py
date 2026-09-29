@@ -244,7 +244,7 @@ def print_summary(rows: list[dict], counts: list[int], usd_sums: list[float],
                    cum_pct: list[float], coverage: float, tz_name: str) -> None:
     log.info("Offers analyzed: %d", len(rows))
     log.info("Date range: %s to %s (local tz: %s)", rows[0]["date"], rows[-1]["date"], tz_name)
-    log.info("Total competing USD volume: $%.2f", sum(usd_sums))
+    log.info("Total competing USD volume: $%s", f"{sum(usd_sums):,.2f}")
 
     from collections import Counter
     status_counts = Counter(r["status"] for r in rows)
@@ -254,7 +254,7 @@ def print_summary(rows: list[dict], counts: list[int], usd_sums: list[float],
     log.info("Hourly breakdown (local time):")
     log.info("  %-6s  %6s  %12s  %8s", "hour", "count", "usd volume", "cum %")
     for h in range(24):
-        log.info("  %02d:00   %6d  %12.2f  %7.1f%%", h, counts[h], usd_sums[h], cum_pct[h])
+        log.info("  %02d:00   %6d  %12s  %7.1f%%", h, counts[h], f"{usd_sums[h]:,.2f}", cum_pct[h])
 
     top_by_count = sorted(range(24), key=lambda h: counts[h], reverse=True)[:3]
     top_by_usd = sorted(range(24), key=lambda h: usd_sums[h], reverse=True)[:3]

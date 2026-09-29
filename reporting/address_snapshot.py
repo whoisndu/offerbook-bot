@@ -173,8 +173,8 @@ def print_detail_table(rows: list[dict]) -> None:
             f"${r['total_owed_usd']:,.2f}", f"${r['collateral_usd']:,.2f}",
         ))
     log.info(
-        "TOTAL — owed: $%.2f   collateral: $%.2f",
-        sum(r["total_owed_usd"] for r in rows), sum(r["collateral_usd"] for r in rows),
+        "TOTAL — owed: $%s   collateral: $%s",
+        f"{sum(r['total_owed_usd'] for r in rows):,.2f}", f"{sum(r['collateral_usd'] for r in rows):,.2f}",
     )
 
 
@@ -201,8 +201,8 @@ def print_grouped_summary(summary_rows: list[dict], group_key: str) -> None:
             a[group_key], a["loans"], f"${a['total_owed_usd']:,.2f}", f"${a['total_collateral_usd']:,.2f}",
         ))
     log.info(
-        "TOTAL — owed: $%.2f   collateral: $%.2f   across %d %s(s)",
-        sum(a["total_owed_usd"] for a in summary_rows), sum(a["total_collateral_usd"] for a in summary_rows),
+        "TOTAL — owed: $%s   collateral: $%s   across %d %s(s)",
+        f"{sum(a['total_owed_usd'] for a in summary_rows):,.2f}", f"{sum(a['total_collateral_usd'] for a in summary_rows):,.2f}",
         len(summary_rows), group_key,
     )
 

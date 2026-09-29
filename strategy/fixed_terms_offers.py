@@ -406,12 +406,12 @@ def main() -> None:
     buffer_raw = int(WALLET_BUFFER_USDC * 10 ** USDC_DECIMALS)
     usdc_available_raw = max(0, usdc_available_raw - buffer_raw)
     usdc_available = usdc_available_raw / 10 ** USDC_DECIMALS
-    log.info("USDC available (after $%.2f buffer): %.2f", WALLET_BUFFER_USDC, usdc_available)
+    log.info("USDC available (after $%s buffer): %s", f"{WALLET_BUFFER_USDC:,.2f}", f"{usdc_available:,.2f}")
 
     principal_usdc = round_to_nearest(usdc_available / PRINCIPAL_DIVISOR, ROUND_STEP_USDC)
     principal_raw = int(principal_usdc * 10 ** USDC_DECIMALS)
-    log.info("Principal per offer (available / %d, rounded to nearest $%.0f): %.2f USDC",
-              PRINCIPAL_DIVISOR, ROUND_STEP_USDC, principal_usdc)
+    log.info("Principal per offer (available / %d, rounded to nearest $%s): %s USDC",
+              PRINCIPAL_DIVISOR, f"{ROUND_STEP_USDC:,.0f}", f"{principal_usdc:,.2f}")
     if principal_raw <= 0:
         log.error("Principal per offer rounds to 0 — not enough available balance. Aborting.")
         sys.exit(1)
@@ -425,8 +425,8 @@ def main() -> None:
         )
         sys.exit(1)
     collateral_raw = compute_collateral_amount(principal_raw, price, collateral_decimals)
-    log.info("Collateral per offer at %.0f%% LTV, price $%.6g: %.4f %s",
-              FIXED_LTV * 100, price, collateral_raw / 10 ** collateral_decimals, symbol_for(collateral_mint))
+    log.info("Collateral per offer at %.0f%% LTV, price $%.6g: %s %s",
+              FIXED_LTV * 100, price, f"{collateral_raw / 10 ** collateral_decimals:,.4f}", symbol_for(collateral_mint))
 
     # 3. Skip durations that already have a live offer of ours on this exact pair.
     already_open_secs = fetch_own_live_offer_durations(collateral_mint)

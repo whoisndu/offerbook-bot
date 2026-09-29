@@ -573,7 +573,7 @@ def reset_capital_baseline(wallets: list[str], state: dict, now: datetime) -> di
             "baseline_net_usd": summary.get("netDepositedUsd", 0.0),
             "captured_at": now.isoformat(),
         }
-        log.info("  %s: baseline set to $%.2f net deposited (as of now).", wallet, state[wallet]["baseline_net_usd"])
+        log.info("  %s: baseline set to $%s net deposited (as of now).", wallet, f"{state[wallet]['baseline_net_usd']:,.2f}")
     return state
 
 
@@ -644,7 +644,7 @@ def _build_reminder_create_entry(loan_id: str, r: dict, now: datetime) -> dict |
         "summary": f"Offerbook loan expiring in {REMINDER_MINUTES_BEFORE}min — {r['collateral_symbol']} ({borrower_short})",
         "description": (
             f"Wallet: {r['wallet']}\nBorrower: {borrower}\nCollateral: {r['collateral_symbol']}\n"
-            f"Principal: ${r['principal_usd']:.2f}\nAPY: {r['apy_bps']/100:.2f}%\n"
+            f"Principal: ${r['principal_usd']:,.2f}\nAPY: {r['apy_bps']/100:.2f}%\n"
             f"Live LTV: {_fmt_pct(r['live_ltv'])}\nExpires: {_fmt_utc1(r['expired_at'])}"
         ),
         "reminder_time_utc": reminder_time.isoformat(),
@@ -827,14 +827,14 @@ def print_other_holdings_table(other_holdings: list[dict]) -> None:
     log.info(col.format("symbol", "mint", "amount", "price $", "value $"))
     unpriced = 0
     for h in other_holdings:
-        amount_str = f"{h['raw_amount'] / 10 ** h['decimals']:,.4f}" if h["decimals"] is not None else f"{h['raw_amount']} (raw)"
+        amount_str = f"{h['raw_amount'] / 10 ** h['decimals']:,.4f}" if h["decimals"] is not None else f"{h['raw_amount']:,} (raw)"
         if h["usd"] is not None:
             log.info(col.format(h["symbol"], h["mint"], amount_str, f"{h['price']:,.6g}", f"{h['usd']:,.2f}"))
         else:
             log.info(col.format(h["symbol"], h["mint"], amount_str, "?", "?") + "  *** NO PRICE ***")
             unpriced += 1
     total_usd = sum(h["usd"] or 0 for h in other_holdings)
-    log.info("Other holdings total: $%.2f%s", total_usd, f"  ({unpriced} unpriced, excluded)" if unpriced else "")
+    log.info("Other holdings total: $%s%s", f"{total_usd:,.2f}", f"  ({unpriced} unpriced, excluded)" if unpriced else "")
 
 
 def print_wallet_report(
@@ -849,18 +849,18 @@ def print_wallet_report(
     log.info("WALLET: %s", wallet)
     log.info("=" * 100)
     log.info(
-        "Balances — SOL wallet: %.4f   SOL escrow: %.4f   SOL total: %.4f   "
-        "USDC wallet: %.2f   USDC escrow: %.2f   USDC total: %.2f",
-        sol_balance / 10 ** SOL_DECIMALS, sol_escrow / 10 ** SOL_DECIMALS,
-        (sol_balance + sol_escrow) / 10 ** SOL_DECIMALS,
-        usdc_wallet / 10 ** USDC_DECIMALS,
-        usdc_escrow / 10 ** USDC_DECIMALS, (usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS,
+        "Balances — SOL wallet: %s   SOL escrow: %s   SOL total: %s   "
+        "USDC wallet: %s   USDC escrow: %s   USDC total: %s",
+        f"{sol_balance / 10 ** SOL_DECIMALS:,.4f}", f"{sol_escrow / 10 ** SOL_DECIMALS:,.4f}",
+        f"{(sol_balance + sol_escrow) / 10 ** SOL_DECIMALS:,.4f}",
+        f"{usdc_wallet / 10 ** USDC_DECIMALS:,.2f}",
+        f"{usdc_escrow / 10 ** USDC_DECIMALS:,.2f}", f"{(usdc_wallet + usdc_escrow) / 10 ** USDC_DECIMALS:,.2f}",
     )
     print_other_holdings_table(other_holdings)
-    log.info("Idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%.2f", idle_balance_usd)
+    log.info("Idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%s", f"{idle_balance_usd:,.2f}")
     log.info(
-        "Volume — last %d days: $%.2f   all-time: $%.2f",
-        VOLUME_WINDOW_DAYS, volume_week_usd, volume_all_time_usd,
+        "Volume — last %d days: $%s   all-time: $%s",
+        VOLUME_WINDOW_DAYS, f"{volume_week_usd:,.2f}", f"{volume_all_time_usd:,.2f}",
     )
 
     total_active_principal = sum(r["principal_usd"] or 0 for r in active_rows)
@@ -869,19 +869,19 @@ def print_wallet_report(
     freeing_24h_usd = compute_capital_freeing_up(active_rows, 24)
     freeing_48h_usd = compute_capital_freeing_up(active_rows, 48)
     freeing_72h_usd = compute_capital_freeing_up(active_rows, 72)
-    log.info("Active loans: %d   Outstanding principal: $%.2f", len(active_rows), total_active_principal)
+    log.info("Active loans: %d   Outstanding principal: $%s", len(active_rows), f"{total_active_principal:,.2f}")
     log.info(
-        "Capital freeing up — next 24h: $%.2f   next 48h: $%.2f   next 72h: $%.2f",
-        freeing_24h_usd, freeing_48h_usd, freeing_72h_usd,
+        "Capital freeing up — next 24h: $%s   next 48h: $%s   next 72h: $%s",
+        f"{freeing_24h_usd:,.2f}", f"{freeing_48h_usd:,.2f}", f"{freeing_72h_usd:,.2f}",
     )
-    log.info("Unrealized profit (interest owed on active loans, net of repay fee, not yet collected): $%.2f", total_unrealized_usd)
+    log.info("Unrealized profit (interest owed on active loans, net of repay fee, not yet collected): $%s", f"{total_unrealized_usd:,.2f}")
     log.info(
-        "Unrealized profit net of current underwater losses (-$%.2f): $%.2f",
-        total_underwater_loss_usd, total_unrealized_usd - total_underwater_loss_usd,
+        "Unrealized profit net of current underwater losses (-$%s): $%s",
+        f"{total_underwater_loss_usd:,.2f}", f"{total_unrealized_usd - total_underwater_loss_usd:,.2f}",
     )
     log.info(
-        "Portfolio size (open principal + accrued interest - underwater losses + idle balance): $%.2f",
-        total_active_principal + total_unrealized_usd - total_underwater_loss_usd + idle_balance_usd,
+        "Portfolio size (open principal + accrued interest - underwater losses + idle balance): $%s",
+        f"{total_active_principal + total_unrealized_usd - total_underwater_loss_usd + idle_balance_usd:,.2f}",
     )
 
     at_risk = [r for r in active_rows if r["live_ltv"] is not None and r["live_ltv"] >= risk_ltv]
@@ -920,16 +920,16 @@ def print_wallet_report(
         f"{pnl['default_rate']:.1f}%" if pnl["default_rate"] is not None else "n/a",
     )
     log.info(
-        "  Interest earned (gross): $%.2f   Repay fees paid: $%.2f   Collateral-kept-on-default net: $%.2f",
-        pnl["interest_usd"], pnl["fees_usd"], pnl["defaulted_pnl_usd"],
+        "  Interest earned (gross): $%s   Repay fees paid: $%s   Collateral-kept-on-default net: $%s",
+        f"{pnl['interest_usd']:,.2f}", f"{pnl['fees_usd']:,.2f}", f"{pnl['defaulted_pnl_usd']:,.2f}",
     )
-    log.info("  NET REALIZED PNL: $%.2f", pnl["net_pnl_usd"])
+    log.info("  NET REALIZED PNL: $%s", f"{pnl['net_pnl_usd']:,.2f}")
     log.info(
-        "  Realized earnings — last 24h: $%.2f (%d resolved)   last 7d: $%.2f (%d resolved)   last 14d: $%.2f (%d resolved)   YTD: $%.2f (%d resolved)",
-        pnl_24h["net_pnl_usd"], pnl_24h["repaid_count"] + pnl_24h["defaulted_count"],
-        pnl_7d["net_pnl_usd"], pnl_7d["repaid_count"] + pnl_7d["defaulted_count"],
-        pnl_14d["net_pnl_usd"], pnl_14d["repaid_count"] + pnl_14d["defaulted_count"],
-        pnl_ytd["net_pnl_usd"], pnl_ytd["repaid_count"] + pnl_ytd["defaulted_count"],
+        "  Realized earnings — last 24h: $%s (%d resolved)   last 7d: $%s (%d resolved)   last 14d: $%s (%d resolved)   YTD: $%s (%d resolved)",
+        f"{pnl_24h['net_pnl_usd']:,.2f}", pnl_24h["repaid_count"] + pnl_24h["defaulted_count"],
+        f"{pnl_7d['net_pnl_usd']:,.2f}", pnl_7d["repaid_count"] + pnl_7d["defaulted_count"],
+        f"{pnl_14d['net_pnl_usd']:,.2f}", pnl_14d["repaid_count"] + pnl_14d["defaulted_count"],
+        f"{pnl_ytd['net_pnl_usd']:,.2f}", pnl_ytd["repaid_count"] + pnl_ytd["defaulted_count"],
     )
 
 
@@ -964,35 +964,35 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_pnl_14d = sum(w["pnl_14d"]["net_pnl_usd"] for w in per_wallet)
     total_pnl_ytd = sum(w["pnl_ytd"]["net_pnl_usd"] for w in per_wallet)
 
-    log.info("Total USDC on hand (wallet + escrow): $%.2f", total_usdc / 10 ** USDC_DECIMALS)
-    log.info("Total other holdings (non-SOL/USDC, wallet + escrow, at current prices): $%.2f", total_other_holdings_usd)
-    log.info("Total idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%.2f", total_idle_balance)
+    log.info("Total USDC on hand (wallet + escrow): $%s", f"{total_usdc / 10 ** USDC_DECIMALS:,.2f}")
+    log.info("Total other holdings (non-SOL/USDC, wallet + escrow, at current prices): $%s", f"{total_other_holdings_usd:,.2f}")
+    log.info("Total idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%s", f"{total_idle_balance:,.2f}")
     log.info(
-        "Total volume — last %d days: $%.2f   all-time: $%.2f",
-        VOLUME_WINDOW_DAYS, total_volume_week, total_volume_all_time,
+        "Total volume — last %d days: $%s   all-time: $%s",
+        VOLUME_WINDOW_DAYS, f"{total_volume_week:,.2f}", f"{total_volume_all_time:,.2f}",
     )
-    log.info("Total active loans: %d   Outstanding principal: $%.2f   At-risk: %d", total_active, total_outstanding, total_at_risk)
+    log.info("Total active loans: %d   Outstanding principal: $%s   At-risk: %d", total_active, f"{total_outstanding:,.2f}", total_at_risk)
     log.info(
-        "Total capital freeing up — next 24h: $%.2f   next 48h: $%.2f   next 72h: $%.2f",
-        total_freeing_24h, total_freeing_48h, total_freeing_72h,
+        "Total capital freeing up — next 24h: $%s   next 48h: $%s   next 72h: $%s",
+        f"{total_freeing_24h:,.2f}", f"{total_freeing_48h:,.2f}", f"{total_freeing_72h:,.2f}",
     )
-    log.info("Total unrealized profit (interest owed on active loans, net of repay fee): $%.2f", total_unrealized)
+    log.info("Total unrealized profit (interest owed on active loans, net of repay fee): $%s", f"{total_unrealized:,.2f}")
     log.info(
-        "Total unrealized profit net of current underwater losses (-$%.2f): $%.2f",
-        total_underwater_loss, total_unrealized - total_underwater_loss,
+        "Total unrealized profit net of current underwater losses (-$%s): $%s",
+        f"{total_underwater_loss:,.2f}", f"{total_unrealized - total_underwater_loss:,.2f}",
     )
     log.info(
-        "TOTAL PORTFOLIO SIZE (open principal + accrued interest - underwater losses + idle balance): $%.2f",
-        total_outstanding + total_unrealized - total_underwater_loss + total_idle_balance,
+        "TOTAL PORTFOLIO SIZE (open principal + accrued interest - underwater losses + idle balance): $%s",
+        f"{total_outstanding + total_unrealized - total_underwater_loss + total_idle_balance:,.2f}",
     )
     log.info(
         "All-time: repaid=%d  defaulted=%d  default rate=%s",
         total_repaid, total_defaulted, f"{default_rate:.1f}%" if default_rate is not None else "n/a",
     )
-    log.info("TOTAL NET REALIZED PNL ACROSS PORTFOLIO: $%.2f", total_net_pnl)
+    log.info("TOTAL NET REALIZED PNL ACROSS PORTFOLIO: $%s", f"{total_net_pnl:,.2f}")
     log.info(
-        "TOTAL realized earnings — last 24h: $%.2f   last 7d: $%.2f   last 14d: $%.2f   YTD: $%.2f",
-        total_pnl_24h, total_pnl_7d, total_pnl_14d, total_pnl_ytd,
+        "TOTAL realized earnings — last 24h: $%s   last 7d: $%s   last 14d: $%s   YTD: $%s",
+        f"{total_pnl_24h:,.2f}", f"{total_pnl_7d:,.2f}", f"{total_pnl_14d:,.2f}", f"{total_pnl_ytd:,.2f}",
     )
     log.info("=" * 100)
 
@@ -1022,7 +1022,7 @@ def print_roi_summary(per_wallet: list[dict], total_net_pnl_usd: float, total_pn
     log.info("=" * 100)
     log.info("ROI (capital base, see --reset-capital-baseline)")
     log.info("=" * 100)
-    log.info("Capital base (all-time deposits, net of withdrawals PRE-baseline only): $%.2f", total_capital_base)
+    log.info("Capital base (all-time deposits, net of withdrawals PRE-baseline only): $%s", f"{total_capital_base:,.2f}")
     if baselined_wallets:
         log.info(
             "  %d wallet(s) have a locked baseline — withdrawals since it was set don't reduce this: %s",
@@ -1049,8 +1049,8 @@ def print_roi_summary(per_wallet: list[dict], total_net_pnl_usd: float, total_pn
 
     roi_all_time = total_net_pnl_usd / total_capital_base * 100
     roi_ytd = total_pnl_ytd_usd / total_capital_base * 100
-    log.info("Realized PNL (all-time): $%.2f   -> ROI: %.1f%%", total_net_pnl_usd, roi_all_time)
-    log.info("Realized PNL (YTD):      $%.2f   -> ROI: %.1f%%", total_pnl_ytd_usd, roi_ytd)
+    log.info("Realized PNL (all-time): $%s   -> ROI: %.1f%%", f"{total_net_pnl_usd:,.2f}", roi_all_time)
+    log.info("Realized PNL (YTD):      $%s   -> ROI: %.1f%%", f"{total_pnl_ytd_usd:,.2f}", roi_ytd)
     log.info("=" * 100)
 
 # ---------------------------------------------------------------------------

@@ -404,8 +404,8 @@ def print_report(
             p_usd = meta.get("principalAmountUsd")
             c_usd = meta.get("collateralAmountUsd")
             log.info("")
-            log.info("  borrower        : %s  (%.0f defaults, %.0f late repayments, $%.2f known surplus)",
-                      t["borrower"], t["defaults"], t["late_repays"], t["surplus_usd"])
+            log.info("  borrower        : %s  (%.0f defaults, %.0f late repayments, $%s known surplus)",
+                      t["borrower"], t["defaults"], t["late_repays"], f"{t['surplus_usd']:,.2f}")
             log.info("  offer           : %s", o.get("pubkey"))
             log.info("  wants to borrow : %s%s", symbol_for(pmint), f"  (~${p_usd:,.2f})" if p_usd else "")
             log.info("  collateral      : %s%s", symbol_for(cmint), f"  (~${c_usd:,.2f})" if c_usd else "")
@@ -432,8 +432,8 @@ def print_report(
             p_usd = meta.get("startPrincipalAmountUsd")
             when = f"overdue by {abs(hrs_left):.1f}h" if hrs_left < 0 else f"expires in {hrs_left:.1f}h"
             log.info("")
-            log.info("  borrower        : %s  (%.0f defaults, %.0f late repayments, $%.2f known surplus)",
-                      t["borrower"], t["defaults"], t["late_repays"], t["surplus_usd"])
+            log.info("  borrower        : %s  (%.0f defaults, %.0f late repayments, $%s known surplus)",
+                      t["borrower"], t["defaults"], t["late_repays"], f"{t['surplus_usd']:,.2f}")
             log.info("  loan            : %s", l.get("pubkey"))
             log.info("  borrowed        : %s against %s", f"${p_usd:,.2f}" if p_usd else "n/a", symbol_for(cmint))
             log.info("  current lender  : %s", l.get("lender"))
@@ -524,7 +524,7 @@ def main() -> None:
     defaulted_stats = compute_defaulted_stats()
     late_stats = compute_late_repayer_stats()
     targets = merge_target_borrowers(defaulted_stats, late_stats, args.min_surplus)
-    log.info("Watchlist: %d borrower(s) with > $%.2f historical surplus", len(targets), args.min_surplus)
+    log.info("Watchlist: %d borrower(s) with > $%s historical surplus", len(targets), f"{args.min_surplus:,.2f}")
 
     target_addrs = {t["borrower"] for t in targets}
     all_active_loans = fetch_all_active_loans()

@@ -861,8 +861,8 @@ def main() -> None:
               market_summary["coverage_at_recommended_hour_pct"])
     log.info("Top %d lender(s) by USD volume:", len(top_lenders))
     for p in top_lenders:
-        log.info("  %s  $%.2f  (%d offers)  busiest: %s  80%%-by: %s",
-                  p["address"], p["total_usd"], p["offer_count"],
+        log.info("  %s  $%s  (%d offers)  busiest: %s  80%%-by: %s",
+                  p["address"], f"{p['total_usd']:,.2f}", p["offer_count"],
                   p["own_peak_hour_local"], p["own_recommended_post_after_hour_local"])
 
     chart_path = None

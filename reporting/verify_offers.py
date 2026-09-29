@@ -494,7 +494,7 @@ def check_strategy(
             pass_count += 1
 
         ltv_str = f"{live_ltv*100:.1f}" if live_ltv is not None else "n/a"
-        vol_str = f"{vol_usdc:.2f}"      if vol_usdc  is not None else "n/a"
+        vol_str = f"{vol_usdc:,.2f}"     if vol_usdc  is not None else "n/a"
         flag    = ("  !! " + " | ".join(issues)) if issues else ""
 
         log.info(

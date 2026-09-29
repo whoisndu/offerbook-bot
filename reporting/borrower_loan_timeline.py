@@ -329,7 +329,7 @@ def find_gaps(rows: list[dict]) -> list[tuple[datetime, datetime, float]]:
 def print_summary(rows: list[dict], gaps: list[tuple[datetime, datetime, float]], intervals, now: datetime) -> None:
     log.info("Total loans: %d", len(rows))
     log.info("Date range: %s to %s", rows[0]["start"].date(), rows[-1]["end"].date())
-    log.info("Total principal borrowed: $%.2f", sum(r["usd"] for r in rows))
+    log.info("Total principal borrowed: $%s", f"{sum(r['usd'] for r in rows):,.2f}")
     underwater_defaults = [r for r in rows if r["label"] == "defaulted (underwater)"]
     covered_defaults = [r for r in rows if r["label"] == "defaulted (collateral covered debt)"]
     total_defaults = len(underwater_defaults) + len(covered_defaults)
@@ -398,8 +398,8 @@ def print_loan_detail_table(detail_rows: list[dict]) -> None:
             f"${r['total_owed_usd']:,.2f}", f"${r['collateral_usd']:,.2f}",
         ))
     log.info(
-        "TOTAL — owed: $%.2f   collateral: $%.2f",
-        sum(r["total_owed_usd"] for r in detail_rows), sum(r["collateral_usd"] for r in detail_rows),
+        "TOTAL — owed: $%s   collateral: $%s",
+        f"{sum(r['total_owed_usd'] for r in detail_rows):,.2f}", f"{sum(r['collateral_usd'] for r in detail_rows):,.2f}",
     )
 
 
@@ -452,8 +452,8 @@ def print_borrower_summary(summary_rows: list[dict]) -> None:
             a["borrower"], a["loans"], f"${a['total_owed_usd']:,.2f}", f"${a['total_collateral_usd']:,.2f}",
         ))
     log.info(
-        "TOTAL — owed: $%.2f   collateral: $%.2f   across %d borrower(s)",
-        sum(a["total_owed_usd"] for a in summary_rows), sum(a["total_collateral_usd"] for a in summary_rows),
+        "TOTAL — owed: $%s   collateral: $%s   across %d borrower(s)",
+        f"{sum(a['total_owed_usd'] for a in summary_rows):,.2f}", f"{sum(a['total_collateral_usd'] for a in summary_rows):,.2f}",
         len(summary_rows),
     )
 

@@ -408,9 +408,9 @@ def print_report(rows: list[dict], principal_mint: str, collateral_mint: str) ->
     log.info("REAL available liquidity  : %s %s", f"{total_available:,.2f}", sym)
     if total_offered > total_available:
         log.info(
-            "  → %.2f %s (%.1f%%) of the naive total is NOT actually available "
+            "  → %s %s (%.1f%%) of the naive total is NOT actually available "
             "(rehypothecated across multiple offers, wallet+escrow can't cover it all).",
-            total_offered - total_available, sym,
+            f"{total_offered - total_available:,.2f}", sym,
             (total_offered - total_available) / total_offered * 100 if total_offered else 0,
         )
 
@@ -444,7 +444,7 @@ def print_loan_history_report(loans: list[dict], principal_mint: str, collateral
     day = biggest_day_ever(loans)
     log.info("")
     if day:
-        log.info("Biggest single day EVER: %s — $%.2f across %d loan(s)", day["day"], day["total_usd"], day["count"])
+        log.info("Biggest single day EVER: %s — $%s across %d loan(s)", day["day"], f"{day['total_usd']:,.2f}", day["count"])
 
     quartiles = size_vs_apy_quartiles(loans, days_back)
     log.info("")
@@ -465,15 +465,15 @@ def print_loan_history_report(loans: list[dict], principal_mint: str, collateral
         smallest, biggest = quartiles[0], quartiles[-1]
         if biggest["median_apy_bps"] > smallest["median_apy_bps"]:
             log.info(
-                "  → Biggest loans (%s, median $%.0f+) are paying MORE than the smallest (%s) — consistent with "
+                "  → Biggest loans (%s, median $%s+) are paying MORE than the smallest (%s) — consistent with "
                 "price-insensitive large borrowers here. You may have room to push APY higher on a large offer.",
-                biggest["label"], biggest["size_min"], smallest["label"],
+                biggest["label"], f"{biggest['size_min']:,.0f}", smallest["label"],
             )
         elif biggest["median_apy_bps"] < smallest["median_apy_bps"]:
             log.info(
-                "  → Biggest loans (%s, median $%.0f+) are paying LESS than the smallest (%s) — large borrowers "
+                "  → Biggest loans (%s, median $%s+) are paying LESS than the smallest (%s) — large borrowers "
                 "here are shopping around. Pushing APY too high on a big offer risks it sitting unfilled.",
-                biggest["label"], biggest["size_min"], smallest["label"],
+                biggest["label"], f"{biggest['size_min']:,.0f}", smallest["label"],
             )
         else:
             log.info("  → No meaningful difference in APY paid between smallest and biggest loans in this window.")

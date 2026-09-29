@@ -221,8 +221,8 @@ def fetch_available_balance(mint: str, decimals: int) -> int:
     escrow_raw = fetch_escrow_balance(mint)
     total_raw = wallet_raw + escrow_raw
     scale = 10 ** decimals
-    log.info("Available USDC: wallet=%.2f  escrow=%.2f  total=%.2f",
-              wallet_raw / scale, escrow_raw / scale, total_raw / scale)
+    log.info("Available USDC: wallet=%s  escrow=%s  total=%s",
+              f"{wallet_raw / scale:,.2f}", f"{escrow_raw / scale:,.2f}", f"{total_raw / scale:,.2f}")
     return total_raw
 
 
@@ -667,14 +667,14 @@ def main() -> None:
         collateral_raw = int(required_collateral_usdc / (price / 10 ** decimals))
 
         log.info(
-            "  Largest live offer to beat : $%.2f  |  APY %.2f%%  |  LTV %s  |  duration %.0fd  (safety ceiling %.1f%%, n=%d offers pool-wide)",
-            terms["largest_offer_usd"], terms["largest_apy_bps"] / 100,
+            "  Largest live offer to beat : $%s  |  APY %.2f%%  |  LTV %s  |  duration %.0fd  (safety ceiling %.1f%%, n=%d offers pool-wide)",
+            f"{terms['largest_offer_usd']:,.2f}", terms["largest_apy_bps"] / 100,
             f"{terms['largest_ltv']*100:.1f}%" if terms["largest_ltv"] is not None else "n/a",
             terms["target_duration"] / 86400, terms["safety_ceiling"] * 100, terms["pool_sample_count"],
         )
         log.info(
-            "  Our offer                  : %.2f USDC  →  LTV %.1f%%  APY %.2f%%  duration %.0fd",
-            principal_usdc, terms["target_ltv"] * 100, terms["target_apy_bps"] / 100, terms["target_duration"] / 86400,
+            "  Our offer                  : %s USDC  →  LTV %.1f%%  APY %.2f%%  duration %.0fd",
+            f"{principal_usdc:,.2f}", terms["target_ltv"] * 100, terms["target_apy_bps"] / 100, terms["target_duration"] / 86400,
         )
 
         offer_params = {

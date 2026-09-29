@@ -1422,8 +1422,8 @@ def main() -> None:
         _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
         buffer_raw = int(WALLET_BUFFER_USDC * 10 ** USDC_DECIMALS)
         usdc_available_raw = max(0, usdc_available_raw - buffer_raw)
-        log.info("USDC available for allocation (after $%.2f buffer): %.2f",
-                 WALLET_BUFFER_USDC, usdc_available_raw / 10 ** USDC_DECIMALS)
+        log.info("USDC available for allocation (after $%s buffer): %s",
+                 f"{WALLET_BUFFER_USDC:,.2f}", f"{usdc_available_raw / 10 ** USDC_DECIMALS:,.2f}")
     except Exception as exc:
         log.warning("Could not fetch USDC balance: %s  (proceeding anyway)", exc)
         usdc_available_raw = None
@@ -1511,13 +1511,13 @@ def main() -> None:
         log.info("=" * 60)
         log.info("Allocation config: %s", _CONFIG_PATH)
         if usdc_available_raw is not None and usdc_available_raw / 10 ** USDC_DECIMALS < LOW_BALANCE_ALLOCATION_OVERRIDE_USDC:
-            log.info("  Low-balance override active (< %.2f USDC available) — non-zero-allocation "
-                     "tokens get 100%% instead of their configured fraction", LOW_BALANCE_ALLOCATION_OVERRIDE_USDC)
+            log.info("  Low-balance override active (< %s USDC available) — non-zero-allocation "
+                     "tokens get 100%% instead of their configured fraction", f"{LOW_BALANCE_ALLOCATION_OVERRIDE_USDC:,.2f}")
         for pair, budget_raw in pair_budgets_raw.items():
             ps = relevant_pairs[pair]
             fraction = effective_allocation_fraction(ps.collateral_mint, usdc_available_raw)
-            log.info("  %s…  →  %.0f%%  =  %.2f USDC",
-                     ps.collateral_mint[:8], fraction * 100, budget_raw / 10**USDC_DECIMALS)
+            log.info("  %s…  →  %.0f%%  =  %s USDC",
+                     ps.collateral_mint[:8], fraction * 100, f"{budget_raw / 10**USDC_DECIMALS:,.2f}")
         log.info("=" * 60)
 
         # 5b. Fetch real-time prices for every collateral mint we're going to offer on.
@@ -1559,8 +1559,8 @@ def main() -> None:
                 )
 
                 if pair_budget_raw <= 1000:
-                    log.info("  Skipping – allocation too small (%.2f USDC)",
-                             pair_budget_raw / 10**USDC_DECIMALS)
+                    log.info("  Skipping – allocation too small (%s USDC)",
+                             f"{pair_budget_raw / 10**USDC_DECIMALS:,.2f}")
                     skipped += 1
                     continue
 
@@ -1572,8 +1572,8 @@ def main() -> None:
                 ltv_benchmark, ltv_sample_count, ltv_total_volume, ltv_used_size_filter = ps.ltv_benchmark_stats(principal_usdc)
                 ltv_source = "same duration" if ps.ltv_usds else ("global" if ps.offer_ltv_usds else "none")
                 if ltv_used_size_filter:
-                    log.info("  LTV benchmark: using offers within 0.5x-2x our size (%.2f USDC), source=%s",
-                             principal_usdc, ltv_source)
+                    log.info("  LTV benchmark: using offers within 0.5x-2x our size (%s USDC), source=%s",
+                             f"{principal_usdc:,.2f}", ltv_source)
 
                 # Compute collateral required so that LTV = effective_target_ltv() at current
                 # prices. This is the critical fix: we do NOT copy collateralAmount from other
@@ -1629,10 +1629,10 @@ def main() -> None:
                     collateral_usdc = collateral_raw / (10 ** decimals) * collateral_price
                     actual_ltv = principal_usdc / collateral_usdc if collateral_usdc else 0
                     log.info(
-                        "  Sizing: %.2f USDC / %.4g tokens (collateral ~$%.2f)  →  LTV %.1f%%",
-                        principal_usdc,
+                        "  Sizing: %s USDC / %.4g tokens (collateral ~$%s)  →  LTV %.1f%%",
+                        f"{principal_usdc:,.2f}",
                         collateral_raw / (10 ** decimals),
-                        collateral_usdc,
+                        f"{collateral_usdc:,.2f}",
                         actual_ltv * 100,
                     )
 

@@ -11,9 +11,22 @@ Read-only lender-side report across one or more of your own wallets:
     actual repay fee charged) plus collateral kept on defaulted loans
     (valued at default time) minus the principal lost — same formula
     pnl_leaderboard.py uses platform-wide, scoped here to your wallets.
+    PLUS interest actually collected on in-place loan extensions/rollovers
+    (see compute_realized_pnl / _extension_events): Offerbook lets a loan's
+    term be extended in place — same pubkey, stays (or, if since resolved,
+    stayed) "active" through the extension, expiredAt pushed forward — and
+    the borrower pays the full completed term's interest to the lender AT
+    that moment (metadata.extensions[].interestPaid/repayFee), same as a
+    real repayment. That money is real and already in your escrow, but the
+    loan's top-level interest/repaymentAmount fields only ever describe its
+    CURRENT (if still active) or FINAL (if since repaid/defaulted) term, so
+    without this it's silently dropped from realized PNL forever — not
+    delayed, just gone, for every rolled-over loan. Confirmed against live
+    data to affect ~12% of active loans at any given time, not an edge case.
     Also broken out into trailing realized-earnings windows (last 24h/7d/
-    14d/YTD) using each resolved loan's updatedAt as a proxy for when it was
-    repaid/defaulted (the API has no dedicated repaidAt/defaultedAt field),
+    14d/YTD) using each resolved loan's updatedAt (repaid/defaulted) or each
+    extension's own "at" timestamp (rollovers) as a proxy for when it was
+    actually earned (the API has no dedicated repaidAt/defaultedAt field),
     alongside the existing all-time total.
   - ROI: realized PNL (all-time and YTD) as a % of your capital base —
     from Offerbook's own /users/{address}/escrow-summary endpoint
@@ -102,6 +115,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -182,6 +196,34 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
     return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE, sleep_secs=0.1)
 
 
+SOLANA_RPC_MAX_RETRIES = 6
+
+def _solana_rpc(payload: dict) -> dict:
+    """POST to SOLANA_RPC with retry/backoff on 429 — the public
+    mainnet-beta endpoint rate-limits aggressively, and every wallet checked
+    costs 4+ sequential RPC calls (getBalance, getTokenAccountsByOwner x3),
+    so a 2-wallet run alone is enough to trip it. Honors a Retry-After
+    header if the endpoint sends one, otherwise backs off exponentially
+    (1s, 2s, 4s, 8s, 16s, 32s). Raises on the final attempt or any
+    non-429 error, same as a bare requests.post(...).raise_for_status()."""
+    delay = 1.0
+    for attempt in range(SOLANA_RPC_MAX_RETRIES):
+        resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
+        if resp.status_code == 429 and attempt < SOLANA_RPC_MAX_RETRIES - 1:
+            retry_after = resp.headers.get("Retry-After")
+            wait = float(retry_after) if retry_after else delay
+            log.warning(
+                "Solana RPC rate-limited (429) — retrying in %.1fs (attempt %d/%d) …",
+                wait, attempt + 1, SOLANA_RPC_MAX_RETRIES,
+            )
+            time.sleep(wait)
+            delay *= 2
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    raise AssertionError("unreachable")  # loop always returns or raises above
+
+
 def symbol_for(mint: str | None) -> str:
     if not mint:
         return "NFT"
@@ -191,9 +233,7 @@ def symbol_for(mint: str | None) -> str:
 def fetch_wallet_sol_balance(wallet: str) -> int:
     """Lamports."""
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [wallet]}
-    resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
-    resp.raise_for_status()
-    return resp.json().get("result", {}).get("value", 0)
+    return _solana_rpc(payload).get("result", {}).get("value", 0)
 
 
 def fetch_wallet_token_balance(wallet: str, mint: str) -> int:
@@ -202,9 +242,7 @@ def fetch_wallet_token_balance(wallet: str, mint: str) -> int:
         "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
         "params": [wallet, {"mint": mint}, {"encoding": "jsonParsed"}],
     }
-    resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
-    resp.raise_for_status()
-    accounts = resp.json().get("result", {}).get("value", [])
+    accounts = _solana_rpc(payload).get("result", {}).get("value", [])
     return sum(
         int(a.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
              .get("tokenAmount", {}).get("amount", "0"))
@@ -233,9 +271,7 @@ def fetch_wallet_all_token_balances(wallet: str) -> dict[str, int]:
             "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
             "params": [wallet, {"programId": program_id}, {"encoding": "jsonParsed"}],
         }
-        resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
-        resp.raise_for_status()
-        for a in resp.json().get("result", {}).get("value", []):
+        for a in _solana_rpc(payload).get("result", {}).get("value", []):
             info = a.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
             mint = info.get("mint")
             amount = int(info.get("tokenAmount", {}).get("amount", "0"))
@@ -288,9 +324,7 @@ def fetch_mint_decimals_onchain(mint: str) -> int | None:
         "params": [mint, {"encoding": "jsonParsed"}],
     }
     try:
-        resp = requests.post(SOLANA_RPC, json=payload, timeout=15)
-        resp.raise_for_status()
-        value = (resp.json().get("result") or {}).get("value")
+        value = (_solana_rpc(payload).get("result") or {}).get("value")
         if value:
             return value["data"]["parsed"]["info"]["decimals"]
     except Exception as exc:
@@ -373,15 +407,50 @@ def _resolved_at(l: dict) -> datetime | None:
         return None
 
 
-def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str, since: datetime | None = None) -> dict:
+def _extension_at(ext: dict) -> datetime | None:
+    try:
+        return datetime.fromisoformat(ext["at"].replace("Z", "+00:00"))
+    except (KeyError, ValueError, AttributeError):
+        return None
+
+
+def _extension_events(loans: list[dict], wallet: str) -> list[dict]:
+    """Every in-place term extension ("rollover") across `wallet`'s loans,
+    regardless of that loan's current status. Offerbook lets a loan's term be
+    extended in place — same pubkey, expiredAt pushed forward, extensionCount
+    ticks up — and the borrower actually pays the full term's interest to the
+    lender AT that moment (metadata.extensions[].interestPaid /
+    repayFee), same as a real repayment. A loan that's been extended keeps
+    that history in metadata.extensions[] permanently, including AFTER it
+    finally repays/defaults for good — so this must be scanned across
+    active+repaid+defaulted, not just active, or every earlier term's
+    interest on a loan that was rolled over before its final resolution is
+    silently dropped. See build_reminder_sync_plan's docstring for the
+    same underlying mechanism (there used to retarget calendar reminders,
+    here used to not lose the interest actually collected)."""
+    return [
+        ext
+        for l in loans if l.get("lender") == wallet
+        for ext in (l.get("metadata") or {}).get("extensions") or []
+    ]
+
+
+def compute_realized_pnl(
+    repaid: list[dict], defaulted: list[dict], active: list[dict], wallet: str, since: datetime | None = None,
+) -> dict:
     """Realized PNL for one wallet as lender — same formula as pnl_leaderboard.py:
     net interest on repaid loans (interest/principalAmount * startPrincipalAmountUsd,
     minus the actual repay fee charged), plus kept collateral on defaults (valued at
-    default time) minus the principal lost.
+    default time) minus the principal lost, PLUS interest actually collected on
+    any in-place loan extension/rollover (see _extension_events) — real money paid
+    to the lender that a loan's top-level `interest`/`repaymentAmount` fields never
+    reflect once it's been rolled over, since those only ever describe the loan's
+    CURRENT (for active) or FINAL (for repaid) term.
 
-    If `since` is given, only counts loans resolved (see _resolved_at) on/after
-    that time — used for the trailing 24h/7d/14d realized-earnings windows,
-    as opposed to the default all-time figure (since=None)."""
+    If `since` is given, only counts loans resolved (see _resolved_at) / extensions
+    that happened on/after that time — used for the trailing 24h/7d/14d
+    realized-earnings windows, as opposed to the default all-time figure (since=None).
+    """
     mine_repaid = [l for l in repaid if l.get("lender") == wallet]
     mine_defaulted = [l for l in defaulted if l.get("lender") == wallet]
     if since is not None:
@@ -410,6 +479,14 @@ def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str,
             end_collateral_usd = meta.get("startCollateralAmountUsd") or 0.0
         defaulted_pnl_usd += end_collateral_usd - start_principal_usd
 
+    extension_events = _extension_events(repaid + defaulted + active, wallet)
+    if since is not None:
+        extension_events = [e for e in extension_events if (ts := _extension_at(e)) is not None and ts >= since]
+    extension_interest_usd = sum(e.get("interestPaidUsd") or 0.0 for e in extension_events)
+    extension_fees_usd = sum(((e.get("repayFee") or {}).get("amountUsd")) or 0.0 for e in extension_events)
+    interest_usd += extension_interest_usd
+    fees_usd += extension_fees_usd
+
     net_pnl_usd = interest_usd - fees_usd + defaulted_pnl_usd
     resolved_count = len(mine_repaid) + len(mine_defaulted)
     default_rate = (len(mine_defaulted) / resolved_count * 100) if resolved_count else None
@@ -423,6 +500,8 @@ def compute_realized_pnl(repaid: list[dict], defaulted: list[dict], wallet: str,
         "defaulted_pnl_usd": defaulted_pnl_usd,
         "net_pnl_usd": net_pnl_usd,
         "default_rate": default_rate,
+        "extension_count": len(extension_events),
+        "extension_interest_usd": extension_interest_usd,
     }
 
 
@@ -539,6 +618,19 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
 # snapshot) still add to the capital base. Re-running --reset-capital-baseline
 # at any point re-anchors to the then-current live figure — e.g. right after
 # a withdrawal you actually DO want to count as pulling capital out.
+#
+# Every run also auto-ratchets an EXISTING baseline forward on its own, no
+# flag needed: if live netDepositedUsd has climbed above the currently locked
+# baseline_net_usd, the only way that's possible is a genuine new deposit
+# that outpaced any withdrawals since the last lock (withdrawals alone can
+# only ever push netDepositedUsd down, never up) — so it's always safe to
+# fold in. This doesn't change the CURRENT run's capital-base number
+# (compute_capital_base's baseline + max(0, new deposits) formula already
+# credits that deposit either way) — it just keeps the persisted baseline
+# file from drifting further behind reality with every deposit, instead of
+# silently relying on the delta from an ever-older anchor point. A wallet
+# with no baseline yet is left alone either way (opting in is still an
+# explicit --reset-capital-baseline decision).
 
 def load_capital_baseline() -> dict:
     """{wallet: {"baseline_deposited_usd", "baseline_withdrawn_usd",
@@ -558,23 +650,49 @@ def save_capital_baseline(state: dict) -> None:
         json.dump(state, fh, indent=2)
 
 
+def _baseline_snapshot(summary: dict, now: datetime) -> dict:
+    return {
+        "baseline_deposited_usd": summary.get("totalDepositedUsd", 0.0),
+        "baseline_withdrawn_usd": summary.get("totalWithdrawnUsd", 0.0),
+        "baseline_net_usd": summary.get("netDepositedUsd", 0.0),
+        "captured_at": now.isoformat(),
+    }
+
+
 def reset_capital_baseline(wallets: list[str], state: dict, now: datetime) -> dict:
     """Snapshots each wallet's CURRENT escrow-summary totals as its new
-    baseline, overwriting any previous one. Mutates and returns `state`;
-    caller is responsible for calling save_capital_baseline() with it."""
+    baseline, overwriting any previous one (unconditionally — this is the
+    explicit, manual --reset-capital-baseline path; see
+    advance_capital_baseline_if_higher for the automatic every-run ratchet).
+    Mutates and returns `state`; caller is responsible for calling
+    save_capital_baseline() with it."""
     for wallet in wallets:
         summary = fetch_escrow_summary(wallet)
         if summary is None:
             log.warning("  %s: couldn't fetch escrow-summary — baseline NOT reset for this wallet.", wallet)
             continue
-        state[wallet] = {
-            "baseline_deposited_usd": summary.get("totalDepositedUsd", 0.0),
-            "baseline_withdrawn_usd": summary.get("totalWithdrawnUsd", 0.0),
-            "baseline_net_usd": summary.get("netDepositedUsd", 0.0),
-            "captured_at": now.isoformat(),
-        }
+        state[wallet] = _baseline_snapshot(summary, now)
         log.info("  %s: baseline set to $%s net deposited (as of now).", wallet, f"{state[wallet]['baseline_net_usd']:,.2f}")
     return state
+
+
+def advance_capital_baseline_if_higher(wallet: str, escrow_summary: dict | None, state: dict, now: datetime) -> bool:
+    """Ratchets `wallet`'s locked baseline forward to the current live
+    escrow-summary snapshot IF live netDepositedUsd has climbed above the
+    currently locked baseline_net_usd — see section docstring above for why
+    that's always safe to do unconditionally, every run, no flag needed.
+    No-ops (returns False) for a wallet with no existing baseline, a failed
+    escrow-summary fetch, or if netDepositedUsd hasn't cleared the locked
+    value. Mutates `state` in place when it does advance; caller is
+    responsible for calling save_capital_baseline() if this returns True for
+    any wallet."""
+    baseline = state.get(wallet)
+    if baseline is None or escrow_summary is None:
+        return False
+    if escrow_summary.get("netDepositedUsd", 0.0) <= baseline["baseline_net_usd"]:
+        return False
+    state[wallet] = _baseline_snapshot(escrow_summary, now)
+    return True
 
 
 def compute_capital_base(wallet: str, escrow_summary: dict | None, baseline_state: dict) -> tuple[float | None, bool]:
@@ -915,21 +1033,23 @@ def print_wallet_report(
 
     log.info("")
     log.info(
-        "Realized PNL — repaid: %d   defaulted: %d   default rate: %s",
+        "Realized PNL — repaid: %d   defaulted: %d   default rate: %s   rolled over (interest collected, loan still open): %d for $%s",
         pnl["repaid_count"], pnl["defaulted_count"],
         f"{pnl['default_rate']:.1f}%" if pnl["default_rate"] is not None else "n/a",
+        pnl["extension_count"], f"{pnl['extension_interest_usd']:,.2f}",
     )
     log.info(
-        "  Interest earned (gross): $%s   Repay fees paid: $%s   Collateral-kept-on-default net: $%s",
+        "  Interest earned (gross, incl. rollovers): $%s   Repay fees paid: $%s   Collateral-kept-on-default net: $%s",
         f"{pnl['interest_usd']:,.2f}", f"{pnl['fees_usd']:,.2f}", f"{pnl['defaulted_pnl_usd']:,.2f}",
     )
     log.info("  NET REALIZED PNL: $%s", f"{pnl['net_pnl_usd']:,.2f}")
     log.info(
-        "  Realized earnings — last 24h: $%s (%d resolved)   last 7d: $%s (%d resolved)   last 14d: $%s (%d resolved)   YTD: $%s (%d resolved)",
-        f"{pnl_24h['net_pnl_usd']:,.2f}", pnl_24h["repaid_count"] + pnl_24h["defaulted_count"],
-        f"{pnl_7d['net_pnl_usd']:,.2f}", pnl_7d["repaid_count"] + pnl_7d["defaulted_count"],
-        f"{pnl_14d['net_pnl_usd']:,.2f}", pnl_14d["repaid_count"] + pnl_14d["defaulted_count"],
-        f"{pnl_ytd['net_pnl_usd']:,.2f}", pnl_ytd["repaid_count"] + pnl_ytd["defaulted_count"],
+        "  Realized earnings — last 24h: $%s (%d resolved, %d rolled over)   last 7d: $%s (%d resolved, %d rolled over)   "
+        "last 14d: $%s (%d resolved, %d rolled over)   YTD: $%s (%d resolved, %d rolled over)",
+        f"{pnl_24h['net_pnl_usd']:,.2f}", pnl_24h["repaid_count"] + pnl_24h["defaulted_count"], pnl_24h["extension_count"],
+        f"{pnl_7d['net_pnl_usd']:,.2f}", pnl_7d["repaid_count"] + pnl_7d["defaulted_count"], pnl_7d["extension_count"],
+        f"{pnl_14d['net_pnl_usd']:,.2f}", pnl_14d["repaid_count"] + pnl_14d["defaulted_count"], pnl_14d["extension_count"],
+        f"{pnl_ytd['net_pnl_usd']:,.2f}", pnl_ytd["repaid_count"] + pnl_ytd["defaulted_count"], pnl_ytd["extension_count"],
     )
 
 
@@ -1163,6 +1283,7 @@ def main() -> None:
                 decimals[mint] = d
 
     per_wallet = []
+    capital_baseline_advanced = False
     for wallet in wallets:
         rb = raw_balances[wallet]
         sol_balance, sol_escrow = rb["sol_balance"], rb["sol_escrow"]
@@ -1184,17 +1305,13 @@ def main() -> None:
 
         idle_balance_usd = idle_sol_usd + idle_usdc_usd + other_holdings_usd
         active_rows = build_active_loan_rows(active, wallet, prices, decimals, now)
-        pnl = compute_realized_pnl(repaid, defaulted, wallet)
-        pnl_24h = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(hours=24))
-        pnl_7d = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(days=7))
-        pnl_14d = compute_realized_pnl(repaid, defaulted, wallet, since=now - timedelta(days=14))
-        pnl_ytd = compute_realized_pnl(repaid, defaulted, wallet, since=since_ytd)
+        pnl = compute_realized_pnl(repaid, defaulted, active, wallet)
+        pnl_24h = compute_realized_pnl(repaid, defaulted, active, wallet, since=now - timedelta(hours=24))
+        pnl_7d = compute_realized_pnl(repaid, defaulted, active, wallet, since=now - timedelta(days=7))
+        pnl_14d = compute_realized_pnl(repaid, defaulted, active, wallet, since=now - timedelta(days=14))
+        pnl_ytd = compute_realized_pnl(repaid, defaulted, active, wallet, since=since_ytd)
         volume_week_usd = compute_volume(all_loans, wallet, volume_since)
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
-
-        escrow_summary = fetch_escrow_summary(wallet)
-        unpriced_movement_count = escrow_summary.get("unpricedMovementCount", 0) if escrow_summary else 0
-        capital_base_usd, has_baseline = compute_capital_base(wallet, escrow_summary, capital_baseline)
 
         print_wallet_report(
             wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, other_holdings, idle_balance_usd,
@@ -1203,6 +1320,17 @@ def main() -> None:
             volume_week_usd, volume_all_time_usd,
             pnl_24h, pnl_7d, pnl_14d, pnl_ytd,
         )
+
+        escrow_summary = fetch_escrow_summary(wallet)
+        unpriced_movement_count = escrow_summary.get("unpricedMovementCount", 0) if escrow_summary else 0
+        if advance_capital_baseline_if_higher(wallet, escrow_summary, capital_baseline, now):
+            log.info(
+                "  Baseline auto-advanced to $%s net deposited (a new deposit outpaced withdrawals since the last lock).",
+                f"{capital_baseline[wallet]['baseline_net_usd']:,.2f}",
+            )
+            capital_baseline_advanced = True
+        capital_base_usd, has_baseline = compute_capital_base(wallet, escrow_summary, capital_baseline)
+
         per_wallet.append({
             "wallet": wallet, "usdc_wallet": usdc_wallet, "usdc_escrow": usdc_escrow,
             "other_holdings_usd": other_holdings_usd, "idle_balance_usd": idle_balance_usd,
@@ -1212,6 +1340,9 @@ def main() -> None:
             "capital_base_usd": capital_base_usd, "has_baseline": has_baseline,
             "unpriced_movement_count": unpriced_movement_count,
         })
+
+    if capital_baseline_advanced:
+        save_capital_baseline(capital_baseline)
 
     if len(per_wallet) > 1:
         print_portfolio_summary(per_wallet)

@@ -17,17 +17,26 @@ Realized PNL per lender =
     recovered (startPrincipalAmountUsd). This is a mark-to-market figure at
     the moment of default, not necessarily cash actually realized — if the
     lender is still holding the seized collateral, it's unrealized from here.
+  + interest actually collected on in-place loan extensions/rollovers,
+    across EVERY loan regardless of current status (repaid, defaulted, or
+    still active). Offerbook lets a loan's term be extended in place — same
+    pubkey, stays "active" through the extension, expiredAt pushed forward,
+    extensionCount ticks up — and the borrower pays that completed term's
+    full interest to the lender AT that moment (metadata.extensions[].
+    interestPaid/repayFee), same as a real repayment. That's genuinely
+    realized cash, not mark-to-market, so it counts here even for a loan
+    that's still active and hasn't reached repaid/defaulted (confirmed
+    against live data to affect ~12% of active loans at any given time —
+    not an edge case worth excluding). See portfolio_health.py's
+    compute_realized_pnl for the same fix, applied there first.
 
 Also reports each lender's total volume — total USD principal (at
-origination) of every SETTLED (repaid or defaulted) loan they've made. This
-leaderboard is scoped to realized PNL, which only exists once a loan has
-resolved one way or the other — active loans haven't generated anything
-realized yet (that's "unrealized profit", portfolio_health.py's territory),
-so volume here deliberately excludes them too, for the same reason: every
-number in this leaderboard should describe the same settled-loan population,
-not mix in still-open positions. Shown alongside PNL, not used to rank
-(ranking is still by realized PNL) — a high-volume lender isn't necessarily
-a profitable one.
+origination) of every SETTLED (repaid or defaulted) loan they've made. Volume
+stays scoped to settled loans only (deliberately excludes active loans,
+extended or not) — it's a distinct, unrelated metric from realized PNL and
+isn't affected by the rollover-interest fix above. Shown alongside PNL, not
+used to rank (ranking is still by realized PNL) — a high-volume lender isn't
+necessarily a profitable one.
 
 If OFFERBOOK_PORTFOLIO_WALLETS is set (.env — the same var portfolio_health.py
 reads, comma-separated addresses), those specific lenders are merged into a
@@ -89,11 +98,11 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
 
 def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str, float]]:
     """Returns (pnl_by_lender, counts_by_lender, volume_by_lender). counts
-    tracks how many repaid/defaulted loans backed each lender's total, for
-    context. volume is total USD principal (at origination) of every
-    SETTLED (repaid or defaulted) loan that lender has made — deliberately
-    excludes active loans, same settled-only scope as PNL itself (see module
-    docstring for why).
+    tracks how many repaid/defaulted/rolled-over loans backed each lender's
+    total, for context. volume is total USD principal (at origination) of
+    every SETTLED (repaid or defaulted) loan that lender has made —
+    deliberately excludes active loans, unrelated to the rollover-interest
+    PNL below (see module docstring for why).
 
     Any lender address in MERGE_WALLETS is remapped to MERGE_LABEL before
     ever being used as a dict key — so a merged wallet's real address never
@@ -109,7 +118,7 @@ def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str
     def bump(lender: str, amount: float, kind: str) -> None:
         lender = _remap(lender)
         pnl[lender] = pnl.get(lender, 0.0) + amount
-        c = counts.setdefault(lender, {"repaid": 0, "defaulted": 0})
+        c = counts.setdefault(lender, {"repaid": 0, "defaulted": 0, "rolled_over": 0})
         c[kind] += 1
 
     def bump_volume(lender: str, start_principal_usd: float) -> None:
@@ -147,6 +156,23 @@ def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str
         bump(lender, end_collateral_usd - start_principal_usd, "defaulted")
         bump_volume(lender, start_principal_usd)
 
+    # Interest collected on in-place extensions/rollovers — real cash paid to
+    # the lender the moment a term completes, whether or not the loan itself
+    # has reached repaid/defaulted yet (see module docstring). Repaid/
+    # defaulted loans already carry their own extension history in
+    # metadata.extensions[], so only ACTIVE needs a fresh fetch here.
+    log.info("Fetching all active loans platform-wide (for rollover interest) …")
+    active = _fetch_all_pages("/loans/status/active")
+    log.info("  → %d active loan(s)", len(active))
+    for l in repaid + defaulted + active:
+        lender = l.get("lender")
+        if not lender:
+            continue
+        for ext in (l.get("metadata") or {}).get("extensions") or []:
+            interest_usd = ext.get("interestPaidUsd") or 0.0
+            fee_usd = ((ext.get("repayFee") or {}).get("amountUsd")) or 0.0
+            bump(lender, interest_usd - fee_usd, "rolled_over")
+
     return pnl, counts, volume
 
 
@@ -154,16 +180,16 @@ def print_leaderboard(pnl: dict[str, float], counts: dict[str, dict[str, int]], 
     ranked = sorted(pnl.items(), key=lambda kv: kv[1], reverse=True)[:top]
 
     log.info("")
-    log.info("=" * 105)
-    log.info("Realized PNL leaderboard — repaid interest (net of fees) + kept collateral on defaults")
-    log.info("=" * 105)
-    col = "{:<4}{:<46}{:>16}{:>9}{:>11}{:>19}"
-    log.info(col.format("#", "lender", "realized PNL $", "repaid", "defaulted", "total volume $"))
-    log.info("-" * 105)
+    log.info("=" * 115)
+    log.info("Realized PNL leaderboard — repaid interest + rollover interest (net of fees) + kept collateral on defaults")
+    log.info("=" * 115)
+    col = "{:<4}{:<46}{:>16}{:>9}{:>11}{:>13}{:>19}"
+    log.info(col.format("#", "lender", "realized PNL $", "repaid", "defaulted", "rolled over", "total volume $"))
+    log.info("-" * 115)
     for i, (lender, amount) in enumerate(ranked, 1):
         c = counts[lender]
-        log.info(col.format(i, lender, f"{amount:,.2f}", c["repaid"], c["defaulted"], f"{volume.get(lender, 0.0):,.2f}"))
-    log.info("=" * 105)
+        log.info(col.format(i, lender, f"{amount:,.2f}", c["repaid"], c["defaulted"], c["rolled_over"], f"{volume.get(lender, 0.0):,.2f}"))
+    log.info("=" * 115)
 
 
 def main() -> None:
@@ -172,7 +198,7 @@ def main() -> None:
     args = parser.parse_args()
 
     pnl, counts, volume = compute_pnl()
-    log.info("Distinct lenders with resolved (repaid or defaulted) loan history: %d", len(pnl))
+    log.info("Distinct lenders with realized PNL (repaid, defaulted, or rolled-over interest): %d", len(pnl))
     print_leaderboard(pnl, counts, volume, args.top)
 
 

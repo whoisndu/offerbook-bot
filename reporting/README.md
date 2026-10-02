@@ -138,6 +138,8 @@ python reporting/liquidity_check.py                                        # pro
 
 Defaults to USDC principal. Flags any lender whose live offers exceed their real balance as `*** OVERSTATED ***`. Balance-check failures (RPC errors) are retried and, if still unresolved, excluded from totals and flagged `BALANCE CHECK FAILED` rather than silently counted as a confirmed $0.
 
+Each lender row also shows their **avg APY** (size-weighted across their live offers on this pair — a lender's small high-APY offer doesn't drag the average up past what their much larger offer is actually pricing) and **durations** (the distinct set of durations across those offers, e.g. `7d,15d,30d` — kept as a set rather than averaged, since durations are normally a handful of fixed choices, not a continuum).
+
 Also reports **loan size & pricing history** for the pair, from its full loan history (active + repaid + defaulted, platform-wide, any lender — not just live offers, so this section still runs even when the pair currently has zero live offers):
 
 - **Biggest loans ever** (top 10) — date, borrower, size, APY, duration, status.

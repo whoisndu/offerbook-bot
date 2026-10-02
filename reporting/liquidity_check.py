@@ -20,6 +20,12 @@ pull from them on this pair right now, no more. Summed across every lender,
 that's the real available liquidity, shown alongside the naive raw total so
 the gap (if any) is obvious.
 
+Each lender row also shows their size-weighted average APY and the distinct
+durations across their live offers on this pair — not just how much
+liquidity they represent, but at what price and term, for a fuller picture
+of who you'd actually be borrowing from and on what the market is pricing
+right now.
+
 It also answers a different question — not "how much liquidity is
 available" but "what do borrowers on this pair actually take, and at what
 price" — from that pair's full loan history (active + repaid + defaulted,
@@ -335,14 +341,27 @@ def compute_liquidity(offers: list[dict], principal_mint: str) -> list[dict]:
     to this pair's liquidity at min(offered, actual balance). Returns rows
     sorted by real available amount descending. A lender whose balance
     couldn't be fetched (RPC failure after retries) gets balance/available
-    of None rather than 0 — see fetch_wallet_token_balance."""
+    of None rather than 0 — see fetch_wallet_token_balance.
+
+    Also reports, per lender, the size-weighted average APY and the distinct
+    durations across their live offers on this pair — a lender offering
+    $50k at 8% and $500 at 40% should show as ~8%-ish, not a naive 24%
+    average of the two, since the $50k is what's actually pricing this
+    market. Durations are kept as the full distinct set (not averaged) since
+    they're normally a handful of fixed choices (7d/15d/30d...), not a
+    continuum — an "average duration" would land on a number nobody's
+    actually offering."""
     by_lender: dict[str, int] = {}
     offer_counts: dict[str, int] = {}
+    apy_weighted_sum: dict[str, float] = {}
+    durations_by_lender: dict[str, set[float]] = {}
     for o in offers:
         creator = o.get("creator", "")
         amount = o.get("remainingPrincipal", o.get("principalAmount", 0))
         by_lender[creator] = by_lender.get(creator, 0) + amount
         offer_counts[creator] = offer_counts.get(creator, 0) + 1
+        apy_weighted_sum[creator] = apy_weighted_sum.get(creator, 0.0) + amount * o.get("apy", 0)
+        durations_by_lender.setdefault(creator, set()).add(round((o.get("duration") or 0) / 86400))
 
     rows = []
     for lender, offered_raw in by_lender.items():
@@ -359,6 +378,8 @@ def compute_liquidity(offers: list[dict], principal_mint: str) -> list[dict]:
             "offered_raw": offered_raw,
             "balance_raw": balance_raw,
             "available_raw": available_raw,
+            "avg_apy_bps": apy_weighted_sum[lender] / offered_raw if offered_raw else 0.0,
+            "durations_days": sorted(durations_by_lender[lender]),
         })
     # Unknown-balance rows always sort last (regardless of how small/large
     # known rows are) — they're not confirmed to be worth 0, just unknown.
@@ -375,14 +396,16 @@ def print_report(rows: list[dict], principal_mint: str, collateral_mint: str) ->
     log.info("=" * 100)
     log.info("LIQUIDITY — lend %s against %s collateral", sym, symbol_for(collateral_mint))
     log.info("=" * 100)
-    col = "{:<46}{:>8}{:>18}{:>18}{:>18}"
-    log.info(col.format("lender", "offers", "offered", "actual balance", "REAL available"))
+    col = "{:<46}{:>8}{:>18}{:>18}{:>18}{:>10}  {:<16}"
+    log.info(col.format("lender", "offers", "offered", "actual balance", "REAL available", "avg APY", "durations"))
     unknown_count = 0
     for r in rows:
+        durations_str = ",".join(f"{d:.0f}d" for d in r["durations_days"])
+        avg_apy_str = f"{r['avg_apy_bps'] / 100:.2f}%"
         if r["balance_raw"] is None:
             unknown_count += 1
             log.info(
-                col.format(r["lender"], r["offers"], f"{r['offered_raw'] / scale:,.2f}", "?", "?")
+                col.format(r["lender"], r["offers"], f"{r['offered_raw'] / scale:,.2f}", "?", "?", avg_apy_str, durations_str)
                 + " *** BALANCE CHECK FAILED (excluded from totals below) ***"
             )
             continue
@@ -391,7 +414,7 @@ def print_report(rows: list[dict], principal_mint: str, collateral_mint: str) ->
             col.format(
                 r["lender"], r["offers"],
                 f"{r['offered_raw'] / scale:,.2f}", f"{r['balance_raw'] / scale:,.2f}",
-                f"{r['available_raw'] / scale:,.2f}",
+                f"{r['available_raw'] / scale:,.2f}", avg_apy_str, durations_str,
             ) + overstated
         )
 

@@ -43,6 +43,22 @@ It also surfaces first-time borrowers who have no resolved default/late-repay hi
 
 `../strategy/defaulter_capture.py` reacts to this script's actionable output directly (`from defaulter_watch import ...`) — see [strategy/README.md](../strategy/README.md#automated-capture-defaulter_capturepy).
 
+## Default / late-repayment digest (`default_activity_watch.py`)
+
+A platform-wide (every lender, not just our own wallets) periodic email digest of every loan that DEFAULTED or was REPAID LATE (closed after its `expiredAt`) in the trailing window (default 48h). Answers "what bad/late outcomes happened recently on this platform" as a push notification, rather than something you have to remember to go check.
+
+This asks a different question than `defaulter_watch.py` above: that script's "late repayment" signal is deliberately narrow (only counts late repayments where collateral also covered principal, building a reusable watchlist of good future counterparties). Here, "late" means **any** repaid loan closed after its deadline, and **every** default counts, no collateral-coverage filter — the two scripts' state files are entirely separate, and this one never touches `defaulter_config.yaml`.
+
+Runs every 12 hours via `.github/workflows/default_activity_watch.yml` — comfortably inside the 48h lookback window (4x overlap), so a loan that resolved right after one run is still well inside the window on the next one. Each event is only ever emailed once: state persists to `default_activity_watch_state.json` (committed back to the repo by the workflow — public on-chain loan data, same treatment as `loan_watch_state.json`, nothing private) and is pruned once an entry ages out of the lookback window plus a safety margin. A quiet window (nothing new since the last run) sends no email at all, rather than an empty "nothing happened" every 12 hours.
+
+```bash
+python monitoring/default_activity_watch.py                   # normal run — email if anything new
+python monitoring/default_activity_watch.py --hours-back 72    # override the lookback window
+python monitoring/default_activity_watch.py --no-email         # console output only, skip email + state
+```
+
+Required GitHub Actions secrets (shared with `loan_watch_notify.py`): `SMTP_FROM_EMAIL`, `SMTP_APP_PASSWORD`, `NOTIFY_EMAIL_TO`.
+
 ## Loan expiry watch (`loan_watch_notify.py`)
 
 A platform-wide (not just our own wallet) email notifier for loans going overdue and later resolving. Runs every 30 minutes via `.github/workflows/loan_watch.yml` — GitHub Actions, not a local process, so it keeps running whether or not any machine is on — free on a public repo regardless of frequency. GitHub's own scheduler can run a bit behind during platform-wide load, so "every 30 minutes" is a target, not a hard guarantee.

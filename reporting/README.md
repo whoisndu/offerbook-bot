@@ -210,3 +210,25 @@ Per wallet, and combined across the portfolio:
 - **Wallet/escrow balances** — SOL (both wallet and escrow) and USDC (both wallet and escrow), plus an **other holdings** table: any nonzero balance of any OTHER token (any mint, classic SPL or Token-2022, wallet or escrow) with its live price and USD value — this is what picks up collateral you keep after a default instead of immediately selling. A token with no resolvable live price is shown with its raw amount and flagged `NO PRICE` rather than silently valued at $0 (excluded from the dollar totals, not zeroed). Decimals fall back three ways: Jupiter's price response, then the curated `KNOWN_DECIMALS` table, then reading straight off the mint account on-chain — a long-tail/pump.fun token you only hold because you seized it as collateral is exactly the case the first two are least likely to cover. Feeds into the combined idle-balance USD figure that Portfolio size above uses.
 
 Also syncs Google Calendar reminders (a popup 30 minutes before each active loan's expiry, so a default is never missed), via `../lib/google_calendar_client.py` — see [lib/README.md](../lib/README.md#google-calendar-client-google_calendar_clientpy) for the one-time OAuth setup and the refresh-token self-heal behavior. Resolved loans' reminders are relabeled done (not deleted) so Calendar stays a visible trail. **Renewed loans are handled too**: Offerbook lets a loan's term be extended in place (same pubkey, stays `active`, `expiredAt` moves forward) — confirmed to affect ~12% of active loans at any given time. When a tracked loan's expiry no longer matches its current `expiredAt`, the old reminder is marked done (tagged `renewed`) and a fresh one created for the new deadline, so the reminder never silently points at a stale date. Pass `--no-calendar-sync` to just refresh the local sync-plan file without touching Calendar. State for both the reminder tracking and the sync plan lives in `portfolio_reminder_state.json`/`portfolio_reminder_sync_plan.json` (both gitignored).
+
+## APY opportunity scan (`apy_opportunity_scan.py`)
+
+"Am I maximizing every dollar I've got on offer?" — scans every currently ACTIVE loan platform-wide (live state, not resolved history) and answers that from a few angles, all from data already on each loan (`metadata.startPrincipalAmountUsd`, `apy`) — no live price-fetching needed, just the one paginated `/loans/status/active` call.
+
+```bash
+python reporting/apy_opportunity_scan.py
+python reporting/apy_opportunity_scan.py --wallets <addr1>,<addr2>
+python reporting/apy_opportunity_scan.py --min-principal 100       # noise filter for the lender leaderboard
+python reporting/apy_opportunity_scan.py --top 30 --top-opportunities 25
+python reporting/apy_opportunity_scan.py --expiry-hours 72         # widen the poach window
+python reporting/apy_opportunity_scan.py --min-apy 50              # override the opportunity/poach APY floor (percent)
+```
+
+- **Your wallets** — per-wallet and combined active-loan count, principal, size-weighted average APY, and annualized interest run-rate (principal × APY, what a full year at this rate would pay) — from `OFFERBOOK_PORTFOLIO_WALLETS` (`.env`) or `--wallets`.
+- **Lender APY leaderboard** — every lender ranked by size-weighted average APY across their active loans (weighted by principal, so a $10 loan at 200% can't outrank a $10,000 loan at 60%). Your wallets are merged into one `YOUR WALLETS (N combined)` row (same trick `pnl_leaderboard.py` uses) so your standing shows up inline against the real competition — printed with its exact rank even if `--min-principal`/`--top` would otherwise push it out of the table.
+- **Collateral-token APY breakdown** — every token currently in play, ranked by size-weighted average APY, flagged with whether you currently hold any exposure to it — directly answers "which tokens are paying best right now that I should point more capital at."
+- **Your token exposure vs. market** — for every token you currently hold an active loan against, your own weighted-average APY on that token next to the platform-wide average for that same token, with the gap called out in percentage points and flagged `BELOW MARKET` when negative — a same-token comparison, not a vague "the market pays more" feeling.
+- **Missed opportunities** — active loans that aren't yours, paying at/above your combined weighted-average APY (override with `--min-apy`), highest APY first — concrete terms you could have offered instead.
+- **Poach candidates** — the same list, filtered to loans expiring within `--expiry-hours` (default 48h) — a borrower paying someone else a high rate who's about to be back in the market. Not a guarantee: an in-place extension (see `portfolio_health.py`'s docstring on loan rollovers) can renew a loan without ever reopening the market, so treat this as a candidate list worth watching (e.g. via `../monitoring/wallet_tx_watch.py`/`borrow_offer_watch.py`), not a sure thing.
+
+Read-only, no signing.

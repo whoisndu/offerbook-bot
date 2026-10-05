@@ -284,11 +284,27 @@ def print_your_wallets(active: list[dict], wallets: list[str]) -> dict:
     return combined
 
 
-def print_lender_leaderboard(rows: list[dict], rank_by_lender: dict[str, int], merge_label: str | None, top: int) -> None:
+def print_lender_leaderboard(
+    rows: list[dict], rank_by_lender: dict[str, int], merge_label: str | None, top: int,
+    total_lenders: int, min_principal: float,
+) -> None:
+    """`rows` is already filtered to >= min_principal (plus your own merged
+    row, regardless of its size) — `#` still shows each row's TRUE rank
+    among all `total_lenders` lenders (from rank_by_lender, built off the
+    unfiltered population), so "YOUR WALLETS" rank is always accurate
+    against the real competition, not just whoever's shown. That means the
+    printed `#` column can skip numbers — those are lenders below
+    min_principal who got hidden as noise, not a bug in the ranking."""
     log.info("")
     log.info("=" * 100)
     log.info("LENDER APY LEADERBOARD (active loans, platform-wide, weighted by principal $)")
     log.info("=" * 100)
+    hidden = total_lenders - len(rows)
+    if hidden > 0:
+        log.info(
+            "(%d lender(s) below $%s principal hidden — # below is still their TRUE rank among all %d lenders, so numbers may skip)",
+            hidden, f"{min_principal:,.2f}", total_lenders,
+        )
     col = "{:<4}{:<46}{:>9}{:>16}{:>10}  {:>22}"
     log.info(col.format("#", "lender", "loans", "principal $", "avg APY", "annualized interest $"))
     log.info("-" * 100)
@@ -404,7 +420,7 @@ def main() -> None:
         r for r in leaderboard_rows
         if r["principal_usd"] >= args.min_principal or r["lender"] == merge_label
     ]
-    print_lender_leaderboard(filtered_leaderboard, rank_by_lender, merge_label, args.top)
+    print_lender_leaderboard(filtered_leaderboard, rank_by_lender, merge_label, args.top, len(leaderboard_rows), args.min_principal)
 
     token_rows = build_token_breakdown(active, wallet_set)
     print_token_breakdown(token_rows, args.top)

@@ -69,9 +69,9 @@ PAGE_SIZE = 100
 
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 
-MIN_PRINCIPAL_DEFAULT = 25.0   # lender-leaderboard noise filter — a single tiny loan at an
+MIN_PRINCIPAL_DEFAULT = 0.0   # lender-leaderboard noise filter — a single tiny loan at an
                                 # extreme APY shouldn't outrank lenders with real capital deployed
-TOP_DEFAULT = 20
+TOP_DEFAULT = 30
 TOP_OPPORTUNITIES_DEFAULT = 15
 EXPIRY_HOURS_DEFAULT = 48       # same convention as soon_to_expire.py/portfolio_health.py
 

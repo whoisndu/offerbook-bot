@@ -67,7 +67,15 @@ from offerbook_common import _mint_from_asset
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 PAGE_SIZE = 100
 
+JUPITER_TOKEN_SEARCH_API = "https://api.jup.ag/tokens/v2/search"
+JUPITER_SEARCH_BATCH_SIZE = 50  # keep query strings reasonably sized
+
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
+# Populated once per run by resolve_collateral_symbols() below — mints not in
+# the curated KNOWN_SYMBOLS table (long-tail/pump.fun tokens) get their real
+# symbol looked up via Jupiter instead of falling back to a truncated mint
+# address, same approach address_snapshot.py/borrower_loan_timeline.py use.
+_RESOLVED_SYMBOLS: dict[str, str] = {}
 
 MIN_PRINCIPAL_DEFAULT = 0.0   # lender-leaderboard noise filter — a single tiny loan at an
                                 # extreme APY shouldn't outrank lenders with real capital deployed
@@ -92,7 +100,38 @@ def _fetch_all_pages(endpoint: str) -> list[dict]:
 def symbol_for(mint: str | None) -> str:
     if not mint:
         return "NFT"
-    return KNOWN_SYMBOLS.get(mint, f"{mint[:6]}…{mint[-4:]}")
+    if mint in KNOWN_SYMBOLS:
+        return KNOWN_SYMBOLS[mint]
+    if mint in _RESOLVED_SYMBOLS:
+        return _RESOLVED_SYMBOLS[mint]
+    return f"{mint[:6]}…{mint[-4:]}"
+
+
+def resolve_collateral_symbols(active: list[dict]) -> None:
+    """Look up real symbols (via Jupiter's token search API) for every
+    collateral mint in `active` that isn't already in KNOWN_SYMBOLS, caching
+    them in _RESOLVED_SYMBOLS — covers long-tail/pump.fun tokens the curated
+    table doesn't have, so the leaderboards below show a real ticker instead
+    of a truncated address wherever possible. NFT collateral (no fungible
+    mint) is left alone; symbol_for() already returns "NFT" for those."""
+    mints = {
+        l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
+        for l in active
+    }
+    unresolved = sorted(m for m in mints if m and m not in KNOWN_SYMBOLS and m not in _RESOLVED_SYMBOLS)
+    if not unresolved:
+        return
+    for i in range(0, len(unresolved), JUPITER_SEARCH_BATCH_SIZE):
+        chunk = unresolved[i : i + JUPITER_SEARCH_BATCH_SIZE]
+        try:
+            resp = SESSION.get(JUPITER_TOKEN_SEARCH_API, params={"query": ",".join(chunk)}, timeout=15)
+            resp.raise_for_status()
+            for t in resp.json():
+                mint, symbol = t.get("id"), t.get("symbol")
+                if mint and symbol:
+                    _RESOLVED_SYMBOLS[mint] = symbol
+        except Exception as exc:
+            log.warning("Jupiter token symbol lookup failed for a batch: %s", exc)
 
 
 def _start_usd(l: dict) -> float:
@@ -229,7 +268,7 @@ def find_opportunities(active: list[dict], wallets: set[str], min_apy_bps: float
         cmint = l.get("collateralMint") or _mint_from_asset(l.get("collateral", {}))
         rows.append({
             "loan_id": l.get("pubkey", ""), "lender": l.get("lender", ""), "borrower": l.get("borrower", ""),
-            "collateral_symbol": symbol_for(cmint), "principal_usd": _start_usd(l),
+            "collateral_symbol": symbol_for(cmint), "collateral_mint": cmint, "principal_usd": _start_usd(l),
             "apy_bps": apy_bps, "hrs_left": hrs_left,
         })
     rows.sort(key=lambda r: -r["apy_bps"])
@@ -333,13 +372,14 @@ def print_token_breakdown(rows: list[dict], top: int) -> None:
     log.info("=" * 100)
     log.info("COLLATERAL TOKEN APY BREAKDOWN (active loans, platform-wide, weighted by principal $)")
     log.info("=" * 100)
-    col = "{:<16}{:>9}{:>16}{:>12}{:>12}{:>12}"
-    log.info(col.format("token", "loans", "principal $", "avg APY", "max APY", "you?"))
+    col = "{:<16}{:>9}{:>16}{:>12}{:>12}{:>12}  {:<46}"
+    log.info(col.format("token", "loans", "principal $", "avg APY", "max APY", "you?", "contract"))
     log.info("-" * 100)
     for r in rows[:top]:
         log.info(col.format(
             r["symbol"], r["count"], f"{r['principal_usd']:,.2f}",
             _fmt_apy(r["avg_apy_bps"]), _fmt_apy(r["max_apy_bps"]), "yes" if r["your_exposure"] else "",
+            r["collateral_mint"] or "(NFT — no fungible mint)",
         ))
     log.info("=" * 100)
 
@@ -352,8 +392,8 @@ def print_your_token_exposure(rows: list[dict]) -> None:
     if not rows:
         log.info("No active loans on any of your wallets — nothing to compare.")
         return
-    col = "{:<16}{:>9}{:>16}{:>12}{:>14}{:>12}"
-    log.info(col.format("token", "loans", "principal $", "your APY", "market APY", "gap"))
+    col = "{:<16}{:>9}{:>16}{:>12}{:>14}{:>12}  {:<46}"
+    log.info(col.format("token", "loans", "principal $", "your APY", "market APY", "gap", "contract"))
     log.info("-" * 100)
     for r in rows:
         gap_str = f"{r['gap_bps'] / 100:+.2f}pp" if r["gap_bps"] is not None else "n/a"
@@ -361,6 +401,7 @@ def print_your_token_exposure(rows: list[dict]) -> None:
         log.info(col.format(
             r["symbol"], r["count"], f"{r['principal_usd']:,.2f}",
             _fmt_apy(r["avg_apy_bps"]), _fmt_apy(r["market_avg_apy_bps"]), gap_str,
+            r["collateral_mint"] or "(NFT — no fungible mint)",
         ) + flag)
     log.info("=" * 100)
 
@@ -373,13 +414,14 @@ def print_opportunities(rows: list[dict], min_apy_bps: float, title: str, top: i
     if not rows:
         log.info("None right now.")
         return
-    col = "{:<46}{:<16}{:>12}{:>10}  {:>16}"
-    log.info(col.format("lender", "collateral", "principal $", "APY", "due"))
+    col = "{:<46}{:<16}{:>12}{:>10}  {:>16}  {:<46}"
+    log.info(col.format("lender", "collateral", "principal $", "APY", "due", "contract"))
     log.info("-" * 100)
     for r in rows[:top]:
         log.info(col.format(
             r["lender"], r["collateral_symbol"], f"{r['principal_usd']:,.2f}",
             _fmt_apy(r["apy_bps"]), _fmt_hrs(r["hrs_left"]),
+            r["collateral_mint"] or "(NFT — no fungible mint)",
         ))
     log.info("=" * 100)
 
@@ -406,6 +448,8 @@ def main() -> None:
     log.info("Fetching active loans platform-wide …")
     active = _fetch_all_pages("/loans/status/active")
     log.info("  → %d active loan(s) platform-wide", len(active))
+
+    resolve_collateral_symbols(active)
 
     combined_stats = print_your_wallets(active, wallets)
 

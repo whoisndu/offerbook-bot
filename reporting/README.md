@@ -231,4 +231,24 @@ python reporting/apy_opportunity_scan.py --min-apy 50              # override th
 - **Missed opportunities** — active loans that aren't yours, paying at/above your combined weighted-average APY (override with `--min-apy`), highest APY first — concrete terms you could have offered instead.
 - **Poach candidates** — the same list, filtered to loans expiring within `--expiry-hours` (default 48h) — a borrower paying someone else a high rate who's about to be back in the market. Not a guarantee: an in-place extension (see `portfolio_health.py`'s docstring on loan rollovers) can renew a loan without ever reopening the market, so treat this as a candidate list worth watching (e.g. via `../monitoring/wallet_tx_watch.py`/`borrow_offer_watch.py`), not a sure thing.
 
-Read-only, no signing.
+Every token column shows a real symbol wherever one is resolvable — the curated `KNOWN_SYMBOLS` table first, then a live Jupiter token-search lookup for anything not in it (same approach `address_snapshot.py`/`borrower_loan_timeline.py` use) — falling back to a truncated mint address only if Jupiter has no record either. Every table also carries a trailing **contract** column with the full, untruncated mint address (or a `(NFT — no fungible mint)` placeholder for NFT collateral), so there's always something copy-pasteable regardless of whether a symbol resolved.
+
+Read-only, no signing. Once a missed-opportunity/poach-candidate lead looks interesting, `loan_origin_lookup.py` (below) answers "how did that borrower end up on those terms" for any address involved.
+
+## Loan origin lookup (`loan_origin_lookup.py`)
+
+Takes one address (borrower or lender — both roles are checked automatically, no `--role` flag) and drills into HOW each of their loans came to exist, not just the loan's own locked-in APY/duration. For every loan, it resolves the ORIGINATING OFFER those terms were filled from and reports: who posted it (a `lending` offer from the lender, or a `borrowing` request from the borrower — a very different read on the same APY number), when, whether the posted terms match what the loan actually settled at, whether that standing offer has ever been filled by anyone else (`fillCounter` is platform-wide, not scoped to this address), and — when the offer was itself a counter in a back-and-forth negotiation — the full chain of prior asks it was negotiated down/up from.
+
+```bash
+python reporting/loan_origin_lookup.py --address FRLXeUieHrAnuQHmVqimSjPktg9mbJtADb14aG6sYr8P
+python reporting/loan_origin_lookup.py --address <addr> --status all        # include repaid/defaulted, not just active (slower)
+python reporting/loan_origin_lookup.py --address <addr> --status repaid
+python reporting/loan_origin_lookup.py --address <addr> --verbose           # add the full per-loan detail block below the table
+python reporting/loan_origin_lookup.py                                       # prompts for the address
+```
+
+Always prints a one-row-per-loan summary table first — created date, role, loan status, collateral, principal $, **LTV % at origination** (`startPrincipalAmountUsd` / `startCollateralAmountUsd`, not a live recomputation), APY, duration, counterparty, the originating offer's own status, a negotiation-hop count, and the loan pubkey — built for scanning dozens of loans at a glance. Pass `--verbose` to additionally print the full per-loan detail block underneath (min-fill %/remaining %/allow-extend, and the full negotiation chain when one exists).
+
+There's no `GET /offers/:pubkey` endpoint, so a loan's offer isn't directly fetchable by pubkey — it's resolved by pulling the FULL offer history (every status) of BOTH parties to the loan and matching by pubkey, since a negotiation chain can alternate between whichever side is countering. Each address's offer history is fetched once and cached for the run, even if it recurs across several loans. A counterparty whose offer history fails to load (seen in practice: a 504 from the API on an unusually large history) is cached as empty and logged once, not retried per loan — any loan whose offer lived only in that history just shows up as "not found" instead of losing the rest of the report.
+
+Natural companion to `apy_opportunity_scan.py`'s missed-opportunities/poach-candidates lists and to `address_snapshot.py`/`borrower_loan_timeline.py` — once one of those surfaces an address worth a closer look, this is the next step. Read-only, no signing.

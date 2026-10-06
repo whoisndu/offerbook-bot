@@ -201,6 +201,11 @@ KNOWN_DECIMALS: dict[str, int] = {
     "TUNAfXDZEdQizTMTh3uEvNvYqJmqFHZbEJt8joP4cyx": 6,     # TUNA — previously only in defaulter_capture.py
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,    # USDC
     "Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump": 6,    # JIMOTHY
+    "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups": 6,    # URANUS
+    "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp": 6,    # CARDS
+    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump": 6,    # ANSEM (Token-2022)
+    "5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5": 9,    # ONyc
+    "ZEXy1pqteRu3n13kdyh4LwPQknkFk3GzmMYMuNadWPo": 6,     # ZEX
 }
 
 # Display symbols for the same set of mints, for scripts that print friendly

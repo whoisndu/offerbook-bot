@@ -83,6 +83,21 @@ python reporting/pnl_leaderboard.py --top 50
 
 If `OFFERBOOK_PORTFOLIO_WALLETS` is set (`.env` — the same var `portfolio_health.py` reads, comma-separated addresses), those specific lenders are merged into a single combined row before ranking, labeled `YOUR WALLETS (N combined)` rather than listed individually. The remap happens at the point each loan is aggregated, so the real addresses never become dict keys, let alone reach the printed output or the committed script — anyone else running this public script with the var unset gets every wallet ranked individually, unchanged.
 
+### Your seizure outcomes (only runs if `OFFERBOOK_PORTFOLIO_WALLETS` is set)
+
+The realized-PNL figure above values every default's collateral at a single mark-to-market snapshot (`endCollateralAmountUsd`, priced the instant default was recorded) — a fiction the moment the lender doesn't sell right then. "Should I be holding seized collateral or liquidating it immediately" can only be answered against what actually happened on-chain afterward, not that snapshot. So for each of **your** defaulted loans, this section walks Solana directly (the Offerbook API has no concept of "what did you do with it after") and reports:
+
+- **SOLD** — every transaction since default that reduced your balance of that collateral mint, paired with whatever you received in the same transaction. USDC proceeds are priced at exactly $1 (never drifts); SOL or any other received token is priced at **today's** live rate as a proxy (flagged `(some proceeds received as X, priced at TODAY's rate...)`, since that's not necessarily the price at the moment you actually sold).
+- **HOLDING** — current live balance of that mint still in your wallet, priced at today's live rate — the number that answers "what is it worth right now," the live alternative to having sold at the mark-to-market snapshot.
+- **PARTIAL** — both of the above, if you've sold some and still hold the rest.
+- **Δ vs offerbook** = (realized + current value) − the original mark-to-market snapshot. Negative means you'd have done better selling immediately at default; positive means holding (so far) paid off — each row gets a `*** HOLDING PAID OFF ***` / `*** HELD TOO LONG ***` / `*** UNDERWATER vs. default-time value ***` flag accordingly, plus a totals line across every traced default.
+
+Implementation note: rather than scanning your whole wallet's transaction history (slow and noisy — a busy lending wallet can have thousands of unrelated transactions between a default and today), this derives the collateral mint's own Associated Token Account address (the standard SPL/Token-2022 PDA, picking the right token program from the loan's own `collateralTokenProgram` field) and scans **only that account's** history. Verified directly against Solscan while building this: a specific token account sees orders of magnitude fewer transactions than the whole wallet, and catches small intermediate transfers a wallet-level scan can miss entirely if it hits the wallet's own signature-count cap first. NFT collateral (no fungible mint) can't be traced this way and shows as its own `NFT` row rather than being silently dropped.
+
+```bash
+python reporting/pnl_leaderboard.py --no-seizure-trace    # skip this section (several Solana RPC calls per default — noticeably slower)
+```
+
 Read-only, never signs or submits anything.
 
 ## Borrower loan timeline (`borrower_loan_timeline.py`)

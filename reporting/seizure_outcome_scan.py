@@ -69,6 +69,24 @@ large speedup). Expect minutes, not seconds — this is a "run it and get
 coffee" report, not something to loop on. --top/--min-seizure-usd narrow
 the scope if a full run is more than you need.
 
+RESUMABLE / CACHED: every lot's trace result (the expensive part — walking
+its Associated Token Account's full transaction history) is persisted to
+seizure_outcome_scan_state.json as soon as it's computed, keyed by the
+exact inputs that produced it (lender, mint, its own since_ts/net_seized/
+expected-arrival-count, and the next lot's since_ts/net_seized if any). If
+the network drops mid-run, whatever finished is already saved — just rerun
+the same command and it picks up where it left off, re-tracing only the
+lots that never finished (a lot whose cache key changed since — e.g. a
+newer default altered what counts as "the next lot" — is correctly treated
+as a cache miss and retraced, not silently reused). Resolved on-chain
+decimals for long-tail mints are cached the same way. A single lot's
+failure (after its own internal RPC retries are exhausted) is logged and
+skipped rather than crashing the whole run, so one bad account doesn't
+cost you every lot after it — just rerun to pick up what's left. The ONLY
+thing never cached is each lot's current live balance/price (for HOLDING/
+PARTIAL rows) — those are re-fetched fresh every run since "what's it
+worth right now" is only meaningful as of the actual run time.
+
 Usage:
   python seizure_outcome_scan.py                           # top 20 lenders by realized PNL
   python seizure_outcome_scan.py --top 10
@@ -80,12 +98,14 @@ Read-only: never signs or submits anything.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -125,6 +145,13 @@ DUST_FRACTION = 0.0005
 SIGNATURE_PAGE_SIZE = 1000
 SIGNATURE_PAGE_CAP = 5  # x1000 = 5000 sigs ceiling per token account before giving up
 
+# Gitignored (like lender_capital_state.json) — caches the expensive part of
+# each lot's trace (its on-chain history walk) so a network drop mid-run, or
+# just wanting to re-run with a different --top/--min-seizure-usd, doesn't
+# mean re-fetching every signature/transaction from scratch. See
+# make_trace_cache_key() for why a stale entry is never silently reused.
+STATE_PATH = Path(__file__).parent / "seizure_outcome_scan_state.json"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -143,6 +170,43 @@ def symbol_for(mint: str | None) -> str:
     if not mint:
         return "NFT"
     return KNOWN_SYMBOLS.get(mint, f"{mint[:6]}…{mint[-4:]}")
+
+
+# ---------------------------------------------------------------------------
+# Resumable state (trace cache + resolved decimals) — see module docstring
+# ---------------------------------------------------------------------------
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Couldn't read %s (%s) — starting with an empty cache.", STATE_PATH, exc)
+    return {"traces": {}, "decimals": {}}
+
+
+def save_state(state: dict) -> None:
+    """Called after every single lot (and every newly-resolved decimals
+    lookup), not just at the end of the run — so whatever's finished is
+    always safely on disk even if the network dies on the very next one."""
+    try:
+        STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
+    except OSError as exc:
+        log.warning("Couldn't write %s (%s) — progress this run won't be cached for next time.", STATE_PATH, exc)
+
+
+def make_trace_cache_key(
+    lender: str, mint: str, since_ts: int, net_seized: float, expected_arrivals: int,
+    next_lot_since_ts: int | None, next_lot_net_seized: float | None,
+) -> str:
+    """Deterministic key covering every input trace_collateral_outcome()
+    actually depends on. If any of these change between runs — a newer
+    default alters what counts as "the next lot", a merge pulls in one more
+    loan, etc. — the key changes too, so a stale cache entry is a guaranteed
+    miss (retraced fresh) rather than something that needs explicit
+    invalidation logic."""
+    next_part = f"{next_lot_since_ts}:{next_lot_net_seized:.6f}" if next_lot_since_ts is not None else "none"
+    return f"{lender}:{mint}:{since_ts}:{net_seized:.6f}:{expected_arrivals}:{next_part}"
 
 # ---------------------------------------------------------------------------
 # Realized-PNL ranking (same formula pnl_leaderboard.py uses) — just enough
@@ -537,7 +601,7 @@ def classify_status(trace_status: str, sold_amount: float, remaining: float, net
     return "partial"
 
 
-def analyze_seizures(defaulted_loans: list[dict], min_seizure_usd: float) -> list[dict]:
+def analyze_seizures(defaulted_loans: list[dict], min_seizure_usd: float, use_cache: bool = True) -> list[dict]:
     """One row per LOT in `defaulted_loans` — a lot is one or more loans
     merged together (see merge_near_simultaneous_loans). Groups by (lender,
     collateral mint), since that's what shares an Associated Token Account;
@@ -546,6 +610,10 @@ def analyze_seizures(defaulted_loans: list[dict], min_seizure_usd: float) -> lis
     two failure modes found during development (near-simultaneous defaults
     sharing one sale; a lender independently trading the same token later)
     are both handled there, not by guessing a split here."""
+    state = load_state()
+    traces_cache: dict[str, dict] = state.setdefault("traces", {})
+    decimals_cache: dict[str, int] = state.setdefault("decimals", {})
+
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     skipped = []
     for l in defaulted_loans:
@@ -562,9 +630,12 @@ def analyze_seizures(defaulted_loans: list[dict], min_seizure_usd: float) -> lis
     rows.extend(skipped)
 
     for (lender, cmint), loans in groups.items():
-        decimals = KNOWN_DECIMALS.get(cmint)
+        decimals = KNOWN_DECIMALS.get(cmint) or decimals_cache.get(cmint)
         if decimals is None:
             decimals = fetch_mint_decimals_onchain(cmint)
+            if decimals is not None:
+                decimals_cache[cmint] = decimals
+                save_state(state)
         if decimals is None:
             log.warning("No decimals resolvable for %s… — skipping %d loan(s) for lender %s…", cmint[:8], len(loans), lender[:8])
             for l in loans:
@@ -584,32 +655,47 @@ def analyze_seizures(defaulted_loans: list[dict], min_seizure_usd: float) -> lis
 
             is_latest = i == len(lots) - 1
             next_lot = lots[i + 1] if not is_latest else None
-
+            next_since_ts = next_lot["since_ts"] if next_lot else None
+            next_net_seized = next_lot["net_seized"] if next_lot else None
             merge_note = f" ({len(lot['loans'])} loans merged)" if len(lot["loans"]) > 1 else ""
-            log.info(
-                "  tracing %s… seizure for lot %s%s (lender %s…, %s) …",
-                symbol_for(cmint), lot["loans"][0].get("pubkey", "")[:8], merge_note, lender[:8], "latest" if is_latest else "superseded",
-            )
-            trace = trace_collateral_outcome(
-                lender, cmint, token_program, lot["since_ts"], net_seized, len(lot["loans"]),
-                next_lot["since_ts"] if next_lot else None, next_lot["net_seized"] if next_lot else None,
-            )
+            lot_label = f"{symbol_for(cmint)}… seizure for lot {lot['loans'][0].get('pubkey', '')[:8]}{merge_note} (lender {lender[:8]}…, {'latest' if is_latest else 'superseded'})"
 
-            sold_amount = trace["sold_amount"]
-            trace_status = trace["trace_status"]
-            fully_resolved = trace_status == "clean" and trace["remaining_at_stop"] <= net_seized * DUST_FRACTION
-            current_balance = fetch_current_token_balance_raw(lender, cmint) / 10 ** decimals if (is_latest and trace_status == "clean") else None
-            unsold_remainder = None if (fully_resolved or current_balance is not None) else trace["remaining_at_stop"]
-            status = classify_status(trace_status, sold_amount, current_balance if current_balance is not None else trace["remaining_at_stop"], net_seized, is_latest)
+            try:
+                cache_key = make_trace_cache_key(lender, cmint, lot["since_ts"], net_seized, len(lot["loans"]), next_since_ts, next_net_seized)
+                cached = traces_cache.get(cache_key) if use_cache else None
+                if cached is not None:
+                    log.info("  using cached trace for %s …", lot_label)
+                    trace = cached
+                else:
+                    log.info("  tracing %s …", lot_label)
+                    trace = trace_collateral_outcome(
+                        lender, cmint, token_program, lot["since_ts"], net_seized, len(lot["loans"]),
+                        next_since_ts, next_net_seized,
+                    )
+                    traces_cache[cache_key] = trace
+                    save_state(state)
 
-            rows.append({
-                "loan": lot["loans"][0], "loans": lot["loans"], "status": status, "cmint": cmint, "decimals": decimals, "lender": lender,
-                "offerbook_value_usd": offerbook_value_usd, "net_seized": net_seized,
-                "sold_amount": sold_amount, "sold_usd_exact": trace["sold_usd_exact"],
-                "live_priced_legs": trace["live_priced_legs"], "last_sale_ts": trace["last_sale_ts"],
-                "current_balance": current_balance, "unsold_remainder": unsold_remainder,
-                "is_latest_in_group": is_latest,
-            })
+                sold_amount = trace["sold_amount"]
+                trace_status = trace["trace_status"]
+                fully_resolved = trace_status == "clean" and trace["remaining_at_stop"] <= net_seized * DUST_FRACTION
+                current_balance = fetch_current_token_balance_raw(lender, cmint) / 10 ** decimals if (is_latest and trace_status == "clean") else None
+                unsold_remainder = None if (fully_resolved or current_balance is not None) else trace["remaining_at_stop"]
+                status = classify_status(trace_status, sold_amount, current_balance if current_balance is not None else trace["remaining_at_stop"], net_seized, is_latest)
+
+                rows.append({
+                    "loan": lot["loans"][0], "loans": lot["loans"], "status": status, "cmint": cmint, "decimals": decimals, "lender": lender,
+                    "offerbook_value_usd": offerbook_value_usd, "net_seized": net_seized,
+                    "sold_amount": sold_amount, "sold_usd_exact": trace["sold_usd_exact"],
+                    "live_priced_legs": trace["live_priced_legs"], "last_sale_ts": trace["last_sale_ts"],
+                    "current_balance": current_balance, "unsold_remainder": unsold_remainder,
+                    "is_latest_in_group": is_latest,
+                })
+            except Exception as exc:
+                log.warning("  FAILED tracing %s — %s — skipping for this run, rerun to retry", lot_label, exc)
+                rows.append({
+                    "loan": lot["loans"][0], "loans": lot["loans"], "status": "error", "cmint": cmint,
+                    "offerbook_value_usd": offerbook_value_usd, "error": str(exc),
+                })
 
     # One batched live-price fetch for every mint any row still needs priced.
     mints_needing_price: set[str] = set()
@@ -683,7 +769,7 @@ def print_seizure_outcomes(rows: list[dict]) -> None:
     log.info("-" * 165)
 
     total_offerbook = total_captured = 0.0
-    untraced_count = contaminated_count = 0
+    untraced_count = contaminated_count = error_count = 0
     better_held, worse_held = 0, 0
     for r in rows:
         loans = r.get("loans") or [r["loan"]]
@@ -695,11 +781,14 @@ def print_seizure_outcomes(rows: list[dict]) -> None:
         token = symbol_for(cmint) if cmint else "NFT"
         status = r["status"]
 
-        if status in ("nft", "unresolvable", "n/a", "skipped_dust"):
+        if status in ("nft", "unresolvable", "n/a", "skipped_dust", "error"):
             log.info(col.format(
                 lender, date_str, token, status.upper(),
                 f"{r.get('offerbook_value_usd', 0.0):,.2f}", "n/a", "n/a", "n/a", "n/a", loan_str,
             ))
+            if status == "error":
+                log.info("    (%s — rerun to retry; already-finished lots stay cached)", r.get("error", "unknown error"))
+                error_count += 1
             untraced_count += 1
             continue
 
@@ -751,6 +840,8 @@ def print_seizure_outcomes(rows: list[dict]) -> None:
         log.info("%d row(s) marked CONTAMINATED — included in the total above using ONLY their pre-contamination sales (no remainder priced)", contaminated_count)
     if untraced_count:
         log.info("(%d row(s) excluded from the totals above — NFT collateral, unresolvable decimals, or below --min-seizure-usd)", untraced_count)
+    if error_count:
+        log.info("%d lot(s) FAILED (network/RPC error) and were skipped — rerun the same command to retry just those (everything else is cached)", error_count)
     log.info("=" * 165)
 
 
@@ -759,6 +850,11 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=TOP_DEFAULT, help=f"Trace defaults for the top N lenders by realized PNL (default {TOP_DEFAULT}).")
     parser.add_argument("--min-seizure-usd", type=float, default=MIN_SEIZURE_USD_DEFAULT, help=f"Skip seizures below this mark-to-market $ value — dust not worth the RPC cost to trace (default {MIN_SEIZURE_USD_DEFAULT}).")
     parser.add_argument("--lender", default=None, help="Trace just this one lender's defaults, regardless of PNL rank (skips the ranking fetch/print).")
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Ignore seizure_outcome_scan_state.json and retrace every lot from scratch, even ones already cached "
+             "from a prior run. Results are still written back to the cache for next time.",
+    )
     args = parser.parse_args()
 
     if args.lender:
@@ -776,7 +872,7 @@ def main() -> None:
 
     log.info("")
     log.info("Tracing on-chain outcome of %d defaulted loan(s) (>= $%.2f mark-to-market) …", len(target_loans), args.min_seizure_usd)
-    rows = analyze_seizures(target_loans, args.min_seizure_usd)
+    rows = analyze_seizures(target_loans, args.min_seizure_usd, use_cache=not args.no_cache)
     print_seizure_outcomes(rows)
 
 

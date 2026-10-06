@@ -111,6 +111,8 @@ Associated Token Account derivation (not wallet-level scanning): rather than sca
 
 This is a genuinely heavy scan — potentially 100+ defaulted loans across the top N lenders, several Solana RPC calls each, against the free public mainnet-beta endpoint by default (set `SOLANA_RPC` to a paid endpoint for a large speedup). Expect minutes, not seconds —`--top`/`--min-seizure-usd` narrow the scope if a full run is more than you need.
 
+**Resumable.** Every lot's trace result — the expensive part, walking its Associated Token Account's full transaction history — is written to `seizure_outcome_scan_state.json` (gitignored, same as `lender_capital_state.json`) the moment it's computed, keyed by the exact inputs that produced it. If the network drops mid-run, just rerun the same command — it picks up exactly where it left off, only retracing lots that never finished (or whose cache key changed, e.g. because a newer default altered what counts as "the next lot" for an already-cached one — handled automatically, never silently stale). A single lot failing after its own internal retries are exhausted is logged and skipped rather than crashing the whole run. Pass `--no-cache` to force a full retrace (results still get written back to the cache). Current live balance/price (for HOLDING/PARTIAL rows) is never cached — that's always fetched fresh, since "what's it worth right now" only means something as of the actual run.
+
 Read-only, never signs or submits anything.
 
 ## Borrower loan timeline (`borrower_loan_timeline.py`)

@@ -16,5 +16,6 @@ strategy/allocation_config.yaml
 reporting/portfolio_reminder_state.json
 reporting/portfolio_reminder_sync_plan.json
 reporting/portfolio_capital_baseline.json
+reporting/seizure_outcome_scan_state.json
 lib/google_calendar_credentials.json
 lib/google_calendar_token.json

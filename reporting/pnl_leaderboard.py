@@ -38,6 +38,24 @@ isn't affected by the rollover-interest fix above. Shown alongside PNL, not
 used to rank (ranking is still by realized PNL) — a high-volume lender isn't
 necessarily a profitable one.
 
+Also reports a second volume figure, "vol incl rollovers $", that treats
+each in-place extension as its OWN distinct completed lending cycle, not
+just the loan's final settlement. A loan extended 3 times before being
+repaid is "1 loan" by the base volume metric above (same pubkey) but is
+economically 4 separate completed terms — the borrower paid full interest
+and the principal went back to work again at each one. Each extension's own
+metadata.extensions[].principalAmountUsd is used (falling back to the loan's
+startPrincipalAmountUsd if an individual extension is missing it) rather
+than re-using the loan's original principal figure, since it's priced at the
+moment that specific term actually completed. Unlike base volume, this also
+picks up extensions on currently-ACTIVE loans (their completed prior terms
+count even though the loan's current open term doesn't, same "already
+realized, not mark-to-market" reasoning the rollover-interest PNL fix above
+uses) — so a lender can show rollover volume here even with $0 in the base
+volume column, if every one of their loans happens to still be active. The
+accompanying "cycles" column is repaid + defaulted + rolled-over counts
+combined — how many distinct completed lending cycles that total spans.
+
 If OFFERBOOK_PORTFOLIO_WALLETS is set (.env — the same var portfolio_health.py
 reads, comma-separated addresses), those specific lenders are merged into a
 single combined row before ranking, labeled "YOUR WALLETS (N combined)"
@@ -96,21 +114,26 @@ def _fetch_all_pages(endpoint: str, params: dict | None = None) -> list[dict]:
     return _common.fetch_all_pages(SESSION, API_BASE, endpoint, params, PAGE_SIZE, sleep_secs=0.1)
 
 
-def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str, float]]:
-    """Returns (pnl_by_lender, counts_by_lender, volume_by_lender). counts
-    tracks how many repaid/defaulted/rolled-over loans backed each lender's
-    total, for context. volume is total USD principal (at origination) of
-    every SETTLED (repaid or defaulted) loan that lender has made —
-    deliberately excludes active loans, unrelated to the rollover-interest
-    PNL below (see module docstring for why).
+def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str, float], dict[str, float]]:
+    """Returns (pnl_by_lender, counts_by_lender, volume_by_lender,
+    rollover_volume_by_lender). counts tracks how many repaid/defaulted/
+    rolled-over loans backed each lender's total, for context. volume is
+    total USD principal (at origination) of every SETTLED (repaid or
+    defaulted) loan that lender has made — deliberately excludes active
+    loans, unrelated to the rollover-interest PNL below (see module
+    docstring for why). rollover_volume is the EXTRA distinct volume from
+    each in-place extension (see module docstring) — kept separate from
+    `volume` rather than folded in, since base volume is a distinct metric
+    callers may still want to see on its own.
 
     Any lender address in MERGE_WALLETS is remapped to MERGE_LABEL before
     ever being used as a dict key — so a merged wallet's real address never
-    appears anywhere in pnl/counts/volume, not just in the final printed
-    table."""
+    appears anywhere in pnl/counts/volume/rollover_volume, not just in the
+    final printed table."""
     pnl: dict[str, float] = {}
     counts: dict[str, dict[str, int]] = {}
     volume: dict[str, float] = {}
+    rollover_volume: dict[str, float] = {}
 
     def _remap(lender: str) -> str:
         return MERGE_LABEL if lender in MERGE_WALLETS else lender
@@ -124,6 +147,10 @@ def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str
     def bump_volume(lender: str, start_principal_usd: float) -> None:
         lender = _remap(lender)
         volume[lender] = volume.get(lender, 0.0) + start_principal_usd
+
+    def bump_rollover_volume(lender: str, principal_usd: float) -> None:
+        lender = _remap(lender)
+        rollover_volume[lender] = rollover_volume.get(lender, 0.0) + principal_usd
 
     log.info("Fetching all repaid loans platform-wide …")
     repaid = _fetch_all_pages("/loans/status/repaid")
@@ -168,28 +195,51 @@ def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str
         lender = l.get("lender")
         if not lender:
             continue
+        start_principal_usd = (l.get("metadata") or {}).get("startPrincipalAmountUsd") or 0.0
         for ext in (l.get("metadata") or {}).get("extensions") or []:
             interest_usd = ext.get("interestPaidUsd") or 0.0
             fee_usd = ((ext.get("repayFee") or {}).get("amountUsd")) or 0.0
             bump(lender, interest_usd - fee_usd, "rolled_over")
+            # Each extension is priced at its own completion moment
+            # (principalAmountUsd) — falls back to the loan's own
+            # origination price only if that specific extension is missing
+            # it, same convention the rest of this script uses.
+            bump_rollover_volume(lender, ext.get("principalAmountUsd") or start_principal_usd)
 
-    return pnl, counts, volume
+    return pnl, counts, volume, rollover_volume
 
 
-def print_leaderboard(pnl: dict[str, float], counts: dict[str, dict[str, int]], volume: dict[str, float], top: int) -> None:
+def print_leaderboard(
+    pnl: dict[str, float], counts: dict[str, dict[str, int]], volume: dict[str, float],
+    rollover_volume: dict[str, float], top: int,
+) -> None:
     ranked = sorted(pnl.items(), key=lambda kv: kv[1], reverse=True)[:top]
 
     log.info("")
     log.info("=" * 115)
     log.info("Realized PNL leaderboard — repaid interest + rollover interest (net of fees) + kept collateral on defaults")
     log.info("=" * 115)
-    col = "{:<4}{:<46}{:>16}{:>9}{:>11}{:>13}{:>19}"
-    log.info(col.format("#", "lender", "realized PNL $", "repaid", "defaulted", "rolled over", "total volume $"))
+    col = "{:<4}{:<46}{:>16}{:>9}{:>11}{:>13}{:>19}{:>22}{:>9}"
+    log.info(col.format(
+        "#", "lender", "realized PNL $", "repaid", "defaulted", "rolled over", "total volume $",
+        "vol incl rollovers $", "cycles",
+    ))
     log.info("-" * 115)
     for i, (lender, amount) in enumerate(ranked, 1):
         c = counts[lender]
-        log.info(col.format(i, lender, f"{amount:,.2f}", c["repaid"], c["defaulted"], c["rolled_over"], f"{volume.get(lender, 0.0):,.2f}"))
+        base_volume = volume.get(lender, 0.0)
+        total_volume = base_volume + rollover_volume.get(lender, 0.0)
+        cycles = c["repaid"] + c["defaulted"] + c["rolled_over"]
+        log.info(col.format(
+            i, lender, f"{amount:,.2f}", c["repaid"], c["defaulted"], c["rolled_over"], f"{base_volume:,.2f}",
+            f"{total_volume:,.2f}", cycles,
+        ))
     log.info("=" * 115)
+    log.info(
+        "'vol incl rollovers $' counts each in-place extension as its own distinct completed lending cycle, "
+        "not just the loan's final settlement — see the module docstring. 'cycles' = repaid + defaulted + "
+        "rolled over counts combined."
+    )
 
 
 def main() -> None:
@@ -197,9 +247,9 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=25, help="Number of top wallets to show (default: 25)")
     args = parser.parse_args()
 
-    pnl, counts, volume = compute_pnl()
+    pnl, counts, volume, rollover_volume = compute_pnl()
     log.info("Distinct lenders with realized PNL (repaid, defaulted, or rolled-over interest): %d", len(pnl))
-    print_leaderboard(pnl, counts, volume, args.top)
+    print_leaderboard(pnl, counts, volume, rollover_volume, args.top)
 
 
 if __name__ == "__main__":

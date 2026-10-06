@@ -74,6 +74,8 @@ Realized PNL per lender =
 
 Also reports each lender's **total volume** — total USD principal (at origination) of every SETTLED (repaid or defaulted) loan they've made. Volume stays settled-only (deliberately excludes active loans, extended or not) — it's a distinct, unrelated metric from realized PNL and isn't affected by the rollover-interest bullet above. Shown alongside PNL, not used for ranking — a high-volume lender isn't necessarily a profitable one. The printed table also breaks out a **rolled over** count per lender (extensions contributing to PNL) alongside the existing repaid/defaulted counts.
 
+The table also always carries **vol incl rollovers $** and **cycles**. Base volume above counts a loan's principal once at settlement no matter how many times it was extended in place (same pubkey = "one loan"). But each extension is its own completed term — the borrower paid full interest again and the principal went back to work for another cycle — so this treats each one as distinct volume, priced at that specific extension's own `metadata.extensions[].principalAmountUsd` (falling back to the loan's `startPrincipalAmountUsd` only if an individual extension is missing it). Unlike base volume, this also counts extensions on currently-**active** loans (their already-completed prior terms, not the still-open current one) — so a lender can show rollover volume here even with $0 in the base volume column, if every one of their loans happens to still be active. `cycles` = repaid + defaulted + rolled over counts combined, i.e. how many distinct completed lending cycles that total spans.
+
 ```bash
 python reporting/pnl_leaderboard.py              # top 25 by realized PNL
 python reporting/pnl_leaderboard.py --top 50

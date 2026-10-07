@@ -5,6 +5,7 @@ cffi==2.1.1
 charset-normalizer==3.4.7
 cryptography==50.0.1
 ECPy==1.2.5
+et-xmlfile==2.0.0
 future==1.0.0
 google-api-core==2.36.0
 google-api-python-client==2.200.0
@@ -23,6 +24,7 @@ ndeflib==0.3.3
 nfcpy==1.0.4
 numpy==2.4.6
 oauthlib==3.3.1
+openpyxl==3.1.5
 opentelemetry-api==1.44.0
 pillow==12.3.0
 proto-plus==1.28.4

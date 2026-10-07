@@ -99,7 +99,11 @@ python reporting/seizure_outcome_scan.py                      # top 20 lenders b
 python reporting/seizure_outcome_scan.py --top 10
 python reporting/seizure_outcome_scan.py --min-seizure-usd 50  # skip dust seizures (default: $10)
 python reporting/seizure_outcome_scan.py --lender <address>    # trace just one lender, any PNL rank
+python reporting/seizure_outcome_scan.py --output ~/Downloads/seizures.xlsx
+python reporting/seizure_outcome_scan.py --no-excel            # console output only, skip the spreadsheet
 ```
+
+**Excel export.** Every run also saves the full result table (including untraced NFT/unresolvable/skipped-dust/error rows) to `~/Desktop/seizure_outcomes_<timestamp>.xlsx` by default — real numbers and dates, not pre-formatted strings, so Excel's own sort/filter/formulas work on it directly without reformatting anything first. One row per lot: `lender`, `defaulted`, `token`, `contract` (full mint, for copy-paste), `status`, `offerbook_usd`/`realized_usd`/`current_usd`/`captured_usd`/`delta_usd` (blank, not zeroed, wherever a figure genuinely doesn't apply), `flag` (`HELD TOO LONG`/`HOLDING PAID OFF`/`UNDERWATER`/`CONTAMINATED`), `loans_merged` count, `loan_pubkeys`, and a free-text `notes` column (unpriced legs, rolled-forward/contaminated unit counts, error messages). Header row is frozen with autofilter on, so it's ready to pivot/filter on open. `--output` picks a different path; `--no-excel` skips writing it.
 
 Three correctness issues surfaced during development, all now handled rather than worked around:
 

@@ -87,11 +87,18 @@ thing never cached is each lot's current live balance/price (for HOLDING/
 PARTIAL rows) — those are re-fetched fresh every run since "what's it
 worth right now" is only meaningful as of the actual run time.
 
+Every run also saves the full result table to an Excel file (real numbers
+and dates, not pre-formatted strings, so Excel's own sort/filter/formulas
+work on it directly) — ~/Desktop/seizure_outcomes_<timestamp>.xlsx by
+default, --output to pick a different path, --no-excel to skip it.
+
 Usage:
   python seizure_outcome_scan.py                           # top 20 lenders by realized PNL
   python seizure_outcome_scan.py --top 10
   python seizure_outcome_scan.py --min-seizure-usd 50       # skip dust seizures (default: $10)
   python seizure_outcome_scan.py --lender <address>         # trace just one lender, any PNL rank
+  python seizure_outcome_scan.py --output ~/Downloads/seizures.xlsx
+  python seizure_outcome_scan.py --no-excel                # console output only
 
 Read-only: never signs or submits anything.
 """
@@ -109,6 +116,9 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from solders.pubkey import Pubkey
 
 # Shared modules live in ../lib — see README's repo-layout note.
@@ -151,6 +161,8 @@ SIGNATURE_PAGE_CAP = 5  # x1000 = 5000 sigs ceiling per token account before giv
 # mean re-fetching every signature/transaction from scratch. See
 # make_trace_cache_key() for why a stale entry is never silently reused.
 STATE_PATH = Path(__file__).parent / "seizure_outcome_scan_state.json"
+
+DESKTOP_DIR = Path.home() / "Desktop"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -753,6 +765,32 @@ def print_ranking(ranked: list[tuple[str, float]], top: int) -> None:
     log.info("=" * 80)
 
 
+FLAG_LONG = {
+    "CONTAMINATED": "CONTAMINATED — unrelated deposit detected mid-trace, numbers reflect ONLY pre-contamination activity",
+    "HELD TOO LONG": "HELD TOO LONG",
+    "HOLDING PAID OFF": "HOLDING PAID OFF",
+    "UNDERWATER": "UNDERWATER vs. default-time value",
+}
+
+
+def flag_for_status(status: str, delta: float) -> tuple[str, str]:
+    """(short flag label, 'better'/'worse'/'') — shared between the console
+    table and the Excel export so the two can never drift apart. The
+    console print decorates the short label via FLAG_LONG; Excel just
+    wants the short, filterable label in its own column."""
+    if status == "contaminated":
+        return "CONTAMINATED", ""
+    if status in ("sold", "partial") and delta < -1.0:
+        return "HELD TOO LONG", "worse"
+    if status in ("sold", "partial") and delta > 1.0:
+        return "HOLDING PAID OFF", "better"
+    if status == "holding" and delta < -1.0:
+        return "UNDERWATER", "worse"
+    if status == "holding" and delta > 1.0:
+        return "", "better"
+    return "", ""
+
+
 def print_seizure_outcomes(rows: list[dict]) -> None:
     log.info("")
     log.info("=" * 165)
@@ -802,21 +840,14 @@ def print_seizure_outcomes(rows: list[dict]) -> None:
             current_str = f"({r['unsold_remainder']:.2f} units unattributable)"
         delta = r["delta_vs_offerbook_usd"]
         delta_str = f"{delta:+,.2f}"
-        flag = ""
+        short_flag, direction = flag_for_status(status, delta)
         if status == "contaminated":
-            flag = "  *** CONTAMINATED — unrelated deposit detected mid-trace, numbers reflect ONLY pre-contamination activity ***"
             contaminated_count += 1
-        elif status in ("sold", "partial") and delta < -1.0:
-            flag = "  *** HELD TOO LONG ***"
-            worse_held += 1
-        elif status in ("sold", "partial") and delta > 1.0:
-            flag = "  *** HOLDING PAID OFF ***"
+        elif direction == "better":
             better_held += 1
-        elif status == "holding" and delta < -1.0:
-            flag = "  *** UNDERWATER vs. default-time value ***"
+        elif direction == "worse":
             worse_held += 1
-        elif status == "holding" and delta > 1.0:
-            better_held += 1
+        flag = f"  *** {FLAG_LONG.get(short_flag, short_flag)} ***" if short_flag else ""
 
         log.info(col.format(
             lender, date_str, token, status.upper(), f"{r['offerbook_value_usd']:,.2f}",
@@ -845,6 +876,94 @@ def print_seizure_outcomes(rows: list[dict]) -> None:
     log.info("=" * 165)
 
 
+MONEY_COLUMNS = ("offerbook_usd", "realized_usd", "current_usd", "captured_usd", "delta_usd")
+
+
+def write_excel(rows: list[dict], path: str) -> None:
+    """One row per `rows` entry, same data the console table shows — but as
+    real numbers/dates, not pre-formatted strings, so sorting, filtering,
+    and formulas all work natively once it's open. Untraced rows (NFT /
+    unresolvable / skipped-dust / error) are included too, with their
+    numeric columns left blank rather than zeroed, so they're visually and
+    formula-wise distinguishable from a genuine $0 outcome."""
+    headers = [
+        "lender", "defaulted", "token", "contract", "status",
+        "offerbook_usd", "realized_usd", "current_usd", "captured_usd", "delta_usd",
+        "flag", "loans_merged", "loan_pubkeys", "notes",
+    ]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Seizure Outcomes"
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for r in rows:
+        loans = r.get("loans") or [r["loan"]]
+        l = r["loan"]
+        lender = r.get("lender", l.get("lender", ""))
+        cmint = r.get("cmint")
+        token = symbol_for(cmint) if cmint else "NFT"
+        status = r["status"]
+        loan_pubkeys = "+".join(x.get("pubkey", "") for x in loans)
+
+        try:
+            defaulted_date = datetime.fromisoformat((l.get("updatedAt") or "").replace("Z", "+00:00")).date()
+        except ValueError:
+            defaulted_date = None
+
+        notes = []
+        if status == "error":
+            notes.append(r.get("error", "unknown error"))
+        for other_mint, amt in r.get("unpriced_legs", []) or []:
+            notes.append(f"received {amt:.4f} {symbol_for(other_mint)} on sale, no live price resolvable")
+        if status == "rolled_forward":
+            notes.append(f"{r.get('unsold_remainder', 0.0):.2f} units rolled into next default")
+        elif status == "contaminated":
+            notes.append(f"{r.get('unsold_remainder', 0.0):.2f} units unattributable after contamination")
+        if r.get("current_price_missing"):
+            notes.append("current holding has no resolvable live price")
+
+        if status in ("nft", "unresolvable", "n/a", "skipped_dust", "error"):
+            ws.append([
+                lender, defaulted_date, token, cmint or "", status.upper(),
+                r.get("offerbook_value_usd", 0.0), None, None, None, None,
+                "", len(loans), loan_pubkeys, "; ".join(notes),
+            ])
+            continue
+
+        delta = r["delta_vs_offerbook_usd"]
+        short_flag, _direction = flag_for_status(status, delta)
+        current_usd = r["current_value_usd"] if not r["current_price_missing"] else None
+        ws.append([
+            lender, defaulted_date, token, cmint or "", status.upper(),
+            r["offerbook_value_usd"], r["sold_usd_total"], current_usd, r["total_captured_usd"], delta,
+            short_flag, len(loans), loan_pubkeys, "; ".join(notes),
+        ])
+
+    for col_idx, header in enumerate(headers, start=1):
+        letter = get_column_letter(col_idx)
+        if header in MONEY_COLUMNS:
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row=row_idx, column=col_idx).number_format = "#,##0.00"
+        elif header == "defaulted":
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row=row_idx, column=col_idx).number_format = "yyyy-mm-dd"
+        width = {
+            "lender": 46, "contract": 46, "loan_pubkeys": 60, "notes": 60,
+            "token": 14, "status": 14, "flag": 18, "defaulted": 12,
+        }.get(header, 14)
+        ws.column_dimensions[letter].width = width
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    log.info("Saved %d row(s) to %s", ws.max_row - 1, path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--top", type=int, default=TOP_DEFAULT, help=f"Trace defaults for the top N lenders by realized PNL (default {TOP_DEFAULT}).")
@@ -855,6 +974,12 @@ def main() -> None:
         help="Ignore seizure_outcome_scan_state.json and retrace every lot from scratch, even ones already cached "
              "from a prior run. Results are still written back to the cache for next time.",
     )
+    parser.add_argument(
+        "--output", default=None,
+        help="Excel (.xlsx) output path (default ~/Desktop/seizure_outcomes_<timestamp>.xlsx). "
+             "Pass --no-excel to skip writing it entirely.",
+    )
+    parser.add_argument("--no-excel", action="store_true", help="Skip writing the Excel file.")
     args = parser.parse_args()
 
     if args.lender:
@@ -874,6 +999,10 @@ def main() -> None:
     log.info("Tracing on-chain outcome of %d defaulted loan(s) (>= $%.2f mark-to-market) …", len(target_loans), args.min_seizure_usd)
     rows = analyze_seizures(target_loans, args.min_seizure_usd, use_cache=not args.no_cache)
     print_seizure_outcomes(rows)
+
+    if not args.no_excel:
+        output_path = args.output or str(DESKTOP_DIR / f"seizure_outcomes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        write_excel(rows, output_path)
 
 
 if __name__ == "__main__":

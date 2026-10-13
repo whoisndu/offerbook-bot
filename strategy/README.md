@@ -293,9 +293,28 @@ Every offer's principal, collateral, target LTV, and target APY is logged in ful
 
 Note: `defaulter_capture.py` depends on `../monitoring/defaulter_watch.py` directly (`from defaulter_watch import ...`) — its `sys.path` shim adds both `../lib` and `../monitoring`, since it's the one script in this folder that reaches across into another.
 
+## Withdraw escrow back to wallet (`empty_escrow.py`)
+
+Offerbook holds funds in two places per wallet: your wallet itself, and an on-chain escrow account the protocol uses to avoid a fresh deposit tx on every offer/fill. Money accumulates in escrow from loan repayments, interest, origination-fee rebates, and defaulted-loan collateral — nothing automatically sweeps it back to your wallet. This script does that sweep: fetches every nonzero escrow holding for one wallet and withdraws it in full, one asset at a time.
+
+Covers both fungible tokens (USDC, SOL, any other SPL/Token-2022 token — via `/escrow-withdraw`) and NFTs (classic/programmable/core — via their own dedicated withdraw endpoints, auto-detected from each holding's own `asset.kind`). A holding this script doesn't recognize is skipped with a warning rather than guessed at.
+
+Same signing infrastructure as the rest of this folder (imports `defaulter_capture.py` for it, like `fill_offer.py` does) — Ledger by default (interactively prompted which account, unless `--ledger-path` is given; there's no "right" account here, it depends whose escrow you're emptying) or `--private-key` for the `.env` hot wallet. Only ever operates on ONE wallet per run — if you run multiple wallets (e.g. `OFFERBOOK_PORTFOLIO_WALLETS`), run this once per wallet, selecting the matching signer each time.
+
+Prints every nonzero holding (symbol, kind, amount, ~$ value where a live price is resolvable) and asks for ONE confirmation covering the whole batch before signing anything — same safety pattern as `cancel_offers.py`'s batch cancellation. A single asset's withdrawal failing doesn't abort the rest of the batch; failures are collected and reported in the summary so you know exactly what still needs a rerun.
+
+```bash
+python strategy/empty_escrow.py                        # prompts which Ledger account, then confirms
+python strategy/empty_escrow.py --ledger-path "44'/501'/1'"   # skip the account prompt
+python strategy/empty_escrow.py --private-key           # sign with the .env hot wallet instead
+python strategy/empty_escrow.py --min-usd 1             # skip pure-dust holdings below $1 (default: 0, sweep everything)
+python strategy/empty_escrow.py --yes                   # skip the confirmation prompt
+DRY_RUN=true python strategy/empty_escrow.py            # preview without submitting
+```
+
 ## Signing modes
 
-Every script (`cancel_offers.py`, `strategy.py`, `fixed_terms_offers.py`, `fill_offer.py`) supports two signing modes —
+Every script (`cancel_offers.py`, `strategy.py`, `fixed_terms_offers.py`, `fill_offer.py`, `empty_escrow.py`) supports two signing modes —
 **Ledger is the default**:
 
 - `--ledger` (default): signs via a Ledger hardware wallet over USB. Requires

@@ -1,4 +1,10 @@
 {
+  "2xVMHcm4C1U6HQksrLxECaa8newEem77Sdtb9djTmLpw": {
+    "borrower": "CPjZfhEwpPoASp424rGyd3hDU3MxSG9JwGCwi1yrDBep",
+    "expiredAt": "2026-10-15T14:32:19Z",
+    "lender": "3CnuHe6pTiQdhHwmRppvGZHqVs7cLqno3NBvzCRUJDF6",
+    "principal_usd": 9.997407425039368
+  },
   "3iuoMtBUX7cpJi64KXBUckdz5rYmEMNhzbXDfk8cV6fZ": {
     "borrower": "CiprRnLjTYNUGbJ8NmEaTRDAtSp2w2GK3YwGET4THvfV",
     "expiredAt": "2026-10-02T08:57:58Z",
@@ -22,5 +28,11 @@
     "expiredAt": "2026-07-30T08:32:08Z",
     "lender": "CxzmfgADE45SktN2uCwDjB2PSNg7qgTQm4GM1xtYK4er",
     "principal_usd": 9.99917340518372
+  },
+  "ECAHzwz4UpYifH3h661CYvrVaqk9tFQsnaxafiXeEjcM": {
+    "borrower": "CPjZfhEwpPoASp424rGyd3hDU3MxSG9JwGCwi1yrDBep",
+    "expiredAt": "2026-10-15T14:32:19Z",
+    "lender": "3CnuHe6pTiQdhHwmRppvGZHqVs7cLqno3NBvzCRUJDF6",
+    "principal_usd": 9.9970612762442
   }
 }

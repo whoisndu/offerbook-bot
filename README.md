@@ -78,6 +78,7 @@ See [strategy/README.md](strategy/README.md) for the full strategy breakdown, th
 | `TELEGRAM_BOT_TOKEN` | No | — | Bot token from @BotFather — used by `wallet_tx_watch.py` and `tg_deposit_watch.py` (both in `monitoring/`) |
 | `TELEGRAM_CHAT_ID` | No | — | Your chat id — same two scripts |
 | `OFFERBOOK_PORTFOLIO_WALLETS` | No | — | Comma-separated wallet addresses for `portfolio_health.py` (in `reporting/`) to report on |
+| `JUPITER_API_KEY` | No | — | Sent as `x-api-key` on Jupiter price-API requests when set — raises rate limits; used by `strategy.py`, `fixed_terms_offers.py`, `defaulter_capture.py` (all `strategy/`), `loan_watch_notify.py`, `soon_to_expire.py` (`monitoring/`), and `verify_offers.py`, `portfolio_health.py`, `seizure_outcome_scan.py` (`reporting/`) |
 
 `SMTP_FROM_EMAIL` / `SMTP_APP_PASSWORD` / `NOTIFY_EMAIL_TO` (used by `loan_watch_notify.py`, `borrow_offer_watch.py`, `default_activity_watch.py`, `arbitrage_scanner.py`, and `competitor_timing_report.py`, all in `monitoring/`/`reporting/`) are **not** meant to go in `.env` — they live only as GitHub Actions secrets (`gh secret set <NAME>`), since those scripts are meant to run unattended on a schedule, not locally.
 

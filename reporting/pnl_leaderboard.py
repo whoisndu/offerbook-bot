@@ -209,36 +209,57 @@ def compute_pnl() -> tuple[dict[str, float], dict[str, dict[str, int]], dict[str
     return pnl, counts, volume, rollover_volume
 
 
+def _rank_by(values: dict[str, float]) -> dict[str, int]:
+    """Dense 1-based rank, descending, over the FULL universe of lenders in
+    `values` — not just whatever subset ends up displayed in the PNL-sorted
+    table. That's the whole point: a lender can have huge volume but middling
+    PNL and still want to know where that volume stands against everyone
+    else, not just against the other rows that happen to be on screen."""
+    ordered = sorted(values.items(), key=lambda kv: kv[1], reverse=True)
+    return {lender: i for i, (lender, _) in enumerate(ordered, 1)}
+
+
 def print_leaderboard(
     pnl: dict[str, float], counts: dict[str, dict[str, int]], volume: dict[str, float],
     rollover_volume: dict[str, float], top: int,
 ) -> None:
     ranked = sorted(pnl.items(), key=lambda kv: kv[1], reverse=True)[:top]
 
+    total_volume_by_lender = {
+        lender: volume.get(lender, 0.0) + rollover_volume.get(lender, 0.0) for lender in pnl
+    }
+    base_volume_rank = _rank_by(volume)
+    total_volume_rank = _rank_by(total_volume_by_lender)
+    n_lenders = len(pnl)
+
     log.info("")
-    log.info("=" * 115)
+    log.info("=" * 140)
     log.info("Realized PNL leaderboard — repaid interest + rollover interest (net of fees) + kept collateral on defaults")
-    log.info("=" * 115)
-    col = "{:<4}{:<46}{:>16}{:>9}{:>11}{:>13}{:>19}{:>22}{:>9}"
+    log.info("=" * 140)
+    col = "{:<4}{:<46}{:>16}{:>9}{:>11}{:>13}{:>19}{:>10}{:>22}{:>10}{:>9}"
     log.info(col.format(
-        "#", "lender", "realized PNL $", "repaid", "defaulted", "rolled over", "total volume $",
-        "vol incl rollovers $", "cycles",
+        "#", "lender", "realized PNL $", "repaid", "defaulted", "rolled over", "total volume $", "vol rank",
+        "vol incl rollovers $", "vol rank*", "cycles",
     ))
-    log.info("-" * 115)
+    log.info("-" * 140)
     for i, (lender, amount) in enumerate(ranked, 1):
         c = counts[lender]
         base_volume = volume.get(lender, 0.0)
-        total_volume = base_volume + rollover_volume.get(lender, 0.0)
+        total_volume = total_volume_by_lender[lender]
         cycles = c["repaid"] + c["defaulted"] + c["rolled_over"]
         log.info(col.format(
             i, lender, f"{amount:,.2f}", c["repaid"], c["defaulted"], c["rolled_over"], f"{base_volume:,.2f}",
-            f"{total_volume:,.2f}", cycles,
+            f"{base_volume_rank[lender]}/{n_lenders}", f"{total_volume:,.2f}",
+            f"{total_volume_rank[lender]}/{n_lenders}", cycles,
         ))
-    log.info("=" * 115)
+    log.info("=" * 140)
     log.info(
         "'vol incl rollovers $' counts each in-place extension as its own distinct completed lending cycle, "
         "not just the loan's final settlement — see the module docstring. 'cycles' = repaid + defaulted + "
-        "rolled over counts combined."
+        "rolled over counts combined. Both 'vol rank' columns (marked *) rank across ALL %d lenders with any "
+        "settled/rolled-over activity, not just the %d rows shown above — so a lender with big volume but "
+        "middling PNL still shows where its volume stands platform-wide.",
+        n_lenders, min(top, n_lenders),
     )
 
 

@@ -160,6 +160,17 @@ python reporting/address_snapshot.py                                        # pr
 
 `--role borrower` (the given addresses are borrowers): shows every loan they owe, grouped by **lender**. `--role lender`: shows every loan owed to them, grouped by **borrower**. `--role` is never silently defaulted — omitting it prompts, since guessing wrong just returns a meaningless zero-loans result instead of an answer. Defaults to currently **active** loans only (`--status all`/`repaid`/`defaulted` to widen scope). Read-only, no signing.
 
+## Top defaulted collateral (`top_defaulted_collateral.py`)
+
+Platform-wide, all-time: which collateral tokens have the most USD value behind DEFAULTED loans — every lender, not just our own wallets. Ranked by **total USD lost at default-time mark-to-market** per collateral mint, not default count (a token defaulted on twice at $5,000 ranks above one defaulted on 50 times at $50 a pop — the question here is "where's the biggest dollar exposure", not "which collateral keeps failing"; see `pnl_leaderboard.py`/`seizure_outcome_scan.py` for more dollar-denominated views).
+
+```bash
+python reporting/top_defaulted_collateral.py              # top 20
+python reporting/top_defaulted_collateral.py --top 50
+```
+
+Prints a ranked table (symbol, total USD lost at default-time mark-to-market, default count), then the plain comma-separated symbol list on its own line for scripting/paste-elsewhere use. Read-only, no signing.
+
 ## Liquidity check (`liquidity_check.py`)
 
 How much can you ACTUALLY borrow against a given collateral right now? A live lending offer's size alone overstates real liquidity whenever a lender has posted several offers (same or different pairs) whose sizes sum to more than their real wallet+escrow balance — Offerbook's rehypothecation model allows this deliberately (only one offer can actually fill at a time), and `strategy.py` itself does it. This script corrects for it: for each lender with a live offer on the given pair, it caps their contribution at `min(sum of their offer sizes on THIS pair, their actual current wallet+escrow balance)`, summed across lenders — the real amount a borrower could pull right now, shown alongside the naive raw total so the gap is obvious.

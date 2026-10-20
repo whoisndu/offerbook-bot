@@ -18,7 +18,10 @@ Unlike strategy.py, terms are FIXED rather than market-benchmarked:
     offer independently draws on the same shared escrow/wallet pool
     (rehypothecation: only one can actually fill at a time, so sizing every
     offer off the same balance is intentional, same as strategy.py already
-    does across pairs/durations — see that script's own docstring).
+    does across pairs/durations — see that script's own docstring). Each
+    offer is created with topup="none" (no escrow deposit at creation), so
+    they post instantly as underfunded rather than failing once the shared
+    balance is already spoken for by an earlier offer in the same run.
 
 Usage:
   python fixed_terms_offers.py --collateral USELESS
@@ -458,7 +461,7 @@ def main() -> None:
             "expiry": OFFER_EXPIRY_SECS,
             "allowPartialFill": ALLOW_PARTIAL_FILL,
             "minFillAmount": min_fill,
-            "topup": "minimum",
+            "topup": "none",  # no escrow deposit at creation — post as underfunded, rely on rehypothecation
         }
         if create_offer(params):
             successes += 1

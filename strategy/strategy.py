@@ -1183,7 +1183,7 @@ def compute_offer_params(ps: PairStats, our_offer_usdc: float | None = None) -> 
         "expiry": OFFER_EXPIRY_SECS,
         "allowPartialFill": ALLOW_PARTIAL_FILL,
         "minFillAmount": min_fill,
-        "topup": "minimum",  # pull only the shortfall from wallet; use escrow first
+        "topup": "none",  # no escrow deposit at creation — post as underfunded, rely on rehypothecation
     }
 
 
@@ -1412,12 +1412,13 @@ def main() -> None:
     log.info("=" * 60)
 
     # 1. Fetch USDC balance (wallet + escrow) before doing anything.
-    # topup:"minimum" draws only the shortfall from wallet, so the full
-    # combined balance (wallet + escrow) is available as budget. This single
-    # snapshot is reused for every selected duration below — offers across
-    # durations, like offers across collateral pairs, intentionally draw on
-    # the same shared escrow/wallet pool (rehypothecation), since only one
-    # offer actually gets filled per unit of capital.
+    # Each offer is created with topup="none" (no escrow deposit at
+    # creation), so they post instantly as underfunded rather than failing,
+    # relying on rehypothecation — the full combined balance (wallet +
+    # escrow) is available as budget for every offer, across every duration
+    # and collateral pair, since only one offer actually gets filled per
+    # unit of capital. This single snapshot is reused for every selected
+    # duration below.
     try:
         _, _, usdc_available_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
         buffer_raw = int(WALLET_BUFFER_USDC * 10 ** USDC_DECIMALS)

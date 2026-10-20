@@ -622,6 +622,10 @@ def main() -> None:
         sys.exit(1)
 
     log.info("Found %d actionable pool(s) to target.", len(pools))
+    # Each pool's offer is sized off this SAME snapshot (like strategy.py
+    # across pairs/durations) and created with topup="none" below, so they
+    # post instantly as underfunded rather than failing once the shared
+    # balance is already spoken for by an earlier offer in this run.
     available_usdc_raw = fetch_available_balance(USDC_MINT, USDC_DECIMALS)
 
     created = skipped = errors = 0
@@ -688,7 +692,7 @@ def main() -> None:
             "expiry": OFFER_EXPIRY_SECS,
             "allowPartialFill": ALLOW_PARTIAL_FILL,
             "minFillAmount": min_fill_raw,
-            "topup": "minimum",
+            "topup": "none",  # no escrow deposit at creation — post as underfunded, rely on rehypothecation
         }
 
         if create_offer(offer_params):

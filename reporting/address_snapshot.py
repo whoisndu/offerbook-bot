@@ -207,6 +207,22 @@ def print_grouped_summary(summary_rows: list[dict], group_key: str) -> None:
     )
 
 
+ALL_STATUSES = ["active", "repaid", "defaulted"]
+
+
+def collateral_types_used(own_field: str, address_set: set[str], current_loans: list[dict], current_statuses: list[str]) -> list[str]:
+    """Every collateral symbol these addresses have ever posted/received as
+    `own_field`, across ALL loan statuses — deliberately ignores --status so
+    "used in the past" isn't silently narrowed by the active-only default."""
+    if sorted(current_statuses) == sorted(ALL_STATUSES):
+        history = current_loans
+    else:
+        history = fetch_loans(ALL_STATUSES)
+    relevant_history = [l for l in history if l.get(own_field) in address_set]
+    resolve_collateral_symbols(relevant_history)
+    return sorted({collateral_symbol_for(l) for l in relevant_history})
+
+
 def prompt_for_addresses() -> list[str]:
     raw = input("Enter address(es), comma-separated: ").strip()
     while not raw:
@@ -262,6 +278,13 @@ def main() -> None:
     rows = build_detail_rows(relevant)
     print_detail_table(rows)
     print_grouped_summary(build_grouped_summary(rows, group_key), group_key)
+
+    collat_types = collateral_types_used(own_field, address_set, loans, statuses)
+    log.info("")
+    log.info(
+        "Collateral types used historically (any status) as %s: %s",
+        role, ", ".join(collat_types) if collat_types else "(none)",
+    )
 
 
 if __name__ == "__main__":

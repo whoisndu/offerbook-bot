@@ -36,6 +36,23 @@ Prices are fetched from Jupiter first, DexScreener second. After computing the r
 
 `safe_collateral_amount()` only ever sizes an offer off a genuine live price — if Jupiter and DexScreener both have nothing for a mint, the pair is skipped, full stop. It deliberately does **not** fall back to the pool-implied price in that case: doing so would size the offer using that same price and then "cross-validate" against it, which can never disagree with itself and provides no real protection. This is also why token decimals aren't limited to the small hardcoded `KNOWN_DECIMALS` table — Jupiter's price response includes each token's `decimals`, and that's merged in as a fallback, so any token Jupiter actually prices (which is nearly everything) is fully usable regardless of whether it's in that curated list.
 
+## Offer funding: topup modes
+
+Every offer-creation script here (`strategy.py`, `fixed_terms_offers.py`, `defaulter_capture.py`, `create_manual_offer.py`) calls `/create-principal-offer` with a `topup` field, which controls whether/how much of the offer's principal gets escrow-deposited **at creation time**. Getting the default wrong here is a mistake that's already happened twice (see below) — read this before touching any of these scripts or adding a new one.
+
+- `"minimum"` — pulls the shortfall (`principal − already-free escrow`) from the wallet, so the offer becomes `isFunded: true` and is immediately, guaranteed fillable. Looks like the obviously-correct default.
+- `"full"` — same idea, fully funds from scratch regardless of what's already in escrow.
+- `"none"` — no deposit at all. The offer posts instantly as `isFunded: false` ("underfunded"), relying on rehypothecation: whichever offer actually gets filled first draws on the wallet's/escrow's real balance at **fill time**, not creation time.
+
+**Why `"none"` is the correct default for every offer-creation script here, not `"minimum"`:** a wallet's escrow balance isn't reusable across offers the way it looks. Once ANY existing live offer is `isFunded: true`, the chain treats its backing as claimed — it is NOT simultaneously available to also fully-fund a second offer, even though both offers' combined principal may be well within the wallet's nominal wallet+escrow total. So any script that tries `topup: "minimum"`/`"full"` on a SECOND (or Nth) offer while an earlier one is still open and funded gets `custom program error: 0x1` / `Error: insufficient funds` on the `EscrowTokenDeposit` instruction — even though the balance log line printed right before it says there's plenty left. That number is a raw sum of wallet+escrow tokens, not "what's actually still unclaimed," and the API has no endpoint that reports the latter directly.
+
+In practice a wallet almost always has at least one other live offer by the time you run any of these scripts again, so `topup: "none"` should be the default for anything that creates an offer. Confirmed twice now:
+
+- `strategy.py`/`fixed_terms_offers.py`/`defaulter_capture.py` all originally shipped with `topup: "minimum"` and intermittently failed this exact way once a wallet had more than one live offer open; fixed by switching all three to `"none"`.
+- `create_manual_offer.py` was added afterward and (incorrectly) defaulted to `"minimum"` again, on the theory that "it only creates one offer per run, so there's no shared-balance problem." That reasoning is wrong — the conflict isn't with other offers created *in the same run*, it's with any offer still open from an **earlier** run. Hit the identical `insufficient funds` error on its very first real use; fixed by switching its default to `"none"` too.
+
+**The rule going forward: any new offer-creation script (or new sizing path in an existing one) defaults to `topup: "none"`.** Only use `"minimum"`/`"full"` deliberately, when you've specifically confirmed via the API (`GET /offers?creator=<wallet>&status=active&includeUnderfunded=true`) that the wallet has no other open offer competing for the same escrow balance right now — and re-check each time, since that can change between runs.
+
 ## Mathematical Formulation
 
 This section formalises the pricing, risk, and allocation decisions made by the bot.
@@ -217,7 +234,7 @@ Unlike `strategy.py`, terms are **fixed**, not market-benchmarked:
 
 - **LTV**: fixed at 25% — collateral required from the borrower = principal / 0.25, at the collateral's current live price.
 - **APY**: fixed at 100.00% (10 000 bps), charged on every offer.
-- **Principal**: available USDC (wallet + escrow) / 3, rounded to the **nearest** $100 — not down, unlike every other script in this repo (`round_principal_raw()`). Every missing duration gets this same amount; each offer independently draws on the same shared escrow/wallet pool (rehypothecation — see `strategy.py`'s own docstring for why sizing every offer off the same balance is intentional, not a bug).
+- **Principal**: available USDC (wallet + escrow) / 3, rounded to the **nearest** $100 — not down, unlike every other script in this repo (`round_principal_raw()`). Every missing duration gets this same amount; each offer independently draws on the same shared escrow/wallet pool (rehypothecation, `topup: "none"` — see [Offer funding: topup modes](#offer-funding-topup-modes) above).
 
 ```bash
 python strategy/fixed_terms_offers.py --collateral USELESS
@@ -282,7 +299,7 @@ python strategy/create_manual_offer.py --collateral USELESS --principal 3985 --l
 DRY_RUN=true python strategy/create_manual_offer.py ...                       # preview only, no submission
 ```
 
-Offer listing expiry defaults to the **same length as the loan duration** (matching the UI's own default) rather than the fixed 24h every automated script here uses — override with `--expiry-days`. `topup` defaults to `"none"` (posts as underfunded/rehypothecated), same default `strategy.py`/`fixed_terms_offers.py`/`defaulter_capture.py` use and for the same reason — a wallet almost always has other existing live offers already claiming its escrow balance by the time you run this, so `"minimum"` (real funding required now) fails with "insufficient funds" far more often than not. Pass `--topup minimum` if you specifically want this offer guaranteed-funded right now instead.
+Offer listing expiry defaults to the **same length as the loan duration** (matching the UI's own default) rather than the fixed 24h every automated script here uses — override with `--expiry-days`. `topup` defaults to `"none"`, same as every other offer-creation script here — see [Offer funding: topup modes](#offer-funding-topup-modes) for why. Pass `--topup minimum` if you've confirmed this wallet has no other open offer competing for the same balance and want this one guaranteed-funded right now instead.
 
 Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
 
@@ -293,6 +310,8 @@ Reacts to the actionable conditions from [`../monitoring/defaulter_watch.py`](..
 - **APY**: undercuts the largest offer's APY by a small, fixed margin.
 - **LTV**: a small edge above the largest offer's LTV, capped by the same `effective_target_ltv()` safety ceiling used in `strategy.py` (§4) — a borrower's historical profitability never overrides this cap.
 - **Duration**: matches the largest offer's own duration, since that's the specific listing being targeted.
+
+Each pool's offer is sized off one balance snapshot taken before the loop (same shared-pool approach `strategy.py` uses across pairs/durations) and created with `topup: "none"` — see [Offer funding: topup modes](#offer-funding-topup-modes).
 
 A collateral not listed in `allocation_config.yaml` (or listed at 0%) is skipped, same as a normal strategy run. The sized principal is also hard-capped at $10,000 (`MAX_PRINCIPAL_USDC`) regardless of allocation fraction — a fixed constant in this script, not driven by `MAX_OFFER_PRINCIPAL_USDC`.
 

@@ -158,7 +158,11 @@ python reporting/address_snapshot.py --addresses 8pXq...9nZ --role lender
 python reporting/address_snapshot.py                                        # prompts for addresses, then role
 ```
 
-`--role borrower` (the given addresses are borrowers): shows every loan they owe, grouped by **lender**. `--role lender`: shows every loan owed to them, grouped by **borrower**. `--role` is never silently defaulted — omitting it prompts, since guessing wrong just returns a meaningless zero-loans result instead of an answer. Defaults to currently **active** loans only (`--status all`/`repaid`/`defaulted` to widen scope). Read-only, no signing.
+`--role borrower` (the given addresses are borrowers): shows every loan they owe, grouped by **lender**. `--role lender`: shows every loan owed to them, grouped by **borrower**. `--role` is never silently defaulted — omitting it prompts, since guessing wrong just returns a meaningless zero-loans result instead of an answer. Defaults to currently **active** loans only (`--status all`/`repaid`/`defaulted` to widen scope).
+
+Also prints a final line listing every collateral type the given address(es) have **ever** used (any status, all-time) as the given role, comma-separated — deliberately ignores `--status` so this historical list isn't silently narrowed by the active-only default; pulls the full active+repaid+defaulted history for this specific line regardless of what `--status` scoped the rest of the report to.
+
+Read-only, no signing.
 
 ## Top defaulted collateral (`top_defaulted_collateral.py`)
 

@@ -366,9 +366,21 @@ def main() -> None:
     ltv_pct = args.ltv
     collateral_amount_whole = args.collateral_amount
     if ltv_pct is None and collateral_amount_whole is None:
-        choice = input("Specify sizing by [L]TV% (computed from live price) or [A]mount (exact collateral tokens)? [L/a]: ").strip().lower()
+        choice = input(
+            "Specify sizing by [L]TV% (computed from live price) or [A]mount (exact collateral "
+            "tokens)? Enter 'L'/'A', or type the LTV number directly (e.g. 25) [L/a]: "
+        ).strip().lower()
         if choice == "a":
             collateral_amount_whole = prompt_float("Exact collateral amount (whole tokens)")
+        elif choice not in ("", "l"):
+            # Not a recognized letter — try it as the LTV value itself, so
+            # typing "32" straight at this prompt works instead of silently
+            # discarding it and asking a confusing second question.
+            try:
+                ltv_pct = float(choice)
+            except ValueError:
+                print(f"  '{choice}' isn't 'L', 'A', or a number — asking separately.")
+                ltv_pct = prompt_float("Target LTV (percent, e.g. 25)")
         else:
             ltv_pct = prompt_float("Target LTV (percent, e.g. 25)")
 

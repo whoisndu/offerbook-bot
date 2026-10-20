@@ -21,12 +21,15 @@ Offer listing expiry defaults to the SAME length as the loan duration
 optimized for being re-run daily, and this one is a single deliberate
 action. Override with --expiry-days if you want something else.
 
-topup defaults to "minimum" (real funding now, so the offer is actually
-isFunded:true and fillable immediately) rather than "none" — unlike the
-automated scripts, this creates exactly one offer per run, so there's no
-shared-balance-across-many-offers reason to leave it underfunded. Pass
---topup none if you specifically want to stack this alongside other
-offers sharing the same balance (rehypothecation) instead.
+topup defaults to "none" (no escrow deposit at creation — posts instantly
+as underfunded), same as strategy.py/fixed_terms_offers.py/
+defaulter_capture.py now do, and for the same reason: a wallet almost
+always has OTHER existing live offers already claiming its escrow balance
+by the time you run this, so "minimum" (real funding required now) fails
+with "insufficient funds" far more often than not — which is exactly the
+problem this script exists to work around. Pass --topup minimum if you
+specifically want this offer guaranteed-funded right now instead (e.g. a
+wallet with no other open offers competing for the same balance).
 
 Usage:
   python create_manual_offer.py --collateral USELESS --principal 3985 --ltv 25 --apr 80 --duration 7
@@ -342,8 +345,9 @@ def main() -> None:
     parser.add_argument("--expiry-days", type=int, default=None, help="Offer listing expiry in days. Defaults to the same value as --duration.")
     parser.add_argument("--no-partial-fill", action="store_true", help="Require a single full fill instead of allowing partial fills.")
     parser.add_argument("--min-fill", type=float, default=MIN_FILL_USDC, help=f"Minimum USDC a partial fill must take (default ${MIN_FILL_USDC:.0f}).")
-    parser.add_argument("--topup", default="minimum", choices=["minimum", "full", "none"],
-                         help='Escrow funding mode at creation (default "minimum" — fully funds this single offer now).')
+    parser.add_argument("--topup", default="none", choices=["minimum", "full", "none"],
+                         help='Escrow funding mode at creation (default "none" — posts as underfunded/rehypothecated, '
+                              'same default the other offer-creation scripts use; pass "minimum" to require real funding now).')
     parser.add_argument("--ledger-path", default=None, help="Ledger derivation path (skips the account prompt)")
     _common.add_signing_args(parser)
     args = parser.parse_args()

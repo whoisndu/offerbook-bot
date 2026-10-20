@@ -167,7 +167,7 @@ Let $K$ be the set of eligible collateral tokens for a given strategy run. The p
 
 $$P_k = \alpha_k \cdot B, \qquad \alpha_k \in [0, 1]$$
 
-The bot uses a `topup: minimum` escrow strategy: it draws from on-chain escrow first and pulls from the wallet only the shortfall $\max(0,\ P_k - B_{\text{escrow},k})$. This minimises unnecessary wallet-to-escrow transfers.
+The bot uses a `topup: none` escrow strategy: no deposit happens at creation at all, so every offer posts instantly as underfunded rather than failing once $B$ is already claimed by an earlier offer in the same run (or a still-open offer from a prior run) — relies on rehypothecation (only one offer actually fills per unit of capital).
 
 If `MAX_OFFER_PRINCIPAL_USDC` $= M > 0$, the effective principal is capped:
 
@@ -282,7 +282,7 @@ python strategy/create_manual_offer.py --collateral USELESS --principal 3985 --l
 DRY_RUN=true python strategy/create_manual_offer.py ...                       # preview only, no submission
 ```
 
-Offer listing expiry defaults to the **same length as the loan duration** (matching the UI's own default) rather than the fixed 24h every automated script here uses — override with `--expiry-days`. `topup` defaults to `"minimum"` (real funding now, so the offer is actually `isFunded:true` and immediately fillable) rather than `"none"`, since this creates exactly one offer per run — there's no shared-balance-across-many-offers reason to leave it underfunded unless you specifically want to stack it alongside other offers with `--topup none`.
+Offer listing expiry defaults to the **same length as the loan duration** (matching the UI's own default) rather than the fixed 24h every automated script here uses — override with `--expiry-days`. `topup` defaults to `"none"` (posts as underfunded/rehypothecated), same default `strategy.py`/`fixed_terms_offers.py`/`defaulter_capture.py` use and for the same reason — a wallet almost always has other existing live offers already claiming its escrow balance by the time you run this, so `"minimum"` (real funding required now) fails with "insufficient funds" far more often than not. Pass `--topup minimum` if you specifically want this offer guaranteed-funded right now instead.
 
 Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
 

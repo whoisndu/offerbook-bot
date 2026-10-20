@@ -268,6 +268,24 @@ python strategy/fill_offer.py --offer <pubkey> --yes
 DRY_RUN=true python strategy/fill_offer.py --offer <pubkey>   # preview without submitting
 ```
 
+## Manual offer creation (`create_manual_offer.py`)
+
+Terminal replica of the Offerbook web UI's "You Lend" offer-creation flow — for when the UI itself is down, flaky, or disconnects your wallet, and you just need to post the exact offer you already decided on (e.g. copied straight off a UI preview screen that wouldn't submit). Unlike `strategy.py`/`fixed_terms_offers.py`/`defaulter_capture.py`, this creates exactly **one** offer from values you give it directly — no market benchmarking, no allocation config, no looping over pairs/durations.
+
+Size the collateral side either by `--ltv` (percent — collateral amount is computed from the live price, same as the UI does) or `--collateral-amount` (exact token amount, for when you already have the precise figure). Only USDC principal is supported, same as every other script here.
+
+```bash
+python strategy/create_manual_offer.py --collateral USELESS --principal 3985 --ltv 25 --apr 80 --duration 7
+python strategy/create_manual_offer.py --collateral USELESS --principal 3985 --collateral-amount 114218.42 --apr 80 --duration 7
+python strategy/create_manual_offer.py                                        # prompts for every required value
+python strategy/create_manual_offer.py --collateral USELESS --principal 3985 --ltv 25 --apr 80 --duration 7 --ledger-path "44'/501'/1'"
+DRY_RUN=true python strategy/create_manual_offer.py ...                       # preview only, no submission
+```
+
+Offer listing expiry defaults to the **same length as the loan duration** (matching the UI's own default) rather than the fixed 24h every automated script here uses — override with `--expiry-days`. `topup` defaults to `"minimum"` (real funding now, so the offer is actually `isFunded:true` and immediately fillable) rather than `"none"`, since this creates exactly one offer per run — there's no shared-balance-across-many-offers reason to leave it underfunded unless you specifically want to stack it alongside other offers with `--topup none`.
+
+Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
+
 ## Automated capture (`defaulter_capture.py`)
 
 Reacts to the actionable conditions from [`../monitoring/defaulter_watch.py`](../monitoring/README.md#collateral-coverage-watchlist-defaulter_watchpy) by posting a competitive lending offer into that same collateral pool — sized from `allocation_config.yaml` exactly like `strategy.py`, not a special override. Pricing targets the single largest live offer already in the pool (excluding our own) — the offer a borrower comparison-shopping the pool is actually most likely to pick, not a pool-wide average — and is bounded rather than maximally aggressive:

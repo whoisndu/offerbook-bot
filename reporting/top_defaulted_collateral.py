@@ -10,9 +10,14 @@ the biggest dollar exposure", not "which collateral keeps failing"; see
 pnl_leaderboard.py/seizure_outcome_scan.py for more dollar-denominated
 views).
 
-Prints a ranked table (symbol, total USD lost at default-time mark-to-
-market, default count) followed by the plain comma-separated symbol list
-on its own line, for scripting/paste-elsewhere use.
+Prints a ranked table (symbol, TOKEN/NFT, total USD lost at default-time
+mark-to-market, default count) followed by the plain comma-separated
+symbol list on its own line, for scripting/paste-elsewhere use (symbols
+only there — no kind label, so the list stays a clean paste target).
+Collateral isn't only fungible tokens — Offerbook also accepts NFT
+collateral (classic/programmable/core), straight off the API's own
+collateral.kind field on each loan, not inferred from whichever symbol
+resolver happened to work.
 
 Read-only: never signs or submits anything.
 
@@ -137,6 +142,14 @@ def symbol_for(mint: str) -> str:
     return mint[:6] + "…" if mint else "?"
 
 
+def kind_label(asset_kind: str | None) -> str:
+    """The API's own collateral.kind tells us this directly — observed
+    values are "token" and three NFT standards ("classicNft",
+    "programmableNft", "coreNft"); Offerbook has no other asset kinds, so
+    anything that isn't literally "token" is an NFT."""
+    return "TOKEN" if asset_kind == "token" else "NFT"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--top", type=int, default=20, help="How many collateral types to show (default 20).")
@@ -148,13 +161,16 @@ def main() -> None:
 
     counts: Counter[str] = Counter()
     usd_lost: defaultdict[str, float] = defaultdict(float)
+    kind_for: dict[str, str | None] = {}
     for l in loans:
-        cmint = l.get("collateralMint") or _common._mint_from_asset(l.get("collateral", {}))
+        collateral = l.get("collateral") or {}
+        cmint = l.get("collateralMint") or _common._mint_from_asset(collateral)
         if not cmint:
             continue
         counts[cmint] += 1
         meta = l.get("metadata") or {}
         usd_lost[cmint] += meta.get("endCollateralAmountUsd") or meta.get("startCollateralAmountUsd") or 0.0
+        kind_for.setdefault(cmint, collateral.get("kind"))
 
     resolve_collateral_symbols(set(counts))
 
@@ -162,10 +178,10 @@ def main() -> None:
 
     log.info("")
     log.info("Top %d defaulted collateral (by USD lost):", len(ranked))
-    col = "{:<10}{:>16}{:>10}"
-    log.info(col.format("collat", "collateral $", "defaults"))
+    col = "{:<10}{:<7}{:>16}{:>10}"
+    log.info(col.format("collat", "kind", "collateral $", "defaults"))
     for mint, usd in ranked:
-        log.info(col.format(symbol_for(mint), f"${usd:,.2f}", counts[mint]))
+        log.info(col.format(symbol_for(mint), kind_label(kind_for.get(mint)), f"${usd:,.2f}", counts[mint]))
 
     log.info("")
     log.info(", ".join(symbol_for(mint) for mint, _ in ranked))

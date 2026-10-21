@@ -173,7 +173,7 @@ python reporting/top_defaulted_collateral.py              # top 20
 python reporting/top_defaulted_collateral.py --top 50
 ```
 
-Prints a ranked table (symbol, total USD lost at default-time mark-to-market, default count), then the plain comma-separated symbol list on its own line for scripting/paste-elsewhere use. Read-only, no signing.
+Prints a ranked table (symbol, **TOKEN/NFT**, total USD lost at default-time mark-to-market, default count), then the plain comma-separated symbol list on its own line for scripting/paste-elsewhere use (symbols only there, no kind label). Collateral isn't only fungible tokens — Offerbook also accepts NFT collateral (classic/programmable/core); the TOKEN/NFT label comes straight from each loan's own `collateral.kind` field, not guessed from whichever symbol resolver happened to work. A symbol Jupiter's token search can't resolve (common for NFTs, which it doesn't index) falls back to Solana's DAS `getAssetBatch` for on-chain metadata before ever falling back to a raw mint prefix. Read-only, no signing.
 
 ## Liquidity check (`liquidity_check.py`)
 

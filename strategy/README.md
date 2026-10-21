@@ -306,6 +306,28 @@ Offer listing expiry defaults to the **same length as the loan duration** (match
 
 Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
 
+## Update offer terms (`update_offer_terms.py`)
+
+Console equivalent of the UI's "Update offer" action — change one of your own still-live lending offers' APR, principal, collateral/LTV, duration, expiry, or partial-fill settings without manually cancelling and recreating it yourself.
+
+There's no dedicated "update" instruction on-chain. What the UI does under the hood (confirmed against the Transaction Builder API's own OpenAPI spec, and verified live) is pass `offerToCancel: <old offer pubkey>` to the same `POST /create-principal-offer` endpoint `create_manual_offer.py` uses — the builder bundles the old offer's cancellation and the new offer's creation into **one atomic transaction**, so either both happen or neither does. This script does exactly that.
+
+You only specify what's actually changing — every field you omit defaults to that offer's *current* value, fetched fresh via `GET /offer/{pubkey}` right before building the transaction. If you change `--principal` without also specifying `--ltv`/`--collateral-amount`, the collateral amount is automatically rescaled to **preserve the offer's current LTV** at today's live price, rather than silently leaving the raw collateral amount fixed (which would change your LTV as an unintended side effect).
+
+Run with **no override flags at all** and you're asked interactively which terms to change (current values shown next to each option) rather than silently proceeding with a no-op "nothing changed" update — pass any override flag and that prompt is skipped. The Ledger account picker/signing step comes last, after you've decided what's actually changing.
+
+```bash
+python strategy/update_offer_terms.py --offer <pubkey>                               # prompts for what to change
+python strategy/update_offer_terms.py --offer <pubkey> --apr 90                      # just reprice
+python strategy/update_offer_terms.py --offer <pubkey> --principal 5000              # LTV auto-preserved
+python strategy/update_offer_terms.py --offer <pubkey> --principal 5000 --ltv 30     # explicit new LTV
+python strategy/update_offer_terms.py --offer <pubkey> --duration 7 --apr 60
+python strategy/update_offer_terms.py          # prompts for the offer pubkey, then what to change
+DRY_RUN=true python strategy/update_offer_terms.py --offer <pubkey> --apr 90   # preview only
+```
+
+Refuses to run if the resolved signer wallet isn't the offer's own `creator` (wrong account selected — checked client-side before building anything), and if the offer is no longer live (already filled/cancelled/expired). Only USDC-principal offers are supported, matching every other script here. `topup` defaults to `"none"`, same as everywhere else — see [Offer funding: topup modes](#offer-funding-topup-modes). Prints a CURRENT-vs-NEW comparison table for every term before asking for confirmation.
+
 ## Automated capture (`defaulter_capture.py`)
 
 Reacts to the actionable conditions from [`../monitoring/defaulter_watch.py`](../monitoring/README.md#collateral-coverage-watchlist-defaulter_watchpy) by posting a competitive lending offer into that same collateral pool — sized from `allocation_config.yaml` exactly like `strategy.py`, not a special override. Pricing targets the single largest live offer already in the pool (excluding our own) — the offer a borrower comparison-shopping the pool is actually most likely to pick, not a pool-wide average — and is bounded rather than maximally aggressive:

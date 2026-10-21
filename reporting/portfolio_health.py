@@ -65,6 +65,14 @@ Read-only lender-side report across one or more of your own wallets:
     24h / 48h / 72h — an optimistic estimate (assumes on-schedule repayment,
     not default) of how much capital should become available to redeploy,
     for planning ahead on new lending.
+  - Projected weekly earnings: each active loan's own accrued interest (net
+    of repay fee) normalized to a 7-day rate off its own duration, then
+    summed — "if every currently-open loan kept renewing forever at exactly
+    its current principal/APY/duration, what would the whole book earn per
+    week". A run-rate snapshot of CURRENT terms, not a forecast: it assumes
+    every renewal reprices identically and nothing defaults, neither of
+    which is realistic over any real stretch of time — treat it as "what
+    I'm on pace for right now," not a guarantee.
   - Volume: total USD principal (at origination) of every loan lent,
     counted the moment it's created regardless of current status —
     VOLUME_WINDOW_DAYS (7) trailing-day rolling total and all-time, per
@@ -591,6 +599,7 @@ def build_active_loan_rows(active: list[dict], wallet: str, prices: dict, decima
             "collateral_symbol": symbol_for(cmint),
             "principal_usd": principal_usd,
             "apy_bps": l.get("apy", 0),
+            "duration_secs": l.get("duration") or 0,
             "origination_ltv": origination_ltv,
             "live_ltv": live_ltv,
             "expired_at": expired_at,
@@ -933,6 +942,30 @@ def compute_capital_freeing_up(active_rows: list[dict], window_hours: float) -> 
     )
 
 
+def compute_projected_weekly_earnings(active_rows: list[dict]) -> float:
+    """Sum of each active loan's own accrued interest (net of repay fee,
+    same figure the "unrealized profit" line uses) spread evenly across its
+    duration and scaled to a week — i.e. "if every currently-open loan kept
+    renewing forever at exactly its current principal/APY/duration, what
+    would the whole book earn per week". A loan whose term isn't 7 days
+    doesn't actually pay out weekly; this is a run-rate normalization for
+    comparing across loans of different durations, not a cash-flow
+    forecast. It also silently assumes every renewal repeats at today's
+    terms and nothing defaults — real renewals reprice to whatever's
+    competitive then, so this is a snapshot of current terms, not a
+    guarantee. Loans missing a duration or accrued-interest figure are
+    excluded rather than contributing a divide-by-zero or a None."""
+    total = 0.0
+    for r in active_rows:
+        duration_secs = r.get("duration_secs") or 0
+        interest_usd = r.get("accrued_interest_usd")
+        if duration_secs <= 0 or interest_usd is None:
+            continue
+        duration_days = duration_secs / 86400
+        total += interest_usd / duration_days * 7
+    return total
+
+
 def print_other_holdings_table(other_holdings: list[dict]) -> None:
     """`other_holdings` entries: {mint, symbol, raw_amount, decimals, price, usd}
     — usd/price/decimals may be None (unpriced). Skips printing entirely if
@@ -987,10 +1020,15 @@ def print_wallet_report(
     freeing_24h_usd = compute_capital_freeing_up(active_rows, 24)
     freeing_48h_usd = compute_capital_freeing_up(active_rows, 48)
     freeing_72h_usd = compute_capital_freeing_up(active_rows, 72)
+    projected_weekly_usd = compute_projected_weekly_earnings(active_rows)
     log.info("Active loans: %d   Outstanding principal: $%s", len(active_rows), f"{total_active_principal:,.2f}")
     log.info(
         "Capital freeing up — next 24h: $%s   next 48h: $%s   next 72h: $%s",
         f"{freeing_24h_usd:,.2f}", f"{freeing_48h_usd:,.2f}", f"{freeing_72h_usd:,.2f}",
+    )
+    log.info(
+        "Projected weekly earnings if every active loan renews indefinitely at its current terms: $%s",
+        f"{projected_weekly_usd:,.2f}",
     )
     log.info("Unrealized profit (interest owed on active loans, net of repay fee, not yet collected): $%s", f"{total_unrealized_usd:,.2f}")
     log.info(
@@ -1068,6 +1106,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     total_freeing_24h = sum(compute_capital_freeing_up(w["active_rows"], 24) for w in per_wallet)
     total_freeing_48h = sum(compute_capital_freeing_up(w["active_rows"], 48) for w in per_wallet)
     total_freeing_72h = sum(compute_capital_freeing_up(w["active_rows"], 72) for w in per_wallet)
+    total_projected_weekly = sum(compute_projected_weekly_earnings(w["active_rows"]) for w in per_wallet)
     total_at_risk = sum(
         len([r for r in w["active_rows"] if r["live_ltv"] is not None and r["live_ltv"] >= w["risk_ltv"]])
         for w in per_wallet
@@ -1095,6 +1134,10 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info(
         "Total capital freeing up — next 24h: $%s   next 48h: $%s   next 72h: $%s",
         f"{total_freeing_24h:,.2f}", f"{total_freeing_48h:,.2f}", f"{total_freeing_72h:,.2f}",
+    )
+    log.info(
+        "TOTAL PROJECTED WEEKLY EARNINGS if every active loan renews indefinitely at its current terms: $%s",
+        f"{total_projected_weekly:,.2f}",
     )
     log.info("Total unrealized profit (interest owed on active loans, net of repay fee): $%s", f"{total_unrealized:,.2f}")
     log.info(

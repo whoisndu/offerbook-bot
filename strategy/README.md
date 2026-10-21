@@ -333,23 +333,28 @@ Every offer's principal, collateral, target LTV, and target APY is logged in ful
 
 Note: `defaulter_capture.py` depends on `../monitoring/defaulter_watch.py` directly (`from defaulter_watch import ...`) — its `sys.path` shim adds both `../lib` and `../monitoring`, since it's the one script in this folder that reaches across into another.
 
-## Withdraw escrow back to wallet (`empty_escrow.py`)
+## Move funds between wallet and escrow (`empty_escrow.py`)
 
-Offerbook holds funds in two places per wallet: your wallet itself, and an on-chain escrow account the protocol uses to avoid a fresh deposit tx on every offer/fill. Money accumulates in escrow from loan repayments, interest, origination-fee rebates, and defaulted-loan collateral — nothing automatically sweeps it back to your wallet. This script does that sweep: fetches every nonzero escrow holding for one wallet and withdraws it in full, one asset at a time.
+Offerbook holds funds in two places per wallet: your wallet itself, and an on-chain escrow account the protocol uses to avoid a fresh deposit tx on every offer/fill. Money accumulates in escrow from loan repayments, interest, origination-fee rebates, and defaulted-loan collateral — nothing automatically sweeps it back to your wallet, and nothing automatically tops escrow back up either. This script covers both directions, via `--mode`:
 
-Covers both fungible tokens (USDC, SOL, any other SPL/Token-2022 token — via `/escrow-withdraw`) and NFTs (classic/programmable/core — via their own dedicated withdraw endpoints, auto-detected from each holding's own `asset.kind`). A holding this script doesn't recognize is skipped with a warning rather than guessed at.
+- **`--mode empty`** (default) — sweeps every nonzero escrow holding back to wallet, one asset at a time. Covers both fungible tokens (USDC, SOL, any other SPL/Token-2022 token — via `/escrow-withdraw`) and NFTs (classic/programmable/core — via their own dedicated withdraw endpoints, auto-detected from each holding's own `asset.kind`). A holding this script doesn't recognize is skipped with a warning rather than guessed at.
+- **`--mode fill`** — the reverse: deposits a wallet token balance INTO escrow, via `/escrow-deposit` (the same `EscrowTokenDeposit` instruction offer-creation bundles internally when `topup` isn't `"none"`, invoked here standalone). Defaults to USDC and the full wallet balance of it — the direct fix when you've got real USDC sitting in wallet but offer creation is still failing with `insufficient funds` because escrow itself is empty/low (see [Offer funding: topup modes](#offer-funding-topup-modes) — this is a different problem from that one, which is about escrow *already claimed by another offer*; this is escrow genuinely having nothing in it). Pass `--mint` for a different token and `--amount` to deposit less than the full balance. Fungible tokens only — no NFT-deposit equivalent, since you'd only ever fill escrow with spendable capital, not collateral you're holding.
 
-Same signing infrastructure as the rest of this folder (imports `defaulter_capture.py` for it, like `fill_offer.py` does) — Ledger by default (interactively prompted which account, unless `--ledger-path` is given; there's no "right" account here, it depends whose escrow you're emptying) or `--private-key` for the `.env` hot wallet. Only ever operates on ONE wallet per run — if you run multiple wallets (e.g. `OFFERBOOK_PORTFOLIO_WALLETS`), run this once per wallet, selecting the matching signer each time.
+Same signing infrastructure as the rest of this folder (imports `defaulter_capture.py` for it, like `fill_offer.py` does) — Ledger by default (interactively prompted which account, unless `--ledger-path` is given; there's no "right" account here, it depends which wallet you're moving funds for) or `--private-key` for the `.env` hot wallet. Only ever operates on ONE wallet per run — if you run multiple wallets (e.g. `OFFERBOOK_PORTFOLIO_WALLETS`), run this once per wallet, selecting the matching signer each time.
 
-Prints every nonzero holding (symbol, kind, amount, ~$ value where a live price is resolvable) and asks for ONE confirmation covering the whole batch before signing anything — same safety pattern as `cancel_offers.py`'s batch cancellation. A single asset's withdrawal failing doesn't abort the rest of the batch; failures are collected and reported in the summary so you know exactly what still needs a rerun.
+Prints a preview and asks for ONE confirmation before signing anything — same safety pattern as `cancel_offers.py`'s batch cancellation. In `--mode empty`, a single asset's withdrawal failing doesn't abort the rest of the batch; failures are collected and reported in the summary so you know exactly what still needs a rerun.
 
 ```bash
-python strategy/empty_escrow.py                        # prompts which Ledger account, then confirms
+python strategy/empty_escrow.py                        # empty mode (default): prompts which Ledger account, then confirms
 python strategy/empty_escrow.py --ledger-path "44'/501'/1'"   # skip the account prompt
 python strategy/empty_escrow.py --private-key           # sign with the .env hot wallet instead
-python strategy/empty_escrow.py --min-usd 1             # skip pure-dust holdings below $1 (default: 0, sweep everything)
+python strategy/empty_escrow.py --min-usd 1             # empty mode: skip dust holdings below $1 (default: 0, sweep everything)
 python strategy/empty_escrow.py --yes                   # skip the confirmation prompt
 DRY_RUN=true python strategy/empty_escrow.py            # preview without submitting
+
+python strategy/empty_escrow.py --mode fill                         # deposit full USDC wallet balance into escrow
+python strategy/empty_escrow.py --mode fill --amount 2000            # deposit only 2,000 USDC, leave the rest in wallet
+python strategy/empty_escrow.py --mode fill --mint SOL --amount 0.5  # deposit a different token (symbol or mint address)
 ```
 
 ## Signing modes

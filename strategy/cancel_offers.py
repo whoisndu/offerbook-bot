@@ -1,11 +1,27 @@
 """
 Offerbook Kill Switch — Cancel Open Offers
 ==========================================
-Asks which strategy to cancel (1-day, 3-day, 7-day, 15-day, or all), then
-fetches and cancels matching offers in batches.
+Asks which strategy to cancel (1-day, 3-day, 7-day, 15-day, all, or
+expired-only), then fetches and cancels matching offers in batches.
+
+"expired" targets offers whose `expiredAt` has already passed, regardless
+of duration — these commonly linger because the API doesn't promptly
+relabel a past-expiry offer's status away from "active"/"partiallyFilled"
+on its own (confirmed live: offers well past their `expiredAt` still report
+status "active"), so a plain `status=expired` filter alone would miss them.
+Detection is therefore done client-side by comparing each offer's own
+`expiredAt` to now (same approach `soon_to_expire.py` uses for loans), not
+by trusting the status label. These are worth cleaning up specifically
+because a still-`isFunded:true` expired offer keeps its escrow backing
+claimed — see [strategy/README.md's "Offer funding: topup modes"](README.md#offer-funding-topup-modes)
+for why that silently starves any NEW offer creation of capital it looks
+like you should have.
 
 Handles "underfunded" offers (orphaned on-chain PDAs that the API won't list)
-by scanning on-chain accounts directly via getProgramAccounts.
+by scanning on-chain accounts directly via getProgramAccounts — except in
+`--days expired` mode, where orphans are skipped rather than assumed
+expired, since their account data isn't decoded here and there's no
+`expiredAt` to check them against.
 
 Signing modes:
   --ledger        Sign with a Ledger hardware wallet (default). Requires the
@@ -24,6 +40,7 @@ Usage:
   python cancel_offers.py --private-key     # sign with the hot wallet key instead
   python cancel_offers.py --days 7          # skip the strategy prompt, cancel 7-day offers
   python cancel_offers.py --days all        # skip the strategy prompt, cancel everything
+  python cancel_offers.py --days expired    # skip the strategy prompt, cancel only offers past their expiredAt (any duration)
   python cancel_offers.py --withdraw        # also pull funds back to wallet
   python cancel_offers.py --yes             # skip the signing-mode confirmation prompt
   DRY_RUN=true python cancel_offers.py      # preview without submitting
@@ -40,6 +57,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -78,12 +96,16 @@ BATCH_SIZE = 15   # offers per cancel tx -- tested against the live builder API 
 PAGE_SIZE  = 100
 
 # Duration in seconds for each strategy — used to filter offers by type.
+# "expired" has no duration of its own (it cuts across every duration) —
+# None here just means "don't filter by duration"; it's distinguished from
+# "all" in main() via the strategy_key string itself, not this value.
 STRATEGIES: dict[str, int | None] = {
     "1":   1  * 24 * 60 * 60,   # 86 400
     "3":   3  * 24 * 60 * 60,   # 259 200
     "7":   7  * 24 * 60 * 60,   # 604 800
     "15":  15 * 24 * 60 * 60,   # 1 296 000
     "all": None,                 # no filter — cancel everything
+    "expired": None,             # no duration filter — filtered by expiredAt instead, see fetch_my_offers()
 }
 
 STRATEGY_LABELS = {
@@ -92,6 +114,7 @@ STRATEGY_LABELS = {
     "7":   "7-day  strategy  (45% max LTV, 604 800 s duration)",
     "15":  "15-day strategy  (25% max LTV, 1 296 000 s duration)",
     "all": "ALL open offers  (every strategy)",
+    "expired": "EXPIRED offers only  (any duration — past expiredAt, regardless of status label)",
 }
 
 # ---------------------------------------------------------------------------
@@ -190,19 +213,19 @@ def prompt_ledger_path() -> str:
 def prompt_strategy() -> str:
     """
     Interactively ask which strategy to cancel.
-    Returns one of: '3', '7', '15', 'all'.
+    Returns one of: '1', '3', '7', '15', 'all', 'expired'.
     """
     print()
     print("Which offers do you want to cancel?")
     print()
     for key, label in STRATEGY_LABELS.items():
-        print(f"  [{key:3s}]  {label}")
+        print(f"  [{key:8s}]  {label}")
     print()
     while True:
         choice = input("Choice: ").strip().lower()
         if choice in STRATEGIES:
             return choice
-        print("  Please enter 1, 3, 7, 15, or all")
+        print("  Please enter 1, 3, 7, 15, all, or expired")
 
 # ---------------------------------------------------------------------------
 # Fetch offers
@@ -211,18 +234,41 @@ def prompt_strategy() -> str:
 OFFERBOOK_PROGRAM_ID = "offerbkFMvVfpQhL8ZQ5iromnjct5rz3r52B9ewu3ie"
 
 
-def fetch_my_offers(duration_filter: int | None) -> list[dict]:
+def _offer_is_expired(offer: dict, now: datetime) -> bool:
+    """True if `offer` is past its own expiredAt, OR already literally
+    labeled status "expired" — checked both ways since live data shows the
+    API doesn't reliably relabel a past-expiry offer's status away from
+    "active"/"partiallyFilled" on its own, so the status label alone can't
+    be trusted (confirmed: offers minutes past their expiredAt still report
+    status "active")."""
+    if str(offer.get("status", "")).lower() == "expired":
+        return True
+    expired_at = offer.get("expiredAt")
+    if not expired_at:
+        return False
+    return datetime.fromisoformat(expired_at.replace("Z", "+00:00")) <= now
+
+
+def fetch_my_offers(duration_filter: int | None, expired_only: bool = False) -> list[dict]:
     """
-    Return active + partiallyFilled lending offers for WALLET_PUBKEY.
-    If duration_filter is set, only return offers whose duration matches
-    that strategy's loan term (in seconds).
+    Return lending offers for WALLET_PUBKEY, filtered either by duration
+    (duration_filter, in seconds) or by expiry (expired_only — offers past
+    their own expiredAt, regardless of duration; see _offer_is_expired()).
+    The two modes are mutually exclusive — expired_only ignores
+    duration_filter entirely, since "expired" cuts across every duration.
 
     showUnverified=true and includeUnderfunded=true are both required — the API
     hides offers whose collateral isn't Jupiter-verified, and separately hides
     underfunded ones, by default. Missing either would mean "cancel all my
     offers" silently leaves some of them live. (fetch_onchain_orphans() below
     also catches whatever this still misses, as a second line of defense.)
+
+    In expired_only mode the status filter also includes "Expired" (on top
+    of "Active,PartiallyFilled") to catch any offer the API HAS already
+    relabeled, even though in practice the still-"active"-labeled stragglers
+    caught by the expiredAt comparison below are the common case.
     """
+    status = "Active,PartiallyFilled,Expired" if expired_only else "Active,PartiallyFilled"
     offers: list[dict] = []
     offset = 0
     while True:
@@ -230,7 +276,7 @@ def fetch_my_offers(duration_filter: int | None) -> list[dict]:
             "/offers",
             creator=WALLET_PUBKEY,
             offerType="lending",
-            status="Active,PartiallyFilled",
+            status=status,
             showUnverified="true",
             includeUnderfunded="true",
             limit=PAGE_SIZE,
@@ -244,7 +290,15 @@ def fetch_my_offers(duration_filter: int | None) -> list[dict]:
             break
         offset += PAGE_SIZE
 
-    if duration_filter is not None:
+    if expired_only:
+        before = len(offers)
+        now = datetime.now(timezone.utc)
+        offers = [o for o in offers if _offer_is_expired(o, now)]
+        log.info(
+            "Filtered to %d expired offer(s)  (%d total fetched across active/partiallyFilled/expired)",
+            len(offers), before,
+        )
+    elif duration_filter is not None:
         before = len(offers)
         offers = [o for o in offers if o.get("duration") == duration_filter]
         log.info(
@@ -382,9 +436,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cancel Offerbook lending offers by strategy")
     parser.add_argument(
         "--days",
-        choices=["1", "3", "7", "15", "all"],
+        choices=["1", "3", "7", "15", "all", "expired"],
         default=None,
-        help="Strategy to cancel (1, 3, 7, 15, or all). Omit to be prompted interactively.",
+        help="Strategy to cancel (1, 3, 7, 15, all, or expired — offers past their expiredAt, "
+             "any duration). Omit to be prompted interactively.",
     )
     parser.add_argument(
         "--withdraw",
@@ -417,7 +472,8 @@ def main() -> None:
 
     # Determine strategy
     strategy_key = args.days if args.days else prompt_strategy()
-    duration_filter = STRATEGIES[strategy_key]
+    is_expired_mode = strategy_key == "expired"
+    duration_filter = None if is_expired_mode else STRATEGIES[strategy_key]
     withdraw_mode   = "offerAmount" if args.withdraw else "none"
 
     log.info("Strategy : %s", STRATEGY_LABELS[strategy_key])
@@ -425,7 +481,7 @@ def main() -> None:
     log.info("Dry run  : %s", DRY_RUN)
     log.info("Fetching open offers for %s …", WALLET_PUBKEY)
 
-    offers = fetch_my_offers(duration_filter)
+    offers = fetch_my_offers(duration_filter, expired_only=is_expired_mode)
     pubkeys = [o["pubkey"] for o in offers if o.get("pubkey")]
 
     # Also scan on-chain for underfunded/orphaned PDAs that the API won't list.
@@ -435,11 +491,22 @@ def main() -> None:
     # still scan (the orphan count is small and cancelling extras is harmless).
     api_pubkey_set = set(pubkeys)
     orphans = fetch_onchain_orphans(api_pubkey_set)
-    # For orphans we can't filter by duration (account data not decoded), so we
-    # include them when --days all is selected or when there are no API offers
-    # (meaning everything is orphaned and belongs to us).
     if orphans:
-        if duration_filter is None or not pubkeys:
+        if is_expired_mode:
+            # Can't tell whether an orphan is actually expired without
+            # decoding its account data (no expiredAt available here) — so
+            # unlike "all"/a specific duration, never assume these belong
+            # in an expired-only cancel; skip them rather than risk
+            # cancelling a still-live offer the user didn't ask to touch.
+            log.info(
+                "Skipping %d on-chain orphan(s) — can't verify expiry without decoding account "
+                "data; run with --days all to clean those up too",
+                len(orphans),
+            )
+        elif duration_filter is None or not pubkeys:
+            # For orphans we can't filter by duration (account data not decoded), so we
+            # include them when --days all is selected or when there are no API offers
+            # (meaning everything is orphaned and belongs to us).
             pubkeys.extend(orphans)
             log.info("Added %d orphan(s) to cancel list", len(orphans))
         else:

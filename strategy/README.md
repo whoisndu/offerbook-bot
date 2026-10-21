@@ -259,6 +259,7 @@ python strategy/cancel_offers.py --days 3
 python strategy/cancel_offers.py --days 7
 python strategy/cancel_offers.py --days 15
 python strategy/cancel_offers.py --days all
+python strategy/cancel_offers.py --days expired   # only offers past their expiredAt, any duration
 
 # Also withdraw funds back to wallet after cancellation
 python strategy/cancel_offers.py --days all --withdraw
@@ -268,6 +269,8 @@ DRY_RUN=true python strategy/cancel_offers.py
 ```
 
 The script identifies each strategy's offers by their `duration` field (86 400 / 259 200 / 604 800 / 1 296 000 seconds) so only the right orders are touched. Offers are cancelled in batches of **15** per transaction (`BATCH_SIZE`) — tested against the live builder API at 955 bytes/tx, comfortably under Solana's 1232-byte transaction limit (20/batch was tested too but left too little headroom, only 3%, given offers can vary slightly in account count).
+
+`--days expired` targets offers whose `expiredAt` has already passed, regardless of duration, instead of filtering by a specific strategy. Worth knowing before relying on it: live data shows the API doesn't reliably relabel a past-expiry offer's status away from `active`/`partiallyFilled` on its own, so this mode can't just query `status=expired` — it fetches active/partiallyFilled/expired together and compares each offer's own `expiredAt` to now client-side (same approach `soon_to_expire.py` uses for loans). Cleaning these up matters beyond tidiness: a still-`isFunded:true` expired offer keeps its escrow backing claimed, which is exactly the silent-capital-starvation problem described in [Offer funding: topup modes](#offer-funding-topup-modes) above. On-chain orphans (underfunded PDAs the API doesn't list) are **not** auto-included in this mode, unlike `all` — there's no `expiredAt` to check them against without decoding account data, so guessing would risk cancelling a still-live offer; run `--days all` separately to sweep those up too.
 
 ## Fill a single offer (`fill_offer.py`)
 

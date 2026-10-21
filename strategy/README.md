@@ -333,7 +333,7 @@ Every offer's principal, collateral, target LTV, and target APY is logged in ful
 
 Note: `defaulter_capture.py` depends on `../monitoring/defaulter_watch.py` directly (`from defaulter_watch import ...`) — its `sys.path` shim adds both `../lib` and `../monitoring`, since it's the one script in this folder that reaches across into another.
 
-## Move funds between wallet and escrow (`empty_escrow.py`)
+## Move funds between wallet and escrow (`escrow_transfer.py`)
 
 Offerbook holds funds in two places per wallet: your wallet itself, and an on-chain escrow account the protocol uses to avoid a fresh deposit tx on every offer/fill. Money accumulates in escrow from loan repayments, interest, origination-fee rebates, and defaulted-loan collateral — nothing automatically sweeps it back to your wallet, and nothing automatically tops escrow back up either. This script covers both directions, via `--mode`:
 
@@ -345,21 +345,21 @@ Same signing infrastructure as the rest of this folder (imports `defaulter_captu
 Prints a preview and asks for ONE confirmation before signing anything — same safety pattern as `cancel_offers.py`'s batch cancellation. In `--mode empty`, a single asset's withdrawal failing doesn't abort the rest of the batch; failures are collected and reported in the summary so you know exactly what still needs a rerun.
 
 ```bash
-python strategy/empty_escrow.py                        # empty mode (default): prompts which Ledger account, then confirms
-python strategy/empty_escrow.py --ledger-path "44'/501'/1'"   # skip the account prompt
-python strategy/empty_escrow.py --private-key           # sign with the .env hot wallet instead
-python strategy/empty_escrow.py --min-usd 1             # empty mode: skip dust holdings below $1 (default: 0, sweep everything)
-python strategy/empty_escrow.py --yes                   # skip the confirmation prompt
-DRY_RUN=true python strategy/empty_escrow.py            # preview without submitting
+python strategy/escrow_transfer.py                        # empty mode (default): prompts which Ledger account, then confirms
+python strategy/escrow_transfer.py --ledger-path "44'/501'/1'"   # skip the account prompt
+python strategy/escrow_transfer.py --private-key           # sign with the .env hot wallet instead
+python strategy/escrow_transfer.py --min-usd 1             # empty mode: skip dust holdings below $1 (default: 0, sweep everything)
+python strategy/escrow_transfer.py --yes                   # skip the confirmation prompt
+DRY_RUN=true python strategy/escrow_transfer.py            # preview without submitting
 
-python strategy/empty_escrow.py --mode fill                         # deposit full USDC wallet balance into escrow
-python strategy/empty_escrow.py --mode fill --amount 2000            # deposit only 2,000 USDC, leave the rest in wallet
-python strategy/empty_escrow.py --mode fill --mint SOL --amount 0.5  # deposit a different token (symbol or mint address)
+python strategy/escrow_transfer.py --mode fill                         # deposit full USDC wallet balance into escrow
+python strategy/escrow_transfer.py --mode fill --amount 2000            # deposit only 2,000 USDC, leave the rest in wallet
+python strategy/escrow_transfer.py --mode fill --mint SOL --amount 0.5  # deposit a different token (symbol or mint address)
 ```
 
 ## Signing modes
 
-Every script (`cancel_offers.py`, `strategy.py`, `fixed_terms_offers.py`, `fill_offer.py`, `empty_escrow.py`) supports two signing modes —
+Every script (`cancel_offers.py`, `strategy.py`, `fixed_terms_offers.py`, `fill_offer.py`, `escrow_transfer.py`) supports two signing modes —
 **Ledger is the default**:
 
 - `--ledger` (default): signs via a Ledger hardware wallet over USB. Requires

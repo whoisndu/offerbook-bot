@@ -45,16 +45,16 @@ batch; failures are collected and reported in the summary so you know
 exactly what still needs a rerun.
 
 Usage:
-  python empty_escrow.py                        # empty mode (default): prompts which Ledger account, then confirms
-  python empty_escrow.py --ledger-path "44'/501'/1'"   # skip the account prompt
-  python empty_escrow.py --private-key           # sign with the .env hot wallet instead
-  python empty_escrow.py --min-usd 1             # empty mode: skip dust holdings below $1 (default: 0, sweep everything)
-  python empty_escrow.py --yes                   # skip the confirmation prompt
-  DRY_RUN=true python empty_escrow.py            # preview without submitting
+  python escrow_transfer.py                        # empty mode (default): prompts which Ledger account, then confirms
+  python escrow_transfer.py --ledger-path "44'/501'/1'"   # skip the account prompt
+  python escrow_transfer.py --private-key           # sign with the .env hot wallet instead
+  python escrow_transfer.py --min-usd 1             # empty mode: skip dust holdings below $1 (default: 0, sweep everything)
+  python escrow_transfer.py --yes                   # skip the confirmation prompt
+  DRY_RUN=true python escrow_transfer.py            # preview without submitting
 
-  python empty_escrow.py --mode fill                            # deposit full USDC wallet balance into escrow
-  python empty_escrow.py --mode fill --amount 2000               # deposit only 2,000 USDC, leave the rest in wallet
-  python empty_escrow.py --mode fill --mint SOL --amount 0.5     # deposit a different token (symbol or mint address)
+  python escrow_transfer.py --mode fill                            # deposit full USDC wallet balance into escrow
+  python escrow_transfer.py --mode fill --amount 2000               # deposit only 2,000 USDC, leave the rest in wallet
+  python escrow_transfer.py --mode fill --mint SOL --amount 0.5     # deposit a different token (symbol or mint address)
 """
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("empty_escrow")
+log = logging.getLogger("escrow_transfer")
 
 SESSION = requests.Session()
 

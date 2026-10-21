@@ -75,7 +75,7 @@ def fetch_defaulted_loans() -> list[dict]:
 def resolve_nft_symbols(mints: list[str]) -> None:
     """Fallback for whatever Jupiter's (fungible-token-focused) search
     couldn't resolve — Offerbook also accepts NFT collateral (classic/
-    programmable/core, per empty_escrow.py's docstring), which Jupiter's
+    programmable/core, per escrow_transfer.py's docstring), which Jupiter's
     token search and DexScreener both have no concept of, so an NFT mint
     would otherwise always fall through to the raw-mint display. Uses
     Solana's DAS getAssetBatch (confirmed supported on the default public

@@ -332,9 +332,20 @@ def prompt_what_to_change(current: dict) -> dict:
     if "1" in picks:
         overrides["principal"] = prompt_float(f"  New principal (USDC), currently {current['principal_usd']:,.2f}")
     if "2" in picks:
-        choice = input("  Specify by [L]TV% or [A]mount (exact collateral tokens)? [L/a]: ").strip().lower()
+        choice = input(
+            "  Specify by [L]TV% or [A]mount (exact collateral tokens)? Enter 'L'/'A', or type "
+            f"the LTV number directly (currently {ltv_str}) [L/a]: "
+        ).strip().lower()
         if choice == "a":
             overrides["collateral_amount"] = prompt_float("  New collateral amount (whole tokens)")
+        elif choice not in ("", "l"):
+            # Not a recognized letter — try it as the LTV value itself, same
+            # fix as create_manual_offer.py's identical prompt.
+            try:
+                overrides["ltv"] = float(choice)
+            except ValueError:
+                print(f"    '{choice}' isn't 'L', 'A', or a number — asking separately.")
+                overrides["ltv"] = prompt_float(f"  New LTV (percent), currently {ltv_str}")
         else:
             overrides["ltv"] = prompt_float(f"  New LTV (percent), currently {ltv_str}")
     if "3" in picks:

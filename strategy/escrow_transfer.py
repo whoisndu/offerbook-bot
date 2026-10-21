@@ -1,14 +1,15 @@
 """
-Offerbook Escrow Transfer — Empty Escrow to Wallet, or Fill It From Wallet
+Offerbook Escrow Transfer — Withdraw Escrow to Wallet, or Deposit USDC Into It
 ==================================
 Offerbook holds funds in two places per wallet: your wallet itself, and an
 on-chain escrow account the protocol uses to avoid a fresh deposit tx on
-every offer/fill. Two directions, one script:
+every offer/fill. Two directions, one script — pass --mode, or omit it to
+be prompted interactively:
 
-  --mode empty (default): sweeps EVERY nonzero escrow holding back to
-    wallet, one asset at a time. Money accumulates in escrow from loan
-    repayments, interest, origination-fee rebates, and defaulted-loan
-    collateral — nothing automatically sweeps it back on its own.
+  --mode withdraw: sweeps EVERY nonzero escrow holding back to wallet, one
+    asset at a time. Money accumulates in escrow from loan repayments,
+    interest, origination-fee rebates, and defaulted-loan collateral —
+    nothing automatically sweeps it back on its own.
 
     Covers both fungible tokens (USDC, SOL, any other SPL/Token-2022 token
     — via POST /escrow-withdraw) and NFTs (classic/programmable/core — via
@@ -16,18 +17,23 @@ every offer/fill. Two directions, one script:
     holding's own `asset.kind`). A holding this script doesn't recognize is
     skipped with a warning rather than guessed at.
 
-  --mode fill: the reverse — deposits a wallet token balance INTO escrow
+  --mode deposit: the reverse — deposits USDC from wallet INTO escrow
     (POST /escrow-deposit, the same EscrowTokenDeposit instruction
     offer-creation bundles internally when topup isn't "none", invoked here
-    standalone). Defaults to USDC and the full wallet balance of it — the
+    standalone). USDC only, by design — deposit-side money only ever means
+    spendable lending capital here, and that's always USDC on this
+    platform (same convention every offer-creation script in this repo
+    already assumes). Defaults to depositing the full wallet USDC balance;
+    pass --amount to deposit less (e.g. to keep some back). This is the
     direct fix for "insufficient funds" / EscrowTokenDeposit failures when
     creating an offer with topup=minimum/full and there isn't enough
     already-free escrow (see strategy/README.md's "Offer funding: topup
-    modes"). Pass --mint to deposit a different token, and --amount to
-    deposit less than the full wallet balance (e.g. to keep some back).
-    Fungible tokens only — unlike --mode empty, there's no NFT-deposit
-    endpoint to cover, since you'd only ever fill escrow with spendable
-    capital, not collateral you're holding.
+    modes").
+
+Neither mode is a silent default: omit --mode and you're asked to choose
+(withdraw or deposit) before anything else happens, same "never guess"
+convention cancel_offers.py's strategy prompt and strategy.py's --collateral
+prompt already use.
 
 Same signing infrastructure as the rest of strategy/ (imports
 defaulter_capture.py for it, like fill_offer.py does) — Ledger by default
@@ -40,21 +46,20 @@ matching signer each time.
 
 Prints a preview and asks for ONE confirmation before signing anything —
 same safety pattern as cancel_offers.py's batch cancellation. In --mode
-empty, a single asset's withdrawal failing doesn't abort the rest of the
-batch; failures are collected and reported in the summary so you know
+withdraw, a single asset's withdrawal failing doesn't abort the rest of
+the batch; failures are collected and reported in the summary so you know
 exactly what still needs a rerun.
 
 Usage:
-  python escrow_transfer.py                        # empty mode (default): prompts which Ledger account, then confirms
+  python escrow_transfer.py                        # prompts for mode, then Ledger account
+  python escrow_transfer.py --mode withdraw         # skip the mode prompt
+  python escrow_transfer.py --mode deposit          # deposit full USDC wallet balance into escrow
+  python escrow_transfer.py --mode deposit --amount 2000   # deposit only 2,000 USDC, leave the rest in wallet
   python escrow_transfer.py --ledger-path "44'/501'/1'"   # skip the account prompt
   python escrow_transfer.py --private-key           # sign with the .env hot wallet instead
-  python escrow_transfer.py --min-usd 1             # empty mode: skip dust holdings below $1 (default: 0, sweep everything)
+  python escrow_transfer.py --mode withdraw --min-usd 1   # skip dust holdings below $1 (default: 0, sweep everything)
   python escrow_transfer.py --yes                   # skip the confirmation prompt
   DRY_RUN=true python escrow_transfer.py            # preview without submitting
-
-  python escrow_transfer.py --mode fill                            # deposit full USDC wallet balance into escrow
-  python escrow_transfer.py --mode fill --amount 2000               # deposit only 2,000 USDC, leave the rest in wallet
-  python escrow_transfer.py --mode fill --mint SOL --amount 0.5     # deposit a different token (symbol or mint address)
 """
 from __future__ import annotations
 
@@ -76,7 +81,6 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 KNOWN_DECIMALS = _common.KNOWN_DECIMALS
-SYMBOL_TO_MINT = {sym.upper(): mint for mint, sym in KNOWN_SYMBOLS.items()}
 
 # Same account picker as cancel_offers.py/fill_offer.py — this script has no
 # "right" account either, it depends which wallet's escrow you're moving
@@ -96,9 +100,28 @@ log = logging.getLogger("escrow_transfer")
 SESSION = requests.Session()
 
 
+def prompt_mode() -> str:
+    """Never silently defaults — same "ask rather than guess" convention
+    cancel_offers.py's strategy prompt uses, since withdraw and deposit are
+    opposite, high-consequence directions to have picked wrong."""
+    print()
+    print("What do you want to do?")
+    print()
+    print("  [w]  Withdraw — sweep escrow back to wallet")
+    print("  [d]  Deposit  — move USDC from wallet into escrow")
+    print()
+    while True:
+        choice = input("Choice: ").strip().lower()
+        if choice in ("w", "withdraw"):
+            return "withdraw"
+        if choice in ("d", "deposit"):
+            return "deposit"
+        print("  Please enter 'w' for withdraw or 'd' for deposit")
+
+
 def prompt_ledger_path(mode: str) -> str:
     print()
-    print(f"Which account's escrow do you want to {'fill' if mode == 'fill' else 'empty'}?")
+    print(f"Which account's escrow do you want to {mode}?")
     print()
     for key, (path, label) in KNOWN_LEDGER_ACCOUNTS.items():
         print(f"  [{key}]  {label}  ({path})")
@@ -226,27 +249,16 @@ def withdraw_one(row: dict) -> list[str]:
     return tx_data.get("transactions", [])
 
 # ---------------------------------------------------------------------------
-# --mode fill: deposit a wallet token balance into escrow
+# --mode deposit: move USDC from wallet into escrow
 # ---------------------------------------------------------------------------
 
 
-def resolve_mint(tok: str) -> str:
-    """Ticker (e.g. "USDC", "SOL") or raw mint address, same resolution
-    strategy.py/fixed_terms_offers.py/create_manual_offer.py use for
-    --collateral — checked against the curated KNOWN_SYMBOLS table only
-    (no allocation_config.yaml fallback here, since this script has no
-    allocation config of its own); anything not found is assumed to
-    already be a raw mint address."""
-    upper = tok.strip().upper()
-    return SYMBOL_TO_MINT.get(upper, tok.strip())
-
-
-def deposit_one(mint: str, amount_raw: int) -> list[str]:
-    """Returns the base64 transaction(s) for depositing `amount_raw` of
-    `mint` from wallet into escrow (POST /escrow-deposit — the same
+def deposit_usdc(amount_raw: int) -> list[str]:
+    """Returns the base64 transaction(s) for depositing `amount_raw` USDC
+    from wallet into escrow (POST /escrow-deposit — the same
     EscrowTokenDeposit instruction offer-creation bundles internally when
     topup isn't "none", invoked here standalone)."""
-    payload = {"signer": dc.WALLET_PUBKEY, "mint": mint, "amount": amount_raw}
+    payload = {"signer": dc.WALLET_PUBKEY, "mint": dc.USDC_MINT, "amount": amount_raw}
     if DRY_RUN:
         log.info("  [DRY RUN] Would POST /escrow-deposit with: %s", payload)
         return []
@@ -254,55 +266,45 @@ def deposit_one(mint: str, amount_raw: int) -> list[str]:
     return tx_data.get("transactions", [])
 
 
-def run_fill(mint_arg: str, amount_arg: float | None, skip_prompt: bool) -> None:
-    mint = resolve_mint(mint_arg)
-    decimals = KNOWN_DECIMALS.get(mint)
-    symbol = symbol_for(mint)
-
-    wallet_balance_raw = dc.fetch_wallet_token_balance(mint)
+def run_deposit(amount_arg: float | None, skip_prompt: bool) -> None:
+    """USDC only, by design — see module docstring's --mode deposit
+    section for why."""
+    wallet_balance_raw = dc.fetch_wallet_token_balance(dc.USDC_MINT)
 
     if amount_arg is not None:
-        if decimals is None:
-            log.error(
-                "Don't know %s's decimals (not in KNOWN_DECIMALS) — can't convert --amount %s into raw "
-                "units. Add it to offerbook_common.KNOWN_DECIMALS, or pass a mint this script already "
-                "recognizes.", symbol, amount_arg,
-            )
-            sys.exit(1)
-        amount_raw = round(amount_arg * 10 ** decimals)
+        amount_raw = round(amount_arg * 10 ** dc.USDC_DECIMALS)
         if amount_raw > wallet_balance_raw:
             log.error(
-                "Requested %s %s but wallet only has %s — nothing deposited.",
-                amount_arg, symbol,
-                f"{wallet_balance_raw / 10 ** decimals:,.6f}" if decimals is not None else f"{wallet_balance_raw} (raw)",
+                "Requested %s USDC but wallet only has %s — nothing deposited.",
+                amount_arg, f"{wallet_balance_raw / 10 ** dc.USDC_DECIMALS:,.6f}",
             )
             sys.exit(1)
     else:
         amount_raw = wallet_balance_raw
 
     if amount_raw <= 0:
-        log.info("Nothing to deposit — wallet has 0 %s.", symbol)
+        log.info("Nothing to deposit — wallet has 0 USDC.")
         sys.exit(0)
 
-    amount_display = f"{amount_raw / 10 ** decimals:,.6f}" if decimals is not None else f"{amount_raw} (raw, decimals unknown)"
-    wallet_display = f"{wallet_balance_raw / 10 ** decimals:,.6f}" if decimals is not None else f"{wallet_balance_raw} (raw)"
+    amount_display = f"{amount_raw / 10 ** dc.USDC_DECIMALS:,.6f}"
+    wallet_display = f"{wallet_balance_raw / 10 ** dc.USDC_DECIMALS:,.6f}"
     log.info("")
     log.info("=" * 90)
-    log.info("FILL ESCROW — %s", dc.WALLET_PUBKEY)
+    log.info("DEPOSIT INTO ESCROW — %s", dc.WALLET_PUBKEY)
     log.info("=" * 90)
-    log.info("Token            : %s  (%s)", symbol, mint)
+    log.info("Token            : USDC  (%s)", dc.USDC_MINT)
     log.info("Wallet balance   : %s", wallet_display)
     log.info("Depositing       : %s", amount_display)
     log.info("=" * 90)
 
     if not skip_prompt:
-        choice = input(f"\nDeposit {amount_display} {symbol} from wallet into escrow for {dc.WALLET_PUBKEY}? [y/N] ").strip().lower()
+        choice = input(f"\nDeposit {amount_display} USDC from wallet into escrow for {dc.WALLET_PUBKEY}? [y/N] ").strip().lower()
         if choice not in ("y", "yes"):
             log.info("Aborted by user.")
             sys.exit(0)
 
     try:
-        txs = deposit_one(mint, amount_raw)
+        txs = deposit_usdc(amount_raw)
     except requests.HTTPError as exc:
         body = exc.response.text if exc.response else ""
         log.error("TX builder error: %s\n  body: %s", exc, body or "(empty)")
@@ -325,7 +327,7 @@ def run_fill(mint_arg: str, amount_arg: float | None, skip_prompt: bool) -> None
     log.info("Done.")
 
 
-def run_empty(min_usd: float, skip_prompt: bool) -> None:
+def run_withdraw(min_usd: float, skip_prompt: bool) -> None:
     log.info("Fetching escrow holdings for %s …", dc.WALLET_PUBKEY)
     holdings = fetch_escrow_holdings(dc.WALLET_PUBKEY)
     rows = build_rows(holdings, min_usd)
@@ -387,27 +389,29 @@ def run_empty(min_usd: float, skip_prompt: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=["empty", "fill"], default="empty",
-                         help='"empty" (default): sweep everything in escrow back to wallet. '
-                              '"fill": deposit a wallet token balance (default USDC, full balance) into escrow.')
+    parser.add_argument("--mode", choices=["withdraw", "deposit"], default=None,
+                         help='"withdraw": sweep everything in escrow back to wallet. '
+                              '"deposit": move USDC from wallet into escrow (full balance by default). '
+                              "Omit to be prompted interactively.")
     parser.add_argument("--ledger-path", default=None, help="Ledger derivation path (skips the account prompt)")
-    parser.add_argument("--min-usd", type=float, default=0.0, help="--mode empty: skip token holdings worth less than this (default: 0 — sweep everything, including dust)")
-    parser.add_argument("--mint", default=None, help="--mode fill: token symbol or mint address to deposit (default: USDC)")
-    parser.add_argument("--amount", type=float, default=None, help="--mode fill: amount to deposit, in whole tokens (default: full wallet balance)")
+    parser.add_argument("--min-usd", type=float, default=0.0, help="--mode withdraw: skip token holdings worth less than this (default: 0 — sweep everything, including dust)")
+    parser.add_argument("--amount", type=float, default=None, help="--mode deposit: USDC amount to deposit (default: full wallet balance)")
     _common.add_signing_args(parser, yes_help="Skip the confirmation prompt")
     args = parser.parse_args()
 
+    mode = args.mode or prompt_mode()
+
     dc.SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, dc.SIGNING_MODE)
     if dc.SIGNING_MODE == "ledger":
-        dc.LEDGER_PATH = args.ledger_path or prompt_ledger_path(args.mode)
+        dc.LEDGER_PATH = args.ledger_path or prompt_ledger_path(mode)
 
     dc.resolve_signer_wallet()
     dc.confirm_signing_mode(skip_prompt=args.yes)
 
-    if args.mode == "fill":
-        run_fill(args.mint or dc.USDC_MINT, args.amount, skip_prompt=args.yes)
+    if mode == "deposit":
+        run_deposit(args.amount, skip_prompt=args.yes)
     else:
-        run_empty(args.min_usd, skip_prompt=args.yes)
+        run_withdraw(args.min_usd, skip_prompt=args.yes)
 
 
 if __name__ == "__main__":

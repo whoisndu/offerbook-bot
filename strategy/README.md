@@ -316,6 +316,8 @@ You only specify what's actually changing — every field you omit defaults to t
 
 Run with **no override flags at all** and you're asked interactively which terms to change (current values shown next to each option) rather than silently proceeding with a no-op "nothing changed" update — pass any override flag and that prompt is skipped. The Ledger account picker/signing step comes last, after you've decided what's actually changing.
 
+That interactive menu also offers **"Cancel this offer"** as one of the options, for when you open this script meaning to update an offer and decide you'd rather just kill it — no need to switch to `cancel_offers.py` separately. Picking it (alone or alongside other picks — cancellation takes priority) skips straight to a cancel-only preview and uses the plain `POST /cancel-offer` endpoint (same one `cancel_offers.py` uses), not `offerToCancel`, since there's no replacement offer to bundle with it.
+
 ```bash
 python strategy/update_offer_terms.py --offer <pubkey>                               # prompts for what to change
 python strategy/update_offer_terms.py --offer <pubkey> --apr 90                      # just reprice

@@ -32,7 +32,11 @@ silently proceeding with a no-op "nothing changed" update — same "never
 guess" convention the rest of this repo's interactive prompts use. Pass
 any override flag and that prompt is skipped entirely (power-user path).
 The Ledger account picker/signing step comes LAST, after you've decided
-what's actually changing, not first.
+what's actually changing, not first. The interactive menu also offers
+"cancel this offer outright" as one of the options — for when you started
+out meaning to update it and realized you'd rather just kill it; this
+path uses the plain POST /cancel-offer endpoint (cancel_offers.py's own
+endpoint), not offerToCancel, since there's no replacement to bundle with.
 
 Refuses to run if the resolved signer wallet isn't the offer's own
 creator (wrong account selected), and if the offer is no longer live
@@ -278,6 +282,50 @@ def submit_update(params: dict) -> bool:
     return True
 
 
+def submit_cancel(offer_pubkey: str) -> bool:
+    """Plain cancellation, no replacement offer — POST /cancel-offer, same
+    endpoint cancel_offers.py uses. Response key name varies
+    (transactions/transaction/tx depending on batch size), handled the same
+    flexible way cancel_offers.py's cancel_batch() does."""
+    payload = {"signer": WALLET_PUBKEY, "offer": offer_pubkey, "withdraw": "none"}
+    if DRY_RUN:
+        log.info("  [DRY RUN] Would POST /cancel-offer with: %s", payload)
+        return True
+
+    try:
+        data = _common.post_tx(SESSION, TX_API_BASE, "/cancel-offer", payload)
+    except requests.HTTPError as exc:
+        body = exc.response.text if exc.response else ""
+        log.error("  TX builder error: %s\n  body: %s", exc, body or "(empty)")
+        return False
+    except requests.ConnectionError as exc:
+        log.error("  TX builder connection error: %s", exc)
+        return False
+
+    if data.get("transactions"):
+        transactions = data["transactions"]
+    elif data.get("transaction"):
+        transactions = [data["transaction"]]
+    elif data.get("tx"):
+        transactions = [data["tx"]]
+    else:
+        log.error("  Unexpected cancel-offer response: %s", data)
+        return False
+
+    if SIGNING_MODE == "private_key" and not PRIVATE_KEY_B58:
+        log.warning("  OFFERBOOK_PRIVATE_KEY not set – cannot sign.")
+        return False
+
+    for tx_b64 in transactions:
+        sig = sign_and_send_transaction(tx_b64)
+        if sig:
+            log.info("  ✓ Submitted: https://solscan.io/tx/%s", sig)
+        else:
+            log.error("  ✗ Failed to submit transaction.")
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Interactive prompts
 # ---------------------------------------------------------------------------
@@ -322,12 +370,18 @@ def prompt_what_to_change(current: dict) -> dict:
     print(f"  [4]  Duration                 — {current['duration_days']:.0f} day(s)")
     print(f"  [5]  Expiry                   — defaults to the (possibly new) duration unless changed here")
     print(f"  [6]  Partial fill / min fill  — {'allowed' if current['allow_partial_fill'] else 'not allowed'}, min ${current['min_fill_usd']:,.2f}")
+    print(f"  [7]  Cancel this offer        — no replacement, just cancel it outright")
     print()
-    raw = input("Enter numbers to change, comma-separated (e.g. 1,3), or press Enter to cancel: ").strip()
+    raw = input("Enter numbers to change, comma-separated (e.g. 1,3), or press Enter to abort without changes: ").strip()
     if not raw:
         return {}
 
     picks = {p.strip() for p in raw.split(",") if p.strip()}
+    if "7" in picks:
+        if len(picks) > 1:
+            print("  '7' (cancel) was picked along with other options — cancelling takes priority; ignoring the rest.")
+        return {"cancel_only": True}
+
     overrides: dict = {}
     if "1" in picks:
         overrides["principal"] = prompt_float(f"  New principal (USDC), currently {current['principal_usd']:,.2f}")
@@ -377,6 +431,60 @@ def prompt_ledger_path() -> str:
         if choice == "c":
             return input("Derivation path (e.g. 44'/501'/2'): ").strip()
         print(f"  Please enter one of: {', '.join(KNOWN_LEDGER_ACCOUNTS)}, or 'c' for custom")
+
+
+def resolve_and_verify_signer(args: argparse.Namespace, offer: dict) -> None:
+    """Shared by both the update and cancel-only paths: resolve the signer
+    (Ledger account prompt or hot wallet), confirm the signing mode, and
+    refuse to continue if the resolved wallet isn't this offer's own
+    creator (wrong account selected)."""
+    global SIGNING_MODE, WALLET_PUBKEY, LEDGER_PATH
+
+    SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, SIGNING_MODE)
+    if SIGNING_MODE == "ledger":
+        LEDGER_PATH = args.ledger_path or prompt_ledger_path()
+    if SIGNING_MODE == "private_key" and not PRIVATE_KEY_B58:
+        log.error("OFFERBOOK_PRIVATE_KEY not set in .env — required for --private-key mode.")
+        sys.exit(1)
+
+    resolve_signer_wallet()
+    confirm_signing_mode(skip_prompt=args.yes)
+
+    creator = offer.get("creator", "")
+    if WALLET_PUBKEY != creator:
+        log.error(
+            "This offer belongs to %s, not the resolved signer %s — wrong account? "
+            "Pick the account matching this offer's creator.", creator, WALLET_PUBKEY,
+        )
+        sys.exit(1)
+
+
+def run_cancel_only(args: argparse.Namespace, offer_pubkey: str, offer: dict, current: dict) -> None:
+    """Picked [7] in the interactive menu — cancel the offer outright, no
+    replacement created. Separate code path from the update flow: this
+    hits POST /cancel-offer (cancel_offers.py's endpoint), not
+    /create-principal-offer with offerToCancel."""
+    resolve_and_verify_signer(args, offer)
+
+    log.info("=" * 78)
+    log.info("CANCEL OFFER — %s", offer_pubkey)
+    log.info("=" * 78)
+    collateral_str = f"{current['collateral_whole']:,.2f}" if current["collateral_whole"] >= 1 else f"{current['collateral_whole']:,.6g}"
+    log.info("Principal   : %.2f USDC", current["principal_usd"])
+    log.info("Collateral  : %s %s", collateral_str, current["collateral_symbol"])
+    log.info("APR         : %.2f%%", current["apr_pct"])
+    log.info("Duration    : %d day(s)", round(current["duration_days"]))
+    log.info("=" * 78)
+    log.info("This cancels the offer outright — no replacement will be created.")
+
+    if not args.yes:
+        choice = input("\nCancel this offer? [y/N] ").strip().lower()
+        if choice not in ("y", "yes"):
+            log.info("Aborted by user.")
+            sys.exit(0)
+
+    ok = submit_cancel(offer_pubkey)
+    sys.exit(0 if ok else 1)
 
 
 def main() -> None:
@@ -459,20 +567,25 @@ def main() -> None:
         duration_override, expiry_override, min_fill_override,
     )) or allow_partial_fill_override is not None
 
+    current = {
+        "principal_usd": current_principal_usd,
+        "collateral_whole": current_collateral_whole,
+        "collateral_symbol": symbol_for(collateral_mint),
+        "ltv_pct": current_ltv_pct,
+        "apr_pct": current_apy_bps / 100,
+        "duration_days": current_duration_secs / 86400,
+        "allow_partial_fill": current_allow_partial_fill,
+        "min_fill_usd": current_min_fill_raw / 10 ** USDC_DECIMALS,
+    }
+
     if not any_cli_override:
-        overrides = prompt_what_to_change({
-            "principal_usd": current_principal_usd,
-            "collateral_whole": current_collateral_whole,
-            "collateral_symbol": symbol_for(collateral_mint),
-            "ltv_pct": current_ltv_pct,
-            "apr_pct": current_apy_bps / 100,
-            "duration_days": current_duration_secs / 86400,
-            "allow_partial_fill": current_allow_partial_fill,
-            "min_fill_usd": current_min_fill_raw / 10 ** USDC_DECIMALS,
-        })
+        overrides = prompt_what_to_change(current)
         if not overrides:
             log.info("Nothing to change — aborting.")
             sys.exit(0)
+        if overrides.get("cancel_only"):
+            run_cancel_only(args, offer_pubkey, offer, current)
+            return  # run_cancel_only always sys.exit()s; return is unreachable but keeps intent clear
         principal_override = overrides.get("principal")
         ltv_override = overrides.get("ltv")
         collateral_amount_override = overrides.get("collateral_amount")
@@ -528,23 +641,7 @@ def main() -> None:
     # Now that we know exactly what's changing, resolve the signer — Ledger
     # interaction is the last thing before the final confirm, not the first
     # thing you're asked for.
-    SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, SIGNING_MODE)
-    if SIGNING_MODE == "ledger":
-        LEDGER_PATH = args.ledger_path or prompt_ledger_path()
-    if SIGNING_MODE == "private_key" and not PRIVATE_KEY_B58:
-        log.error("OFFERBOOK_PRIVATE_KEY not set in .env — required for --private-key mode.")
-        sys.exit(1)
-
-    resolve_signer_wallet()
-    confirm_signing_mode(skip_prompt=args.yes)
-
-    creator = offer.get("creator", "")
-    if WALLET_PUBKEY != creator:
-        log.error(
-            "This offer belongs to %s, not the resolved signer %s — wrong account? "
-            "Pick the account matching this offer's creator.", creator, WALLET_PUBKEY,
-        )
-        sys.exit(1)
+    resolve_and_verify_signer(args, offer)
 
     if args.topup != "none":
         wallet_raw = fetch_wallet_token_balance(USDC_MINT)

@@ -57,7 +57,7 @@ a long duration and a large renewal gap really does go quiet after their
 daily wave, and posting after their recommended hour buys a real window.
 
 Meant to run on a schedule (see
-.github/workflows/competitor_timing_report.yml, every 2 days) — costs
+.github/workflows/competitor_timing_report.yml, weekly) — costs
 only GitHub Actions minutes. Prior-run stats persist to
 competitor_timing_state.json (gitignored — like lender_capital_state.json,
 this is competitive-intelligence tracking, kept private and NOT committed

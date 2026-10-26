@@ -166,7 +166,7 @@ Read-only, no signing.
 
 ## Breakeven check (`breakeven_check.py`)
 
-For your own lending exposure — live (unfilled/partially-filled) lending offers plus active loans where you're the lender — shows how far the collateral price can fall before the position "breaks even": the price at which collateral value drops to equal what you're owed. Below that, a default leaves you with collateral worth less than you put in — same `LTV >= 100%` threshold `portfolio_health.py`'s `UNDERWATER_LTV` uses, just expressed as a price level and a % drop instead of an LTV percentage.
+For your own lending exposure — live (unfilled/partially-filled) lending offers plus active loans where you're the lender — shows how far the collateral price can fall before the position "breaks even": the price at which collateral value drops to equal your **principal**. Below that, a default leaves you with collateral worth less than you actually lent — same `LTV >= 100%` threshold `portfolio_health.py`'s `UNDERWATER_LTV` uses, just expressed as a price level and a % drop instead of an LTV percentage.
 
 ```bash
 python reporting/breakeven_check.py --offer <pubkey>      # a single offer OR loan, auto-detected
@@ -174,9 +174,7 @@ python reporting/breakeven_check.py --address <wallet>    # every live offer + a
 python reporting/breakeven_check.py                       # every wallet in OFFERBOOK_PORTFOLIO_WALLETS
 ```
 
-Two breakeven lines per position, since interest is real money you'd otherwise collect:
-- **vs principal only** — the price below which you wouldn't even get your lent capital back.
-- **vs full amount owed** (principal + interest) — the price below which you'd do worse than if the loan never happened. For a still-unfilled offer this is an *estimate* (today's APY/duration, as if filled right now); for an active loan it's the loan's own actual `repaymentAmount` (gross — the platform's repay fee only applies on an actual repayment, not a defaulted/seized position, so it's deliberately not netted out here).
+Deliberately measured against **principal only**, not principal + interest. The interest-inclusive price is a higher threshold, reached first as collateral falls, and it marks something different: the point past which it stops being rational for the *borrower* to repay at all (repaying would cost more than the collateral is worth redeeming). By the time price reaches that line you should already expect non-repayment regardless of how much further it falls — it doesn't tell you anything new about your own capital. What matters for your risk is whether a default would cost you part of what you actually lent, which is the principal line.
 
 Scoped to your **lending** side only — `offerType="lending"` offers you created, and loans where you're the `lender`. A borrowing-side position has the opposite exposure (you'd be the one posting collateral) and isn't what this answers. Only USDC-principal positions are supported, matching every other script here. Output is sorted by smallest drop-% first (least cushion = most exposed). Read-only, no signing.
 

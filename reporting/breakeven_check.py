@@ -4,26 +4,23 @@ Offerbook Breakeven Check
 For your own lending exposure — live (unfilled/partially-filled) lending
 offers, plus active loans where you're the lender — shows how far the
 collateral price can fall before the position "breaks even": the price at
-which collateral value drops to equal what you're owed, i.e. you'd walk
-away with no better (and no worse) than if you'd never lent at all. Below
-that price, a default leaves you with collateral worth less than what you
-put in — same `LTV >= 100%` threshold `portfolio_health.py`'s
-UNDERWATER_LTV uses, just expressed as a price level and a % drop instead
-of an LTV percentage.
+which collateral value drops to equal your PRINCIPAL. Below that price, a
+default leaves you with collateral worth less than what you actually lent
+— same `LTV >= 100%` threshold `portfolio_health.py`'s UNDERWATER_LTV
+uses, just expressed as a price level and a % drop instead of an LTV
+percentage.
 
-Two breakeven lines per position, since interest is real money you'd
-otherwise have collected:
-  - vs PRINCIPAL only — the price below which you wouldn't even get your
-    lent capital back if the collateral had to be liquidated today.
-  - vs full amount owed (principal + interest) — the price below which
-    you'd do worse than if the loan simply never happened, accounting for
-    the return you were actually expecting. For live offers (not yet
-    filled), interest is an ESTIMATE (today's APY/duration terms, as if
-    filled right now) — see address_snapshot.py's build_detail_rows for
-    the same "full committed interest, not prorated" convention. For
-    active loans it's the loan's own actual `repaymentAmount` (gross — the
-    platform's repay fee only applies on an actual repayment, not on a
-    defaulted/seized position, so it's deliberately not netted out here).
+Deliberately measured against PRINCIPAL ONLY, not principal + interest.
+The interest-inclusive price is a higher threshold reached FIRST as
+collateral falls, and it marks something different: the point past which
+it stops being rational for the BORROWER to repay at all (repaying costs
+more than redeeming the collateral is worth, so a rational borrower walks
+instead). By the time price reaches that line, you should already expect
+non-repayment regardless of how much further it falls — it doesn't tell
+you anything new about YOUR capital. What actually matters for your own
+risk is the principal line: that's the point where a default would mean
+losing part of what you originally put in, not just missing out on the
+interest you were hoping to earn.
 
 Scoped to your LENDING side only (offerType="lending" offers you created,
 and loans where you're the `lender`) — collateral-price risk is a lender
@@ -194,8 +191,6 @@ def row_from_offer(offer: dict) -> dict | None:
         "collateral_mint": collateral_mint,
         "principal_usd": principal_raw / 10 ** USDC_DECIMALS,
         "collateral_raw": collateral_raw,
-        "apy_bps": offer.get("apy", 0),
-        "duration_secs": offer.get("duration", 0),
         "due": offer.get("expiredAt", ""),
     }
 
@@ -209,42 +204,23 @@ def row_from_loan(loan: dict) -> dict | None:
     collateral_raw = loan.get("outstandingCollateral", loan.get("collateralAmount", 0))
     if principal_raw <= 0 or collateral_raw <= 0:
         return None
-    repayment_raw = loan.get("repaymentAmount")
-    if repayment_raw is None:
-        # Single-loan GET doesn't always include repaymentAmount pre-computed
-        # the same way the list endpoint does — derive it the same way
-        # address_snapshot.py's build_detail_rows does (full committed
-        # interest, not prorated).
-        interest_raw = loan.get("interest", 0)
-        repayment_raw = principal_raw + interest_raw
     return {
         "kind": "LOAN",
         "pubkey": loan.get("pubkey", ""),
         "collateral_mint": collateral_mint,
         "principal_usd": principal_raw / 10 ** USDC_DECIMALS,
         "collateral_raw": collateral_raw,
-        "repayment_usd": repayment_raw / 10 ** USDC_DECIMALS,
         "due": loan.get("expiredAt", ""),
     }
 
 
 def finalize_row(row: dict, price: float | None, decimals: int | None) -> dict:
-    """Fill in the derived fields (collateral whole amount, est./actual
-    total owed, current value, breakeven prices, % drop needed) once a
-    live price is known. Mutates and returns `row`."""
+    """Fill in the derived fields (collateral whole amount, current value,
+    breakeven price vs principal, % drop needed) once a live price is
+    known. Mutates and returns `row`."""
     collateral_whole = row["collateral_raw"] / 10 ** decimals if decimals is not None else None
     row["collateral_symbol"] = symbol_for(row["collateral_mint"])
     row["collateral_whole"] = collateral_whole
-
-    if row["kind"] == "OFFER":
-        # Estimate: full committed interest if filled right now at the
-        # offer's own listed APY/duration — same formula create_manual_offer.py's
-        # preview and address_snapshot.py's build_detail_rows use.
-        duration_days = row["duration_secs"] / 86400 if row["duration_secs"] else 0
-        interest_usd = row["principal_usd"] * (row["apy_bps"] / 10000) * (duration_days / 365) if duration_days else 0.0
-        row["total_owed_usd"] = row["principal_usd"] + interest_usd
-    else:
-        row["total_owed_usd"] = row["repayment_usd"]
 
     if price and collateral_whole:
         row["collateral_usd_now"] = collateral_whole * price
@@ -252,11 +228,9 @@ def finalize_row(row: dict, price: float | None, decimals: int | None) -> dict:
         row["price_now"] = price
         row["breakeven_principal"] = row["principal_usd"] / collateral_whole
         row["drop_pct_principal"] = (1 - row["breakeven_principal"] / price) * 100
-        row["breakeven_full"] = row["total_owed_usd"] / collateral_whole
-        row["drop_pct_full"] = (1 - row["breakeven_full"] / price) * 100
     else:
         for k in ("collateral_usd_now", "current_ltv_pct", "price_now",
-                   "breakeven_principal", "drop_pct_principal", "breakeven_full", "drop_pct_full"):
+                   "breakeven_principal", "drop_pct_principal"):
             row[k] = None
     return row
 
@@ -283,19 +257,17 @@ def print_rows(rows: list[dict]) -> None:
     priced.sort(key=lambda r: r["drop_pct_principal"])
 
     log.info("")
-    col = "{:<6}{:<10}{:>11}{:>14}{:>10}{:>11}{:>10}{:>11}{:>10}{:>8}{:>8}"
+    col = "{:<6}{:<10}{:>11}{:>10}{:>11}{:>12}{:>8}{:>8}"
     log.info(col.format(
-        "type", "collat", "principal", "owed (full)", "price", "LTV",
-        "BE(princ)", "drop%", "BE(full)", "drop%", "due",
+        "type", "collat", "principal", "price", "LTV", "breakeven", "drop%", "due",
     ))
     for r in priced:
         log.info(
-            "{:<6}{:<10}{:>11}{:>14}{:>10}{:>10.1f}%{:>10}{:>10.1f}%{:>10}{:>9.1f}%{:>8}".format(
+            "{:<6}{:<10}{:>11}{:>10}{:>10.1f}%{:>12}{:>7.1f}%{:>8}".format(
                 r["kind"], r["collateral_symbol"],
-                f"${r['principal_usd']:,.0f}", f"${r['total_owed_usd']:,.0f}",
+                f"${r['principal_usd']:,.0f}",
                 f"${r['price_now']:.4g}", r["current_ltv_pct"],
                 f"${r['breakeven_principal']:.4g}", r["drop_pct_principal"],
-                f"${r['breakeven_full']:.4g}", r["drop_pct_full"],
                 _fmt_due(r["due"]),
             )
         )
@@ -306,7 +278,7 @@ def print_rows(rows: list[dict]) -> None:
             log.info("  %s  %s  principal $%s  (%s)", r["kind"], r["collateral_symbol"], f"{r['principal_usd']:,.2f}", r["pubkey"])
 
     log.info("")
-    log.info("Sorted by least cushion first (smallest drop% to BE(princ)) — these are the most exposed to a price drop.")
+    log.info("Sorted by least cushion first (smallest % drop to breakeven) — these are the most exposed to a price drop.")
 
 
 def process_pubkey(pubkey: str) -> list[dict]:

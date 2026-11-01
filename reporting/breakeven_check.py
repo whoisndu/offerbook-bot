@@ -307,6 +307,67 @@ def finalize_row(row: dict, price: float | None, decimals: int | None, history: 
     return row
 
 
+# A repeat of the token's own worst 7-day move needs at least this much
+# more cushion than that worst move to not count as "tight".
+TIGHT_CUSHION_MULTIPLIER = 1.25
+# "Near its floor" — within this % of the 90-day low.
+NEAR_LOW_PCT = 20
+# "Falling knife" pattern — still at least this far above the 90-day low
+# (so the low hasn't been retested) while also down at least this much
+# from the 90-day high (so it's mid-correction, not sitting at the top).
+FALLING_KNIFE_ABV_LOW_PCT = 100
+FALLING_KNIFE_BLW_HIGH_PCT = 30
+
+
+def renewal_call(row: dict) -> tuple[str, str]:
+    """A rough renew/hold-off call from cushion vs. this token's own price
+    history. Not a prediction — a heuristic for where to spend scrutiny:
+    - AVOID: the cushion to principal-breakeven is no bigger than (or only
+      barely bigger than) the worst 7-day move this token has already
+      made — i.e. a repeat of its own history alone could breach breakeven.
+    - CAUTION: cushion clears that bar, but either it's tight, or the
+      token is still well above its 90-day low despite being well off its
+      90-day high (a correction that hasn't found a floor yet).
+    - RENEW: cushion comfortably clears the worst-case history, and
+      (if known) the token is already trading near its 90-day low, where
+      a repeat of its worst week is less likely to carve out a new one.
+    """
+    cushion = row["drop_pct_principal"]
+    worst_7d = row["largest_7d_drop_pct"]
+    abv_low = row["pct_above_period_low"]
+    blw_high = row["pct_below_period_high"]
+
+    if worst_7d is None or abv_low is None or blw_high is None:
+        return "MANUAL", "no price history available — judge on cushion alone"
+
+    if cushion <= worst_7d:
+        return "AVOID", (
+            f"cushion ({cushion:.0f}%) is at or below this token's worst 7-day drop on "
+            f"record ({worst_7d:.0f}%) — a repeat of that alone could breach breakeven"
+        )
+
+    tight = cushion <= worst_7d * TIGHT_CUSHION_MULTIPLIER
+    falling_knife = abv_low >= FALLING_KNIFE_ABV_LOW_PCT and blw_high >= FALLING_KNIFE_BLW_HIGH_PCT
+    near_low = abv_low <= NEAR_LOW_PCT
+
+    if falling_knife and tight:
+        return "AVOID", (
+            f"cushion is tight against the worst 7-day move on record AND the token is still "
+            f"{abv_low:.0f}% above its 90-day low despite being {blw_high:.0f}% off its high — "
+            f"no floor established yet"
+        )
+    if falling_knife:
+        return "CAUTION", (
+            f"still {abv_low:.0f}% above its 90-day low despite correcting {blw_high:.0f}% off "
+            f"its high — hasn't proven a floor yet"
+        )
+    if tight:
+        return "CAUTION", f"cushion ({cushion:.0f}%) is close to the worst 7-day move on record ({worst_7d:.0f}%)"
+    if near_low:
+        return "RENEW", f"cushion clears worst-case history and it's already trading near its 90-day low ({abv_low:.0f}% above it)"
+    return "RENEW", f"cushion ({cushion:.0f}%) comfortably clears the worst 7-day move on record ({worst_7d:.0f}%)"
+
+
 def _fmt_due(due: str) -> str:
     if not due:
         return "—"
@@ -329,21 +390,24 @@ def print_rows(rows: list[dict]) -> None:
     priced.sort(key=lambda r: r["drop_pct_principal"])
 
     log.info("")
-    col = "{:<6}{:<10}{:>11}{:>10}{:>11}{:>12}{:>8}{:>10}{:>9}{:>9}{:>8}"
+    col = "{:<6}{:<10}{:>11}{:>10}{:>11}{:>12}{:>8}{:>10}{:>9}{:>9}{:>9}{:>8}"
     log.info(col.format(
-        "type", "collat", "principal", "price", "LTV", "breakeven", "drop%", "worst 7d", "abv low", "blw high", "due",
+        "type", "collat", "principal", "price", "LTV", "breakeven", "drop%", "worst 7d", "abv low", "blw high", "call", "due",
     ))
+    calls = {}
     for r in priced:
         worst_7d = f"{r['largest_7d_drop_pct']:.1f}%" if r["largest_7d_drop_pct"] is not None else "—"
         abv_low = f"{r['pct_above_period_low']:.1f}%" if r["pct_above_period_low"] is not None else "—"
         blw_high = f"{r['pct_below_period_high']:.1f}%" if r["pct_below_period_high"] is not None else "—"
+        label, reason = renewal_call(r)
+        calls[r["pubkey"]] = (label, reason)
         log.info(
-            "{:<6}{:<10}{:>11}{:>10}{:>10.1f}%{:>12}{:>7.1f}%{:>10}{:>9}{:>9}{:>8}".format(
+            "{:<6}{:<10}{:>11}{:>10}{:>10.1f}%{:>12}{:>7.1f}%{:>10}{:>9}{:>9}{:>9}{:>8}".format(
                 r["kind"], r["collateral_symbol"],
                 f"${r['principal_usd']:,.0f}",
                 f"${r['price_now']:.4g}", r["current_ltv_pct"],
                 f"${r['breakeven_principal']:.4g}", r["drop_pct_principal"],
-                worst_7d, abv_low, blw_high,
+                worst_7d, abv_low, blw_high, label,
                 _fmt_due(r["due"]),
             )
         )
@@ -357,6 +421,10 @@ def print_rows(rows: list[dict]) -> None:
     log.info("Sorted by least cushion first (smallest % drop to breakeven) — these are the most exposed to a price drop.")
     log.info(f"\"worst 7d\" = the largest 7-day peak-to-trough decline seen in the trailing {PRICE_HISTORY_LOOKBACK_DAYS} days — a feel for how violent this collateral's moves can get.")
     log.info(f"\"abv low\"/\"blw high\" = how far the live price sits above its {PRICE_HISTORY_LOOKBACK_DAYS}-day low / below its {PRICE_HISTORY_LOOKBACK_DAYS}-day high — near 0% on \"abv low\" means it's already revisiting its floor; large and growing on \"blw high\" means it's still falling from a peak with no floor established yet.")
+    log.info("\"call\" is a heuristic, not a prediction — why for each row:")
+    for r in priced:
+        label, reason = calls[r["pubkey"]]
+        log.info("  %-6s %-10s $%-8s (%s): %s — %s", r["kind"], r["collateral_symbol"], f"{r['principal_usd']:,.0f}", _fmt_due(r["due"]), label, reason)
 
 
 def process_pubkey(pubkey: str) -> list[dict]:

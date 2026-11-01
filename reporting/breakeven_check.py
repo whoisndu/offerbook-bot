@@ -60,6 +60,8 @@ PAGE_SIZE = 100
 JUPITER_PRICE_API = "https://api.jup.ag/price/v3"
 JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "")
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
+GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2"
+PRICE_HISTORY_LOOKBACK_DAYS = 90
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
@@ -83,7 +85,10 @@ def symbol_for(mint: str) -> str:
     return KNOWN_SYMBOLS.get(mint, mint[:6] + "…" if mint else "?")
 
 
-def _fetch_dexscreener_price(mint: str) -> float | None:
+def _fetch_dexscreener_top_pair(mint: str) -> dict | None:
+    """The deepest-liquidity Solana pair for this mint, per DexScreener —
+    used both as the price fallback and as the pool lookup for the
+    GeckoTerminal OHLCV history behind the 7-day-drop metric."""
     try:
         resp = SESSION.get(f"{DEXSCREENER_API}/{mint}", timeout=10)
         if not resp.ok:
@@ -93,9 +98,68 @@ def _fetch_dexscreener_price(mint: str) -> float | None:
         if not sol_pairs:
             return None
         sol_pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
-        return float(sol_pairs[0]["priceUsd"])
+        return sol_pairs[0]
     except Exception:
         return None
+
+
+def _fetch_dexscreener_price(mint: str) -> float | None:
+    pair = _fetch_dexscreener_top_pair(mint)
+    return float(pair["priceUsd"]) if pair else None
+
+
+def _largest_window_drop_pct(closes: list[float], window: int) -> float | None:
+    """Worst peak-to-trough % decline found in any span of `window`
+    consecutive candles, scanning the whole series (not just trailing)."""
+    worst = None
+    for start in range(len(closes)):
+        peak = closes[start]
+        for close in closes[start : start + window]:
+            if close > peak:
+                peak = close
+            drop = (peak - close) / peak * 100 if peak else 0
+            if worst is None or drop > worst:
+                worst = drop
+    return worst
+
+
+def fetch_price_history_metrics(pair_address: str) -> dict | None:
+    """Pulls PRICE_HISTORY_LOOKBACK_DAYS of daily candles for this pool from
+    GeckoTerminal's free OHLCV endpoint (no API key required) and derives:
+      - largest_7d_drop_pct: worst peak-to-trough % decline in any 7-day span
+      - period_low / period_high: the lookback's price extremes, used
+        upstream to show how close the live price is to either edge."""
+    try:
+        resp = SESSION.get(
+            f"{GECKOTERMINAL_API}/networks/solana/pools/{pair_address}/ohlcv/day",
+            params={"aggregate": 1, "limit": PRICE_HISTORY_LOOKBACK_DAYS},
+            headers={"Accept": "application/json;version=20230302"},
+            timeout=15,
+        )
+        if not resp.ok:
+            return None
+        candles = resp.json()["data"]["attributes"]["ohlcv_list"]
+        if not candles:
+            return None
+        # GeckoTerminal returns newest-first; closes chronological (oldest first).
+        closes = [c[4] for c in reversed(candles)]
+        lows = [c[3] for c in candles]
+        highs = [c[2] for c in candles]
+        return {
+            "largest_7d_drop_pct": _largest_window_drop_pct(closes, window=7),
+            "period_low": min(lows),
+            "period_high": max(highs),
+        }
+    except Exception:
+        return None
+
+
+def fetch_price_history_batched(mints: list[str]) -> dict[str, dict | None]:
+    history: dict[str, dict | None] = {}
+    for mint in mints:
+        pair = _fetch_dexscreener_top_pair(mint)
+        history[mint] = fetch_price_history_metrics(pair["pairAddress"]) if pair else None
+    return history
 
 
 def fetch_current_prices_batched(mints: list[str]) -> tuple[dict[str, float], dict[str, int]]:
@@ -214,13 +278,14 @@ def row_from_loan(loan: dict) -> dict | None:
     }
 
 
-def finalize_row(row: dict, price: float | None, decimals: int | None) -> dict:
+def finalize_row(row: dict, price: float | None, decimals: int | None, history: dict | None) -> dict:
     """Fill in the derived fields (collateral whole amount, current value,
-    breakeven price vs principal, % drop needed) once a live price is
-    known. Mutates and returns `row`."""
+    breakeven price vs principal, % drop needed, price-history metrics)
+    once a live price is known. Mutates and returns `row`."""
     collateral_whole = row["collateral_raw"] / 10 ** decimals if decimals is not None else None
     row["collateral_symbol"] = symbol_for(row["collateral_mint"])
     row["collateral_whole"] = collateral_whole
+    row["largest_7d_drop_pct"] = history["largest_7d_drop_pct"] if history else None
 
     if price and collateral_whole:
         row["collateral_usd_now"] = collateral_whole * price
@@ -232,6 +297,13 @@ def finalize_row(row: dict, price: float | None, decimals: int | None) -> dict:
         for k in ("collateral_usd_now", "current_ltv_pct", "price_now",
                    "breakeven_principal", "drop_pct_principal"):
             row[k] = None
+
+    if price and history and history["period_low"] and history["period_high"]:
+        row["pct_above_period_low"] = (price - history["period_low"]) / history["period_low"] * 100
+        row["pct_below_period_high"] = (history["period_high"] - price) / history["period_high"] * 100
+    else:
+        row["pct_above_period_low"] = None
+        row["pct_below_period_high"] = None
     return row
 
 
@@ -257,17 +329,21 @@ def print_rows(rows: list[dict]) -> None:
     priced.sort(key=lambda r: r["drop_pct_principal"])
 
     log.info("")
-    col = "{:<6}{:<10}{:>11}{:>10}{:>11}{:>12}{:>8}{:>8}"
+    col = "{:<6}{:<10}{:>11}{:>10}{:>11}{:>12}{:>8}{:>10}{:>9}{:>9}{:>8}"
     log.info(col.format(
-        "type", "collat", "principal", "price", "LTV", "breakeven", "drop%", "due",
+        "type", "collat", "principal", "price", "LTV", "breakeven", "drop%", "worst 7d", "abv low", "blw high", "due",
     ))
     for r in priced:
+        worst_7d = f"{r['largest_7d_drop_pct']:.1f}%" if r["largest_7d_drop_pct"] is not None else "—"
+        abv_low = f"{r['pct_above_period_low']:.1f}%" if r["pct_above_period_low"] is not None else "—"
+        blw_high = f"{r['pct_below_period_high']:.1f}%" if r["pct_below_period_high"] is not None else "—"
         log.info(
-            "{:<6}{:<10}{:>11}{:>10}{:>10.1f}%{:>12}{:>7.1f}%{:>8}".format(
+            "{:<6}{:<10}{:>11}{:>10}{:>10.1f}%{:>12}{:>7.1f}%{:>10}{:>9}{:>9}{:>8}".format(
                 r["kind"], r["collateral_symbol"],
                 f"${r['principal_usd']:,.0f}",
                 f"${r['price_now']:.4g}", r["current_ltv_pct"],
                 f"${r['breakeven_principal']:.4g}", r["drop_pct_principal"],
+                worst_7d, abv_low, blw_high,
                 _fmt_due(r["due"]),
             )
         )
@@ -279,6 +355,8 @@ def print_rows(rows: list[dict]) -> None:
 
     log.info("")
     log.info("Sorted by least cushion first (smallest % drop to breakeven) — these are the most exposed to a price drop.")
+    log.info(f"\"worst 7d\" = the largest 7-day peak-to-trough decline seen in the trailing {PRICE_HISTORY_LOOKBACK_DAYS} days — a feel for how violent this collateral's moves can get.")
+    log.info(f"\"abv low\"/\"blw high\" = how far the live price sits above its {PRICE_HISTORY_LOOKBACK_DAYS}-day low / below its {PRICE_HISTORY_LOOKBACK_DAYS}-day high — near 0% on \"abv low\" means it's already revisiting its floor; large and growing on \"blw high\" means it's still falling from a peak with no floor established yet.")
 
 
 def process_pubkey(pubkey: str) -> list[dict]:
@@ -353,8 +431,12 @@ def main() -> None:
     mints = sorted({r["collateral_mint"] for r in rows if r["collateral_mint"]})
     prices, decimals = fetch_current_prices_batched(mints)
     log.info("Live prices resolved for %d/%d collateral mint(s)", len(prices), len(mints))
+    history = fetch_price_history_batched(mints)
 
-    finalized = [finalize_row(r, prices.get(r["collateral_mint"]), decimals.get(r["collateral_mint"])) for r in rows]
+    finalized = [
+        finalize_row(r, prices.get(r["collateral_mint"]), decimals.get(r["collateral_mint"]), history.get(r["collateral_mint"]))
+        for r in rows
+    ]
     print_rows(finalized)
 
 

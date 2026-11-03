@@ -63,6 +63,26 @@ DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2"
 PRICE_HISTORY_LOOKBACK_DAYS = 90
 
+# Macro context banner — broader risk-on/risk-off read, not specific to any
+# one offer/loan. Yahoo's chart endpoint is unauthenticated but blocks the
+# default `requests` user-agent, hence the browser-like headers.
+YAHOO_CHART_API = "https://query1.finance.yahoo.com/v8/finance/chart"
+YAHOO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+MACRO_SYMBOLS = [
+    ("ES=F", "S&P 500 fut"),
+    ("NQ=F", "Nasdaq fut"),
+    ("YM=F", "Dow fut"),
+    ("^VIX", "VIX"),
+    ("GC=F", "Gold fut"),
+    ("SI=F", "Silver fut"),
+    ("CL=F", "WTI Crude fut"),
+    ("BTC-USD", "BTC"),
+]
+
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
 
@@ -190,8 +210,61 @@ def fetch_current_prices_batched(mints: list[str]) -> tuple[dict[str, float], di
 
 
 # ---------------------------------------------------------------------------
-# Fetch helpers
+# Macro snapshot — equities/VIX/metals/oil/BTC context, independent of any
+# single collateral position.
 # ---------------------------------------------------------------------------
+
+def fetch_macro_quote(symbol: str) -> dict | None:
+    try:
+        resp = SESSION.get(f"{YAHOO_CHART_API}/{symbol}", headers=YAHOO_HEADERS, timeout=10)
+        if not resp.ok:
+            return None
+        meta = resp.json()["chart"]["result"][0]["meta"]
+        price = meta.get("regularMarketPrice")
+        change_pct = meta.get("regularMarketChangePercent")
+        if price is None or change_pct is None:
+            return None
+        return {"price": price, "change_pct": change_pct}
+    except Exception:
+        return None
+
+
+def fetch_macro_snapshot() -> list[dict]:
+    rows = []
+    for symbol, label in MACRO_SYMBOLS:
+        quote = fetch_macro_quote(symbol)
+        rows.append({"label": label, "price": quote["price"] if quote else None, "change_pct": quote["change_pct"] if quote else None})
+    return rows
+
+
+def print_macro_snapshot(rows: list[dict]) -> None:
+    known = [r for r in rows if r["change_pct"] is not None]
+    if not known:
+        log.warning("Macro snapshot unavailable (Yahoo Finance fetch failed for every symbol).")
+        return
+
+    log.info("")
+    log.info("Macro snapshot:")
+    for r in rows:
+        if r["change_pct"] is None:
+            log.info("  %-14s —", r["label"])
+            continue
+        arrow = "▲" if r["change_pct"] > 0 else "▼" if r["change_pct"] < 0 else "—"
+        log.info("  {:<14}{:>14,.2f}  {}{:>6.2f}%".format(r["label"], r["price"], arrow, r["change_pct"]))
+
+    equities = [r["change_pct"] for r in known if r["label"] in ("S&P 500 fut", "Nasdaq fut", "Dow fut")]
+    vix = next((r["change_pct"] for r in known if r["label"] == "VIX"), None)
+    if equities and vix is not None:
+        avg_equity = sum(equities) / len(equities)
+        if avg_equity < 0 and vix > 0:
+            read = "risk-off — equity futures down, VIX up"
+        elif avg_equity > 0 and vix < 0:
+            read = "risk-on — equity futures up, VIX down"
+        else:
+            read = "mixed — equity futures and VIX not moving together"
+        log.info("  → %s", read)
+    log.info("")
+
 
 def fetch_offer(pubkey: str) -> dict | None:
     try:
@@ -478,7 +551,11 @@ def main() -> None:
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--offer", default=None, help="A single offer or loan pubkey (auto-detected).")
     target.add_argument("--address", default=None, help="A wallet address — every live offer + active loan for it.")
+    parser.add_argument("--no-macro", action="store_true", help="Skip the equities/VIX/metals/oil/BTC macro snapshot.")
     args = parser.parse_args()
+
+    if not args.no_macro:
+        print_macro_snapshot(fetch_macro_snapshot())
 
     if args.offer:
         rows = process_pubkey(args.offer)

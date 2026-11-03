@@ -47,6 +47,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 KNOWN_LEDGER_ACCOUNTS: dict[str, tuple[str, str]] = {
     "1": ("44'/501'/0'", "Original / general strategy account"),
     "2": ("44'/501'/1'", "Targeted-offers account"),
+    "3": ("44'/501'/2'", "Third wallet account"),
 }
 
 

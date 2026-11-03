@@ -88,6 +88,7 @@ KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 KNOWN_LEDGER_ACCOUNTS: dict[str, tuple[str, str]] = {
     "1": ("44'/501'/0'", "Original / general strategy account"),
     "2": ("44'/501'/1'", "Targeted-offers account"),
+    "3": ("44'/501'/2'", "Third wallet account"),
 }
 
 logging.basicConfig(

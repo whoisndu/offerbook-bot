@@ -97,6 +97,7 @@ _allocation_symbol_to_mint_cache: dict[str, str] | None = None
 KNOWN_LEDGER_ACCOUNTS: dict[str, tuple[str, str]] = {
     "1": ("44'/501'/0'", "Original / general strategy account"),
     "2": ("44'/501'/1'", "Targeted-offers account"),
+    "3": ("44'/501'/2'", "Third wallet account"),
 }
 
 logging.basicConfig(

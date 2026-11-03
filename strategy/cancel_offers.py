@@ -89,6 +89,7 @@ LEDGER_PATH    = os.getenv("OFFERBOOK_LEDGER_PATH", "44'/501'/0'")
 KNOWN_LEDGER_ACCOUNTS: dict[str, tuple[str, str]] = {
     "1": ("44'/501'/0'", "Original / general strategy account"),
     "2": ("44'/501'/1'", "Targeted-offers account"),
+    "3": ("44'/501'/2'", "Third wallet account"),
 }
 
 BATCH_SIZE = 15   # offers per cancel tx -- tested against the live builder API at

@@ -278,7 +278,7 @@ Fully fills one live offer by pubkey — either a "borrowing" offer (someone pos
 
 Fetches the offer fresh right before building the fill transaction (so amounts reflect current `remainingPrincipal`/`remainingCollateral`, not whatever was seen earlier), prints a preview, and asks for confirmation before any signing — same safety pattern as the other scripts here.
 
-In Ledger mode you're interactively prompted which account to sign with (unless `--ledger-path` is given) — this script has no "right" account, it depends what you're filling and with what. Same `KNOWN_LEDGER_ACCOUNTS` labels as `cancel_offers.py`'s picker (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), plus a custom-path option.
+In Ledger mode you're interactively prompted which account to sign with (unless `--ledger-path` is given) — this script has no "right" account, it depends what you're filling and with what. Same `KNOWN_LEDGER_ACCOUNTS` labels as `cancel_offers.py`'s picker (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers, `44'/501'/2'` = third wallet account), plus a custom-path option.
 
 ```bash
 python strategy/fill_offer.py --offer <pubkey>
@@ -304,7 +304,7 @@ DRY_RUN=true python strategy/create_manual_offer.py ...                       # 
 
 Offer listing expiry defaults to the **same length as the loan duration** (matching the UI's own default) rather than the fixed 24h every automated script here uses — override with `--expiry-days`. `topup` defaults to `"none"`, same as every other offer-creation script here — see [Offer funding: topup modes](#offer-funding-topup-modes) for why. Pass `--topup minimum` if you've confirmed this wallet has no other open offer competing for the same balance and want this one guaranteed-funded right now instead.
 
-Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
+Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers, `44'/501'/2'` = third wallet account), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
 
 ## Update offer terms (`update_offer_terms.py`)
 
@@ -397,8 +397,9 @@ and `fill_offer.py` all interactively ask which account (derivation path) to
 sign with — there's no silent default, so a run never quietly lands on the
 wrong account. `cancel_offers.py`/`fill_offer.py` show a small labeled picker
 (`KNOWN_LEDGER_ACCOUNTS`, e.g. "Original / general strategy account" for
-`44'/501'/0'`, "Targeted-offers account" for `44'/501'/1'`) plus a custom-path
-option; `strategy.py` uses the equivalent shared prompt in
+`44'/501'/0'`, "Targeted-offers account" for `44'/501'/1'`, "Third wallet
+account" for `44'/501'/2'`) plus a custom-path option; `strategy.py` uses
+the equivalent shared prompt in
 `offerbook_common.prompt_for_ledger_path()`, which accepts either a bare
 account index (`0`, `1`, ...) or a full derivation path. Pass `--ledger-path
 "44'/501'/N'"` on any of them to skip the prompt entirely (e.g. for cron/

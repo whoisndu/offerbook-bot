@@ -7,7 +7,9 @@ just need to post the exact offer you already decided on (e.g. copied
 straight off a UI preview screen that wouldn't submit). Unlike strategy.py/
 fixed_terms_offers.py/defaulter_capture.py, this creates exactly ONE offer
 from values YOU give it — no market benchmarking, no allocation config, no
-looping over pairs/durations.
+looping over pairs/durations. Also deliberately bypasses blacklist_config.yaml
+(see README.md's Collateral blacklist section) — posting a manual offer on
+a blacklisted pair IS the deliberate override.
 
 You specify collateral + principal + either an LTV% (collateral amount is
 then computed from the live price, same as the UI does) or an exact

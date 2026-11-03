@@ -19,6 +19,10 @@ Logic that used to be copy-pasted across scripts now lives in one place and gets
 
 Each script that's itself imported elsewhere for these helpers (e.g. `create_targeted_offers.py` calling `defaulter_capture.resolve_signer_wallet()`) keeps a thin same-signature wrapper around the shared function, so nothing calling into it had to change.
 
+## Collateral blacklist (`token_blacklist.py`)
+
+`load_blacklist()` / `is_blacklisted(mint, blacklist=None)` — the shared loader for `../strategy/blacklist_config.yaml`. Checked by `strategy.py`, `fixed_terms_offers.py`, and `defaulter_capture.py` before they post a new offer against a collateral; deliberately not consulted by `create_targeted_offers.py`, `create_manual_offer.py`, or `fill_offer.py`, which always act on one pair/offer chosen by hand (see [strategy/README.md's Collateral blacklist section](../strategy/README.md#collateral-blacklist-blacklist_configyaml)). Returns an empty set (not an error) if the config file is missing.
+
 ## Ledger hardware wallet signer (`ledger_signer.py`)
 
 Talks to the Ledger Solana app directly over USB HID (via `ledgerblue.comm`), independent of any official Solana Ledger SDK. Exposes a `LedgerSigner` class:

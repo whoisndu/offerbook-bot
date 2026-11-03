@@ -95,6 +95,7 @@ import yaml  # pip install pyyaml
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 import offerbook_common as _common
+import token_blacklist as _blacklist
 from offerbook_common import _mint_from_asset
 
 # ---------------------------------------------------------------------------
@@ -1468,6 +1469,18 @@ def main() -> None:
             if ps.lending_apys or ps.global_lending_apys or ps.loan_apys
         }
         log.info("Pairs with an APY benchmark (live offers or matched loans): %d", len(relevant_pairs))
+
+        # 4a. Drop blacklisted collateral — enforced even when --collateral
+        # explicitly names it, since this is still the automated strategy
+        # deciding APY/LTV/sizing on its own. Use create_manual_offer.py or
+        # create_targeted_offers.py to deliberately override on one pair.
+        blacklist = _blacklist.load_blacklist()
+        blacklisted_count = sum(1 for pair in relevant_pairs if pair[1] in blacklist)
+        if blacklisted_count:
+            relevant_pairs = {
+                pair: ps for pair, ps in relevant_pairs.items() if pair[1] not in blacklist
+            }
+            log.info("Skipping %d pair(s) on blacklisted collateral (see blacklist_config.yaml)", blacklisted_count)
 
         if collateral_filters:
             relevant_pairs = {

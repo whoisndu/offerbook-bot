@@ -54,6 +54,7 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 import offerbook_common as _common
+import token_blacklist as _blacklist
 
 API_BASE = os.getenv("OFFERBOOK_API_BASE", "https://api.offerbook.jup.ag/api/v1")
 TX_API_BASE = os.getenv("OFFERBOOK_TX_API_BASE", "https://builder.offerbook.jup.ag/api/v1")
@@ -380,6 +381,14 @@ def main() -> None:
     args = parser.parse_args()
 
     collateral_mint = resolve_collateral_token(args.collateral or prompt_for_collateral())
+    if _blacklist.is_blacklisted(collateral_mint):
+        log.error(
+            "%s is blacklisted (see ../strategy/blacklist_config.yaml) — this script won't create "
+            "offers against it. Use create_manual_offer.py or create_targeted_offers.py to "
+            "deliberately override on this one pair.",
+            symbol_for(collateral_mint),
+        )
+        sys.exit(1)
 
     SIGNING_MODE = _common.resolve_signing_mode(args.signing_mode, SIGNING_MODE)
     if SIGNING_MODE == "private_key":

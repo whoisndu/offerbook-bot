@@ -226,6 +226,19 @@ python strategy/update_config.py
 
 Symbol resolution tries **Jupiter's token search API** first (`api.jup.ag/tokens/v2/search`, batched) — it indexes far more long-tail/pump.fun/meme tokens than Offerbook's own `/tokens` endpoint — then falls back to Offerbook's registry, then the hardcoded `KNOWN_TOKENS` table (which always wins on conflict). Allocation values already set are never touched, regardless of source.
 
+## Collateral blacklist (`blacklist_config.yaml`)
+
+**Not gitignored** (unlike `allocation_config.yaml`) — it only lists tokens you refuse to lend against, which doesn't reveal position sizing, so it's tracked in git like a normal config file.
+
+A mint listed here is skipped automatically by every script that decides on its own whether/how to post a new offer: `strategy.py`, `fixed_terms_offers.py`, and `defaulter_capture.py` — all three import the shared loader in `../lib/token_blacklist.py` and check it before pricing or sizing anything. It's deliberately **not** consulted by `create_targeted_offers.py`, `create_manual_offer.py`, or `fill_offer.py` — those already act on one specific pair/offer you've chosen by hand, and using one of them on a blacklisted pair is the deliberate override.
+
+```yaml
+blacklist:
+  - SiLVFMgD3eD2rgK628NbTBq9MnuJF5FW2CRaVyTB35L  # SILV (Dominion Silver)
+```
+
+Add or remove a mint (with a symbol comment) at any time — no code change needed, every enforcing script re-reads the file at startup.
+
 ## Fixed-terms multi-duration offers (`fixed_terms_offers.py`)
 
 Creates up to 4 USDC lending offers per run — fixed 1/3/5/7-day durations — against **one collateral given each run** (not every allocated pair like `strategy.py`), skipping any duration where a live (active/partiallyFilled) offer of ours already exists on that exact pair+duration. Re-running after e.g. a 7-day offer is already live only creates the missing 1/3/5-day ones.

@@ -1,0 +1,20 @@
+# Offerbook Collateral Blacklist
+# =================================
+# Mints listed here are skipped automatically by the strategy scripts that
+# decide on their own whether/how to post a NEW lending offer: strategy.py,
+# fixed_terms_offers.py, and defaulter_capture.py.
+#
+# This does NOT apply to deliberate, one-pair-at-a-time actions:
+# create_targeted_offers.py, create_manual_offer.py, and fill_offer.py all
+# bypass this list — using one of those tools on a blacklisted pair IS the
+# deliberate override (see lib/token_blacklist.py for the shared loader all
+# of the above import).
+#
+# ADD/REMOVE A TOKEN
+# --------------------
+# Add a mint address below with a symbol comment, or delete a line to
+# un-blacklist it. No code change needed — every enforcing script re-reads
+# this file at startup.
+
+blacklist:
+  - SiLVFMgD3eD2rgK628NbTBq9MnuJF5FW2CRaVyTB35L  # SILV (Dominion Silver)

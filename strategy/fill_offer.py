@@ -5,7 +5,10 @@ Fully fills a single live offer by pubkey — either a "borrowing" offer
 (someone posted collateral wanting principal; you fill it as the lender via
 /fill-collateral-offer) or a "lending" offer (someone posted principal
 wanting collateral; you fill it as the borrower via /fill-principal-offer).
-Offer type is auto-detected from the live offer data.
+Offer type is auto-detected from the live offer data. Deliberately bypasses
+blacklist_config.yaml (see README.md's Collateral blacklist section) —
+you're filling one specific offer pubkey you already chose, which IS the
+deliberate override.
 
 Fetches the offer fresh right before building the fill transaction (so the
 amounts reflect current remainingPrincipal/remainingCollateral, not whatever

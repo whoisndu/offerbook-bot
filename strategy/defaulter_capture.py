@@ -73,6 +73,7 @@ from defaulter_watch import (
     symbol_for,
 )
 import offerbook_common as _common
+import token_blacklist as _blacklist
 from offerbook_common import _mint_from_asset
 
 # ---------------------------------------------------------------------------
@@ -635,6 +636,11 @@ def main() -> None:
         log.info("Pool: USDC / %s", symbol_for(pool.collateral_mint))
         for reason in pool.reasons:
             log.info("  trigger: %s", reason)
+
+        if _blacklist.is_blacklisted(pool.collateral_mint):
+            log.info("  Skipping — %s is blacklisted (see blacklist_config.yaml)", symbol_for(pool.collateral_mint))
+            skipped += 1
+            continue
 
         fraction = ALLOCATION_CONFIG.get(pool.collateral_mint, ALLOCATION_CONFIG.get("default", 0.0))
         if fraction <= 0.0:

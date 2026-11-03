@@ -44,6 +44,17 @@ platform-wide, any lender):
   history still exists, and still tells you something, even when nobody's
   actively quoting right now.
 
+If OFFERBOOK_PORTFOLIO_WALLETS (.env, comma-separated — same var
+breakeven_check.py/portfolio_health.py read) is set, a final section shows
+YOUR active loans on this exact pair (principal locked, days until each
+matures) and, the moment that capital is freed, 5 concrete offers to post
+immediately: that freed principal split into 5 tranches, sized proportional
+to recent real demand at each size band and priced/dated at what borrowers
+in that band actually paid/took (median APY, modal duration, median LTV) —
+same recent-activity window as the quartile breakdown above (--days-back),
+so sizing reflects actual borrower behavior on this pair rather than a
+guess. Skipped entirely if the var is unset.
+
 Usage:
   python liquidity_check.py --collateral USELESS
   python liquidity_check.py --collateral <mint address>
@@ -104,6 +115,11 @@ KNOWN_DECIMALS = _common.KNOWN_DECIMALS
 KNOWN_SYMBOLS = _common.KNOWN_SYMBOLS
 SYMBOL_TO_MINT = {sym.upper(): mint for mint, sym in KNOWN_SYMBOLS.items()}
 _allocation_symbol_to_mint_cache: dict[str, str] | None = None
+
+# Same var breakeven_check.py/portfolio_health.py read — "your" wallets for
+# the locked-capital/reoffer-recommendation section. Comma-separated, .env.
+PORTFOLIO_WALLETS = [w.strip() for w in os.getenv("OFFERBOOK_PORTFOLIO_WALLETS", "").split(",") if w.strip()]
+REOFFER_TRANCHES = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -237,13 +253,14 @@ def biggest_day_ever(loans: list[dict]) -> dict | None:
     return max(by_day.values(), key=lambda d: d["total_usd"])
 
 
-def size_vs_apy_quartiles(loans: list[dict], days_back: int) -> list[dict]:
-    """Loans originated in the last `days_back` days, split into 4 equal-
-    COUNT groups by USD principal (smallest to largest), each reporting its
-    size range, loan count, total volume, and median/max APY paid. Directly
-    answers "do bigger loans on this pair pay more or less than smaller
-    ones right now" — the size-vs-price-sensitivity signal, not just a
-    single number. Returns [] if nothing originated in the window."""
+def _recent_loans_by_size(loans: list[dict], days_back: int) -> list[dict]:
+    """Loans originated in the last `days_back` days with usable USD
+    principal, sorted ascending by size — the shared basis for both the
+    quartile breakdown and the reoffer-sizing recommendations below, so
+    both read off exactly the same borrower-activity window. Each row also
+    carries duration (days) and origination LTV (startPrincipalAmountUsd /
+    startCollateralAmountUsd, None if either's missing) for the
+    recommendations' duration/LTV signal."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
     recent = []
     for l in loans:
@@ -257,32 +274,118 @@ def size_vs_apy_quartiles(loans: list[dict], days_back: int) -> list[dict]:
         principal_usd = meta.get("startPrincipalAmountUsd") or 0.0
         if principal_usd <= 0:
             continue
-        recent.append({"principal_usd": principal_usd, "apy_bps": l.get("apy", 0)})
+        collateral_usd = meta.get("startCollateralAmountUsd") or 0.0
+        recent.append({
+            "principal_usd": principal_usd,
+            "apy_bps": l.get("apy", 0),
+            "duration_days": round((l.get("duration") or 0) / 86400),
+            "ltv": principal_usd / collateral_usd if collateral_usd else None,
+        })
+    recent.sort(key=lambda r: r["principal_usd"])
+    return recent
 
+
+def _bucket_by_size(recent: list[dict], n: int) -> list[dict]:
+    """Split `recent` (already sorted ascending by principal_usd) into `n`
+    equal-COUNT groups, each reporting size range, loan count, total
+    volume, and median/max APY, modal duration, and median LTV actually
+    seen at that size — generalized so the quartile breakdown (n=4) and
+    the reoffer-sizing recommendations (n=5) share one implementation and
+    agree on what "this size band" paid. Returns [] if `recent` is
+    empty."""
     if not recent:
         return []
-    recent.sort(key=lambda r: r["principal_usd"])
-    n = len(recent)
-    step = max(1, n // 4)
+    count = len(recent)
+    step = max(1, count // n)
 
-    quartiles = []
-    for i in range(4):
+    buckets = []
+    for i in range(n):
         start = i * step
-        end = n if i == 3 else min((i + 1) * step, n)
-        bucket = recent[start:end]
-        if not bucket:
+        end = count if i == n - 1 else min((i + 1) * step, count)
+        chunk = recent[start:end]
+        if not chunk:
             continue
-        apys = sorted(b["apy_bps"] for b in bucket)
-        quartiles.append({
+        apys = sorted(c["apy_bps"] for c in chunk)
+        durations = [c["duration_days"] for c in chunk]
+        ltvs = sorted(c["ltv"] for c in chunk if c["ltv"] is not None)
+        buckets.append({
             "label": f"Q{i + 1}",
-            "size_min": bucket[0]["principal_usd"],
-            "size_max": bucket[-1]["principal_usd"],
-            "count": len(bucket),
-            "total_usd": sum(b["principal_usd"] for b in bucket),
+            "size_min": chunk[0]["principal_usd"],
+            "size_max": chunk[-1]["principal_usd"],
+            "count": len(chunk),
+            "total_usd": sum(c["principal_usd"] for c in chunk),
             "median_apy_bps": apys[len(apys) // 2],
             "max_apy_bps": max(apys),
+            "mode_duration_days": max(set(durations), key=durations.count),
+            "median_ltv": ltvs[len(ltvs) // 2] if ltvs else None,
         })
-    return quartiles
+    return buckets
+
+
+def size_vs_apy_quartiles(loans: list[dict], days_back: int) -> list[dict]:
+    """Loans originated in the last `days_back` days, split into 4 equal-
+    COUNT groups by USD principal (smallest to largest), each reporting its
+    size range, loan count, total volume, and median/max APY paid. Directly
+    answers "do bigger loans on this pair pay more or less than smaller
+    ones right now" — the size-vs-price-sensitivity signal, not just a
+    single number. Returns [] if nothing originated in the window."""
+    return _bucket_by_size(_recent_loans_by_size(loans, days_back), 4)
+
+
+def my_active_loans(loans: list[dict], wallets: list[str]) -> list[dict]:
+    """This pair's active loans where one of `wallets` is the lender — the
+    capital that's currently tied down on this exact pair and will become
+    free as each one matures/repays. `loans` is the already-fetched
+    platform-wide loans-for-this-pair list (see fetch_loans_for_pair);
+    filtered client-side the same way breakeven_check.py's
+    fetch_active_loans_for does (no lender filter exists server-side)."""
+    if not wallets:
+        return []
+    wallet_set = set(wallets)
+    return [l for l in loans if l.get("_status") == "active" and l.get("lender") in wallet_set]
+
+
+def recommend_reoffers(loans: list[dict], days_back: int, available_raw: int, n: int = REOFFER_TRANCHES) -> list[dict]:
+    """`n` concrete tranches to re-post the instant `available_raw` (your
+    locked principal on this pair, once it's released) is free to deploy
+    again: split recent borrower activity (same window as the quartile
+    breakdown, `_recent_loans_by_size`) into `n` equal-count size bands,
+    then carve `available_raw` across those bands proportional to each
+    band's share of total $ volume actually borrowed recently — not an
+    even split — and price/date each tranche at that band's own median
+    APY, modal duration, and median LTV, i.e. exactly what borrowers at
+    that size actually took, not a guess. A lender re-entering with sizing
+    that matches real demand at each tier (priced at what that tier
+    actually paid) should fill faster than one lump sum guessed at a
+    single APY. Returns [] if there's no recent activity to size off of,
+    or nothing to recommend (available_raw <= 0)."""
+    if available_raw <= 0:
+        return []
+    buckets = _bucket_by_size(_recent_loans_by_size(loans, days_back), n)
+    total_usd = sum(b["total_usd"] for b in buckets)
+    if not buckets or total_usd <= 0:
+        return []
+
+    recs = []
+    allocated = 0
+    for i, b in enumerate(buckets):
+        amount_raw = round(available_raw * (b["total_usd"] / total_usd))
+        allocated += amount_raw
+        recs.append({
+            "tranche": i + 1,
+            "size_range": (b["size_min"], b["size_max"]),
+            "based_on_count": b["count"],
+            "amount_raw": amount_raw,
+            "apy_bps": b["median_apy_bps"],
+            "duration_days": b["mode_duration_days"],
+            "ltv": b["median_ltv"],
+        })
+    # Per-tranche rounding can leave the total a few raw units off
+    # `available_raw` — correct it on the largest tranche so the
+    # recommendations always sum to exactly what's being released.
+    diff = available_raw - allocated
+    max(recs, key=lambda r: r["amount_raw"])["amount_raw"] += diff
+    return recs
 
 
 def fetch_wallet_token_balance(wallet: str, mint: str, attempts: int = 3) -> int | None:
@@ -520,6 +623,75 @@ def print_loan_history_report(loans: list[dict], principal_mint: str, collateral
             log.info("  → No meaningful difference in APY paid between smallest and biggest loans in this window.")
 
 
+def print_reoffer_report(
+    my_loans: list[dict], recs: list[dict], principal_mint: str, collateral_mint: str, days_back: int,
+) -> None:
+    decimals = decimals_for(principal_mint)
+    scale = 10 ** decimals
+    sym = symbol_for(principal_mint)
+
+    log.info("")
+    log.info("=" * 100)
+    log.info("YOUR LOCKED CAPITAL — %s/%s, released as your active loans mature", sym, symbol_for(collateral_mint))
+    log.info("=" * 100)
+
+    if not my_loans:
+        log.info(
+            "None of your wallet(s) in OFFERBOOK_PORTFOLIO_WALLETS have an active loan on this exact pair — "
+            "nothing of yours is tied down here right now."
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    total_locked_raw = 0
+    col = "{:<46}{:>18}{:>14}"
+    log.info(col.format("loan", "principal locked", "releases in"))
+    for l in my_loans:
+        principal_raw = l.get("outstandingPrincipal", l.get("principalAmount", 0))
+        total_locked_raw += principal_raw
+        try:
+            expired = datetime.fromisoformat(l["expiredAt"].replace("Z", "+00:00"))
+            releases_in = "overdue" if expired <= now else f"{(expired - now).total_seconds() / 86400:.1f}d"
+        except (KeyError, ValueError, AttributeError, TypeError):
+            releases_in = "?"
+        log.info(col.format(l.get("pubkey", ""), f"{principal_raw / scale:,.2f} {sym}", releases_in))
+
+    log.info("")
+    log.info(
+        "Total locked on this pair: %s %s across %d active loan(s) — frees up incrementally as each one "
+        "matures/repays, not all at once.",
+        f"{total_locked_raw / scale:,.2f}", sym, len(my_loans),
+    )
+
+    log.info("")
+    if not recs:
+        log.info(
+            "No loan activity on this pair in the last %d day(s) to size recommendations off of — "
+            "rerun with a larger --days-back once some exists.", days_back,
+        )
+        return
+
+    log.info(
+        "%d offers to post the moment that capital is released, sized/priced off real borrower activity "
+        "in the last %d day(s):", len(recs), days_back,
+    )
+    col2 = "{:<8}{:>24}{:>18}{:>10}{:>10}{:>10}"
+    log.info(col2.format("tranche", "sized off loans $", "post amount", "APY", "duration", "LTV"))
+    for r in recs:
+        size_range = f"{r['size_range'][0]:,.0f}-{r['size_range'][1]:,.0f} ({r['based_on_count']})"
+        ltv_str = f"{r['ltv'] * 100:.1f}%" if r["ltv"] is not None else "n/a"
+        log.info(col2.format(
+            r["tranche"], size_range, f"{r['amount_raw'] / scale:,.2f} {sym}",
+            f"{r['apy_bps'] / 100:.2f}%", f"{r['duration_days']:.0f}d", ltv_str,
+        ))
+    log.info(
+        "APY/duration/LTV are the median/mode actually paid/taken by loans in that size band in the window "
+        "above — not a guess. Amounts sum to the full %s %s above (post all 5 as soon as it's freed, not "
+        "a single lump sum, so sizing matches real demand at each tier).",
+        f"{total_locked_raw / scale:,.2f}", sym,
+    )
+
+
 def prompt_for_collateral() -> str:
     raw = input("Enter collateral symbol (e.g. USELESS) or mint address: ").strip()
     while not raw:
@@ -560,6 +732,15 @@ def main() -> None:
     log.info("Fetching loan history for %s/%s …", symbol_for(principal_mint), symbol_for(collateral_mint))
     loans = fetch_loans_for_pair(principal_mint, collateral_mint)
     print_loan_history_report(loans, principal_mint, collateral_mint, args.days_back)
+
+    if PORTFOLIO_WALLETS:
+        mine = my_active_loans(loans, PORTFOLIO_WALLETS)
+        locked_raw = sum(l.get("outstandingPrincipal", l.get("principalAmount", 0)) for l in mine)
+        recs = recommend_reoffers(loans, args.days_back, locked_raw)
+        print_reoffer_report(mine, recs, principal_mint, collateral_mint, args.days_back)
+    else:
+        log.info("")
+        log.info("Set OFFERBOOK_PORTFOLIO_WALLETS in .env to get reoffer recommendations for capital you have locked on this pair.")
 
     if not offers and not loans:
         log.error("No live offers AND no loan history for this pair at all — nothing to check.")

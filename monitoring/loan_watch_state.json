@@ -1,4 +1,10 @@
 {
+  "3TMojA7ZxpWruTgc5qkydhxZkR2Pu5fgHy9V8MyTAWtj": {
+    "borrower": "GWnFx1nPxn7ArbB4VLTh3bjc8e54c9GHDQGWsaCzX4QK",
+    "expiredAt": "2026-11-05T16:16:20Z",
+    "lender": "Fa6ajuuABrhXAEnd3of6azSYjCn1Rj16ZXzbEWoYYSYV",
+    "principal_usd": 2998.850164969728
+  },
   "3iuoMtBUX7cpJi64KXBUckdz5rYmEMNhzbXDfk8cV6fZ": {
     "borrower": "CiprRnLjTYNUGbJ8NmEaTRDAtSp2w2GK3YwGET4THvfV",
     "expiredAt": "2026-10-02T08:57:58Z",

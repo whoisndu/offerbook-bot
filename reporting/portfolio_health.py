@@ -178,7 +178,8 @@ REMINDER_SYNC_PLAN_PATH = os.path.join(os.path.dirname(__file__), "portfolio_rem
 # into an actual number.
 CAPITAL_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "portfolio_capital_baseline.json")
 
-VOLUME_WINDOW_DAYS = 7  # "this week" volume = loans originated in the trailing N days (rolling
+VOLUME_WINDOW_DAYS = 7  # "this week" volume = capital committed (originated OR rolled over via an
+                          # in-place extension — see compute_volume) in the trailing N days (rolling
                           # window from now, not calendar-week-aligned)
 
 INTEREST_REPAY_FEE_RATE = 0.10  # platform fee taken from interest at repayment — measured directly
@@ -515,26 +516,54 @@ def compute_realized_pnl(
 
 def compute_volume(all_loans: list[dict], wallet: str, since: datetime | None) -> float:
     """
-    Total USD principal (at origination) of every loan this wallet has ever
-    lent, optionally restricted to loans CREATED on/after `since`. A loan
-    counts toward volume the moment it's originated, regardless of its
-    current status (active/repaid/defaulted) — this measures capital put to
-    work, not capital currently at risk or already resolved. `all_loans`
-    should be active+defaulted+repaid combined for a true total.
+    Total USD principal this wallet has ever put to work as lender,
+    optionally restricted to capital committed on/after `since`. Counts
+    TWO kinds of events, each the moment capital was actually committed
+    for a new term, regardless of the loan's current status
+    (active/repaid/defaulted) — this measures capital put to work, not
+    capital currently at risk or already resolved:
+
+      1. Origination — startPrincipalAmountUsd, dated by the loan's own
+         createdAt.
+      2. Each in-place extension/rollover — that extension's own
+         principalAmountUsd (same shape as startPrincipalAmountUsd, just
+         re-committed for the NEW term rather than the first; falls back
+         to the loan's own startPrincipalAmountUsd if an individual
+         extension is missing it — same convention pnl_leaderboard.py's
+         rollover-volume column uses), dated by that extension's own "at"
+         timestamp (same convention compute_realized_pnl/_extension_events
+         use for extension interest) — otherwise a loan rolled over 4
+         times (real example: re-committing the same ~$1,900 principal 4
+         extra times) would only ever count as ONE origination's worth of
+         volume, even though 5x the capital was actually redeployed.
+
+    `all_loans` should be active+defaulted+repaid combined for a true
+    total (extensions on a loan that's since resolved are still in its
+    metadata.extensions[] permanently, same as compute_realized_pnl relies
+    on).
     """
     total = 0.0
     for l in all_loans:
         if l.get("lender") != wallet:
             continue
-        if since is not None:
+        if since is None:
+            created_at = None
+        else:
             try:
                 created_at = datetime.fromisoformat(l["createdAt"].replace("Z", "+00:00"))
             except (KeyError, ValueError):
-                continue
-            if created_at < since:
-                continue
-        meta = l.get("metadata") or {}
-        total += meta.get("startPrincipalAmountUsd") or 0.0
+                created_at = None
+        if since is None or (created_at is not None and created_at >= since):
+            meta = l.get("metadata") or {}
+            total += meta.get("startPrincipalAmountUsd") or 0.0
+
+        start_principal_usd = (l.get("metadata") or {}).get("startPrincipalAmountUsd") or 0.0
+        for ext in (l.get("metadata") or {}).get("extensions") or []:
+            if since is not None:
+                ext_at = _extension_at(ext)
+                if ext_at is None or ext_at < since:
+                    continue
+            total += ext.get("principalAmountUsd") or start_principal_usd
     return total
 
 
@@ -1010,7 +1039,7 @@ def print_wallet_report(
     print_other_holdings_table(other_holdings)
     log.info("Idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%s", f"{idle_balance_usd:,.2f}")
     log.info(
-        "Volume — last %d days: $%s   all-time: $%s",
+        "Volume (incl. rollovers) — last %d days: $%s   all-time: $%s",
         VOLUME_WINDOW_DAYS, f"{volume_week_usd:,.2f}", f"{volume_all_time_usd:,.2f}",
     )
 
@@ -1127,7 +1156,7 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info("Total other holdings (non-SOL/USDC, wallet + escrow, at current prices): $%s", f"{total_other_holdings_usd:,.2f}")
     log.info("Total idle balance (USDC + SOL + other holdings, wallet + escrow, at current prices): $%s", f"{total_idle_balance:,.2f}")
     log.info(
-        "Total volume — last %d days: $%s   all-time: $%s",
+        "Total volume (incl. rollovers) — last %d days: $%s   all-time: $%s",
         VOLUME_WINDOW_DAYS, f"{total_volume_week:,.2f}", f"{total_volume_all_time:,.2f}",
     )
     log.info("Total active loans: %d   Outstanding principal: $%s   At-risk: %d", total_active, f"{total_outstanding:,.2f}", total_at_risk)

@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 
 import base58
+import requests
 from ledgerblue.comm import CommException, getDongle
+from solders.message import Message, MessageV0
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import VersionedTransaction
@@ -44,6 +47,16 @@ SW_USER_REJECTED = 0x6982
 SW_BLIND_SIGN_REQUIRED = 0x6808
 
 DEFAULT_PATH = "44'/501'/0'"
+DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
+
+# On-chain layout of an Address Lookup Table account (Address Lookup Table
+# Program): a 56-byte fixed-size LookupTableMeta header, followed by the
+# table's addresses as a flat array of 32-byte pubkeys. Confirmed against
+# live mainnet ALT accounts (every one fetched decodes cleanly at this
+# offset). NOT the same as solders' AddressLookupTableAccount.from_bytes,
+# which deserializes a different (key + addresses) struct solders itself
+# produces — not this raw on-chain format.
+ALT_META_SIZE = 56
 
 
 class LedgerError(RuntimeError):
@@ -59,7 +72,59 @@ def _encode_path(path_str: str) -> bytes:
     return out
 
 
-def _describe_transaction(tx: VersionedTransaction, message_bytes: bytes) -> str:
+def _fetch_lookup_table_addresses(rpc_url: str, table_key: str) -> list[str]:
+    """The full address list stored in on-chain address-lookup-table
+    `table_key`, fetched fresh via getAccountInfo (a table can be extended
+    after creation, so this is never cached). Raises LedgerError rather
+    than returning a partial/empty list on any failure — silently treating
+    an unresolved account as "missing" would make _describe_transaction's
+    safety review misleading rather than just incomplete."""
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [table_key, {"encoding": "base64"}],
+    }
+    try:
+        resp = requests.post(rpc_url, json=payload, timeout=15)
+        resp.raise_for_status()
+        value = resp.json()["result"]["value"]
+        if value is None:
+            raise LedgerError(f"Address lookup table {table_key} not found on-chain.")
+        raw = base64.b64decode(value["data"][0])
+    except LedgerError:
+        raise
+    except Exception as exc:
+        raise LedgerError(f"Could not fetch address lookup table {table_key}: {exc}") from exc
+
+    addr_bytes = raw[ALT_META_SIZE:]
+    return [base58.b58encode(addr_bytes[i : i + 32]).decode() for i in range(0, len(addr_bytes), 32)]
+
+
+def _resolve_account_keys(msg: Message | MessageV0, rpc_url: str) -> list[str]:
+    """Full account-key list for `msg`, in the exact order instruction
+    account indices reference. For a plain (legacy) Message this is just
+    the static account_keys. For a MessageV0 with address_table_lookups,
+    msg.account_keys alone only covers the STATIC accounts — any account
+    pulled in from a lookup table (common for Offerbook's own instructions)
+    lives past the end of that list, so indexing it directly raises
+    IndexError. The real combined order (per Solana's v0 message spec) is:
+    static keys, then every lookup's resolved WRITABLE addresses (in lookup
+    order), then every lookup's resolved READONLY addresses (in lookup
+    order)."""
+    static_keys = [str(k) for k in msg.account_keys]
+    lookups = getattr(msg, "address_table_lookups", None)
+    if not lookups:
+        return static_keys
+
+    tables = {str(lookup.account_key): _fetch_lookup_table_addresses(rpc_url, str(lookup.account_key)) for lookup in lookups}
+    writable, readonly = [], []
+    for lookup in lookups:
+        table = tables[str(lookup.account_key)]
+        writable.extend(table[i] for i in lookup.writable_indexes)
+        readonly.extend(table[i] for i in lookup.readonly_indexes)
+    return static_keys + writable + readonly
+
+
+def _describe_transaction(tx: VersionedTransaction, message_bytes: bytes, rpc_url: str) -> str:
     """
     Human-readable dump of a transaction's accounts and instructions, printed
     right before it's sent to the Ledger for approval. The Ledger's own screen
@@ -79,7 +144,8 @@ def _describe_transaction(tx: VersionedTransaction, message_bytes: bytes) -> str
     tampered/substituted transaction that this console output alone couldn't.
     """
     msg = tx.message
-    account_keys = [str(k) for k in msg.account_keys]
+    num_static = len(msg.account_keys)  # loaded (lookup-table) accounts can never be signers
+    account_keys = _resolve_account_keys(msg, rpc_url)
     message_hash = base58.b58encode(hashlib.sha256(message_bytes).digest()).decode()
 
     lines = []
@@ -93,7 +159,7 @@ def _describe_transaction(tx: VersionedTransaction, message_bytes: bytes) -> str
     lines.append("")
     lines.append(f"Accounts ({len(account_keys)}):")
     for i, key in enumerate(account_keys):
-        tag = " (signer)" if msg.is_signer(i) else ""
+        tag = " (signer)" if i < num_static and msg.is_signer(i) else ""
         lines.append(f"  [{i}] {key}{tag}")
     lines.append("")
     lines.append(f"Instructions ({len(msg.instructions)}):")
@@ -171,10 +237,15 @@ class LedgerSigner:
             raise LedgerError(self._friendly_error(exc)) from exc
         return bytes(result)
 
-    def sign_transaction(self, tx_b64: str, expected_signer: str | None = None) -> str:
+    def sign_transaction(self, tx_b64: str, expected_signer: str | None = None, rpc_url: str | None = None) -> str:
         """
         Sign a base64-encoded Solana transaction and return the signed,
         base64-encoded transaction (ready to broadcast).
+
+        `rpc_url` is only used to resolve address-lookup-table accounts for
+        the pre-approval console description below (not for anything
+        signing-related) — defaults to SOLANA_RPC/the public mainnet RPC,
+        same default every other module in this repo uses.
         """
         raw_tx = base64.b64decode(tx_b64)
         tx = VersionedTransaction.from_bytes(raw_tx)
@@ -192,7 +263,7 @@ class LedgerSigner:
         # transaction (which includes empty signature placeholder slots).
         message_bytes = bytes(tx.message)
 
-        print(_describe_transaction(tx, message_bytes))
+        print(_describe_transaction(tx, message_bytes, rpc_url or os.getenv("SOLANA_RPC", DEFAULT_RPC)))
 
         sig_bytes = self._sign_bytes(message_bytes)
 

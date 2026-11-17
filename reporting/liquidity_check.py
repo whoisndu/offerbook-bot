@@ -216,7 +216,7 @@ def fetch_loans_for_pair(principal_mint: str, collateral_mint: str) -> list[dict
     return loans
 
 
-def biggest_loans_ever(loans: list[dict], top_n: int = 10) -> list[dict]:
+def biggest_loans_ever(loans: list[dict], top_n: int = 20) -> list[dict]:
     """Top `top_n` loans by USD principal at origination, across all
     statuses — origination size/price is real market behavior regardless of
     whether the loan was later repaid or defaulted."""

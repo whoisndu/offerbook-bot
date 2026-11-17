@@ -178,6 +178,17 @@ Deliberately measured against **principal only**, not principal + interest. The 
 
 Scoped to your **lending** side only — `offerType="lending"` offers you created, and loans where you're the `lender`. A borrowing-side position has the opposite exposure (you'd be the one posting collateral) and isn't what this answers. Only USDC-principal positions are supported, matching every other script here. Output is sorted by smallest drop-% first (least cushion = most exposed). Read-only, no signing.
 
+## Open-offer projected earnings (`open_offer_earnings.py`)
+
+For your own OPEN lending offers (active/partiallyFilled) — what each one should earn if its still-unfilled portion gets fully matched by a borrower, and the total across your whole book. Only the REMAINING (not-yet-matched) principal is counted — a partiallyFilled offer's already-matched portion is already an active loan, tracked separately by `portfolio_health.py`'s accrued-interest/projected-weekly-earnings figures; counting it here too would double-count.
+
+```bash
+python reporting/open_offer_earnings.py
+python reporting/open_offer_earnings.py --wallets <addr1>,<addr2>
+```
+
+Per offer: `remainingPrincipal * APY * (duration / 1 year)` for gross interest (interest here is NOT prorated by elapsed time — a borrower owes the full term's interest regardless of when they repay), then net of the platform's flat 10% repay fee (`INTEREST_REPAY_FEE_RATE`, same constant/measurement as `portfolio_health.py`) for what you'd actually receive. A projection, not a guarantee or a timeline — it assumes a borrower takes the whole remaining size at today's posted APY/duration before expiry, which may never happen for a given offer. Only USDC-principal offers are supported, matching every other script here. Wallets come from `OFFERBOOK_PORTFOLIO_WALLETS` in `.env` (comma-separated, same var `breakeven_check.py`/`portfolio_health.py` read); override with `--wallets`. Read-only, no signing.
+
 ## Top defaulted collateral (`top_defaulted_collateral.py`)
 
 Platform-wide, all-time: which collateral tokens have the most USD value behind DEFAULTED loans — every lender, not just our own wallets. Ranked by **total USD lost at default-time mark-to-market** per collateral mint, not default count (a token defaulted on twice at $5,000 ranks above one defaulted on 50 times at $50 a pop — the question here is "where's the biggest dollar exposure", not "which collateral keeps failing"; see `pnl_leaderboard.py`/`seizure_outcome_scan.py` for more dollar-denominated views).

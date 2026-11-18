@@ -319,9 +319,11 @@ Offer listing expiry defaults to the **same length as the loan duration** (match
 
 Same Ledger account picker as `fill_offer.py`/`cancel_offers.py` (`44'/501'/0'` = general strategy, `44'/501'/1'` = targeted-offers, `44'/501'/2'` = third wallet account), prints a full preview (principal, collateral, LTV, APR, duration, estimated interest/repay-at-maturity) and warns if the principal exceeds your current wallet+escrow balance, before asking for confirmation and signing.
 
+Pass `--allow-extend` to seed any loan this offer fills as **extendable** (`CreatePrincipalOffer.allowExtend`, confirmed against the Transaction Builder API's live OpenAPI spec) — the borrower can then call `extend_loan` to roll the loan over in place at maturity instead of repaying it, same mechanism `portfolio_health.py`'s docstring describes for in-place rollovers. This only seeds the loan's *starting* `extendable` value (API default: off); once the loan exists, you (the lender) own that flag and can flip it either way at any time via the UI's "Renew offer" → "Allow extensions" toggle (`POST /set-loan-extendable`) regardless of what you picked here.
+
 ## Update offer terms (`update_offer_terms.py`)
 
-Console equivalent of the UI's "Update offer" action — change one of your own still-live lending offers' APR, principal, collateral/LTV, duration, expiry, or partial-fill settings without manually cancelling and recreating it yourself.
+Console equivalent of the UI's "Update offer" action — change one of your own still-live lending offers' APR, principal, collateral/LTV, duration, expiry, partial-fill settings, or extendability without manually cancelling and recreating it yourself.
 
 There's no dedicated "update" instruction on-chain. What the UI does under the hood (confirmed against the Transaction Builder API's own OpenAPI spec, and verified live) is pass `offerToCancel: <old offer pubkey>` to the same `POST /create-principal-offer` endpoint `create_manual_offer.py` uses — the builder bundles the old offer's cancellation and the new offer's creation into **one atomic transaction**, so either both happen or neither does. This script does exactly that.
 
@@ -331,12 +333,15 @@ Run with **no override flags at all** and you're asked interactively which terms
 
 That interactive menu also offers **"Cancel this offer"** as one of the options, for when you open this script meaning to update an offer and decide you'd rather just kill it — no need to switch to `cancel_offers.py` separately. Picking it (alone or alongside other picks — cancellation takes priority) skips straight to a cancel-only preview and uses the plain `POST /cancel-offer` endpoint (same one `cancel_offers.py` uses), not `offerToCancel`, since there's no replacement offer to bundle with it.
 
+`--allow-extend`/`--no-allow-extend` toggles whether a loan filled from the *replacement* offer starts extendable (see `create_manual_offer.py`'s same flag above) — defaults to preserving the current offer's own `allowExtend` (read fresh via `GET /offer/{pubkey}`, same as every other term here) when neither flag is passed. This only ever seeds a NEW loan's starting value — it can't retroactively flip an existing live loan already filled from the OLD offer; that's the UI's separate "Renew offer" → "Allow extensions" toggle (`POST /set-loan-extendable`), per-loan, not something this script touches.
+
 ```bash
 python strategy/update_offer_terms.py --offer <pubkey>                               # prompts for what to change
 python strategy/update_offer_terms.py --offer <pubkey> --apr 90                      # just reprice
 python strategy/update_offer_terms.py --offer <pubkey> --principal 5000              # LTV auto-preserved
 python strategy/update_offer_terms.py --offer <pubkey> --principal 5000 --ltv 30     # explicit new LTV
 python strategy/update_offer_terms.py --offer <pubkey> --duration 7 --apr 60
+python strategy/update_offer_terms.py --offer <pubkey> --allow-extend                # let loans from the new offer be rolled over
 python strategy/update_offer_terms.py          # prompts for the offer pubkey, then what to change
 DRY_RUN=true python strategy/update_offer_terms.py --offer <pubkey> --apr 90   # preview only
 ```

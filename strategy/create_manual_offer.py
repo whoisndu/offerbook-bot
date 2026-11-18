@@ -23,6 +23,17 @@ Offer listing expiry defaults to the SAME length as the loan duration
 optimized for being re-run daily, and this one is a single deliberate
 action. Override with --expiry-days if you want something else.
 
+You're also asked whether to allow extensions (omit --allow-extend to be
+prompted, same as every other required term above; pass it to turn this
+on without being asked) — whether any loan this offer fills seeds as
+extendable, letting the borrower call extend_loan to roll it over in
+place at maturity instead of having to repay and you having to post a
+fresh offer (see portfolio_health.py's docstring on in-place loan
+rollovers). This only sets the loan's STARTING extendable value (API
+default: not extendable); you can flip it on/off later for a live loan
+via the UI's "Renew offer" -> "Allow extensions" toggle (POST
+/set-loan-extendable) regardless of what you pick here.
+
 topup defaults to "none" (no escrow deposit at creation — posts instantly
 as underfunded), same as strategy.py/fixed_terms_offers.py/
 defaulter_capture.py now do, and for the same reason: a wallet almost
@@ -38,6 +49,7 @@ Usage:
   python create_manual_offer.py --collateral USELESS --principal 3985 --collateral-amount 114218.42 --apr 80 --duration 7
   python create_manual_offer.py   # prompts for every required value
   python create_manual_offer.py --collateral USELESS --principal 3985 --ltv 25 --apr 80 --duration 7 --ledger-path "44'/501'/1'"
+  python create_manual_offer.py --collateral USELESS --principal 3985 --ltv 25 --apr 80 --duration 7 --allow-extend
   DRY_RUN=true python create_manual_offer.py ...   # preview only, no submission
 """
 from __future__ import annotations
@@ -317,6 +329,14 @@ def prompt_int(label: str) -> int:
             print("  Enter a whole number.")
 
 
+def prompt_yes_no(label: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    raw = input(f"{label}? [{hint}] ").strip().lower()
+    if not raw:
+        return default
+    return raw in ("y", "yes")
+
+
 def prompt_ledger_path() -> str:
     print()
     print("Which account do you want to create this offer from?")
@@ -348,6 +368,11 @@ def main() -> None:
     parser.add_argument("--expiry-days", type=int, default=None, help="Offer listing expiry in days. Defaults to the same value as --duration.")
     parser.add_argument("--no-partial-fill", action="store_true", help="Require a single full fill instead of allowing partial fills.")
     parser.add_argument("--min-fill", type=float, default=MIN_FILL_USDC, help=f"Minimum USDC a partial fill must take (default ${MIN_FILL_USDC:.0f}).")
+    parser.add_argument("--allow-extend", action="store_true",
+                         help="Seed any loan filled from this offer as extendable (borrower can roll it over "
+                              "in place at maturity instead of repaying). Omit to be prompted; passing this flag "
+                              "skips that prompt and turns it on. Can still be flipped later on a live loan via "
+                              "the UI or POST /set-loan-extendable regardless of what's picked here.")
     parser.add_argument("--topup", default="none", choices=["minimum", "full", "none"],
                          help='Escrow funding mode at creation (default "none" — posts as underfunded/rehypothecated, '
                               'same default the other offer-creation scripts use; pass "minimum" to require real funding now).')
@@ -416,6 +441,10 @@ def main() -> None:
         sys.exit(1)
     expiry_days = args.expiry_days if args.expiry_days is not None else duration_days
 
+    allow_extend = args.allow_extend if "--allow-extend" in sys.argv else prompt_yes_no(
+        "Allow extensions (let the borrower roll this loan over at maturity instead of repaying)"
+    )
+
     principal_raw = round(principal_usdc * 10 ** USDC_DECIMALS)
     collateral_raw = round(collateral_amount_whole * 10 ** decimals)
     duration_secs = duration_days * 86400
@@ -458,6 +487,7 @@ def main() -> None:
     log.info("  Repay at maturity (est.) : ~%.2f USDC", principal_usdc + interest_usdc)
     log.info("  Partial fill   : %s%s", "allowed" if allow_partial_fill else "not allowed",
               f", min ${min_fill_raw / 1e6:,.2f}" if allow_partial_fill else "")
+    log.info("  Allow extend   : %s", "yes — loan starts extendable" if allow_extend else "no")
     log.info("  Topup mode     : %s", args.topup)
     log.info("=" * 60)
 
@@ -478,6 +508,7 @@ def main() -> None:
         "expiry": expiry_secs,
         "allowPartialFill": allow_partial_fill,
         "minFillAmount": min_fill_raw,
+        "allowExtend": allow_extend,
         "topup": args.topup,
     }
 

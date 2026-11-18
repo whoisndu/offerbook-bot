@@ -2,9 +2,9 @@
 Offerbook Update Offer Terms
 ================================
 Lets you change the terms of one of your own still-live lending offers
-(APR, principal, collateral/LTV, duration, expiry, partial-fill settings)
-from the terminal — the console equivalent of the UI's "Update offer"
-action.
+(APR, principal, collateral/LTV, duration, expiry, partial-fill settings,
+whether a loan it fills starts extendable) from the terminal — the console
+equivalent of the UI's "Update offer" action.
 
 There's no dedicated "update" instruction on-chain. What the UI almost
 certainly does under the hood (confirmed against the Transaction Builder
@@ -43,6 +43,18 @@ creator (wrong account selected), and if the offer is no longer live
 (already filled/cancelled/expired — nothing to update). Only USDC-
 principal offers are supported, matching every other script here.
 
+--allow-extend/--no-allow-extend toggles whether a loan filled from the
+REPLACEMENT offer starts extendable — i.e. whether the borrower can call
+extend_loan to roll it over in place at maturity instead of repaying (see
+create_manual_offer.py's docstring, and portfolio_health.py's on in-place
+loan rollovers). Defaults to preserving the current offer's own
+`allowExtend` (read fresh via GET /offer/{pubkey}, same as every other
+field here) when neither flag is passed. Note this only ever seeds a NEW
+loan's starting value — it can't retroactively change an existing live
+loan already filled from the OLD offer; that's done separately per-loan
+via the UI's "Renew offer" -> "Allow extensions" toggle (POST
+/set-loan-extendable), not by this script.
+
 topup defaults to "none", same as every other offer-creation script in
 this repo (see strategy/README.md's "Offer funding: topup modes") — pass
 --topup minimum if you want the new offer guaranteed-funded immediately.
@@ -53,6 +65,8 @@ Usage:
   python update_offer_terms.py --offer <pubkey> --principal 5000              # LTV auto-preserved
   python update_offer_terms.py --offer <pubkey> --principal 5000 --ltv 30     # explicit new LTV
   python update_offer_terms.py --offer <pubkey> --duration 7 --apr 60
+  python update_offer_terms.py --offer <pubkey> --allow-extend         # let loans from the new offer be rolled over
+  python update_offer_terms.py --offer <pubkey> --no-allow-extend      # turn that back off
   python update_offer_terms.py   # prompts for the offer pubkey, shows current terms, asks what to change
   DRY_RUN=true python update_offer_terms.py --offer <pubkey> --apr 90   # preview only, no submission
 """
@@ -372,6 +386,7 @@ def prompt_what_to_change(current: dict) -> dict:
     print(f"  [5]  Expiry                   — defaults to the (possibly new) duration unless changed here")
     print(f"  [6]  Partial fill / min fill  — {'allowed' if current['allow_partial_fill'] else 'not allowed'}, min ${current['min_fill_usd']:,.2f}")
     print(f"  [7]  Cancel this offer        — no replacement, just cancel it outright")
+    print(f"  [8]  Allow extensions         — {'yes' if current['allow_extend'] else 'no'} (loans filled from the replacement offer start extendable)")
     print()
     raw = input("Enter numbers to change, comma-separated (e.g. 1,3), or press Enter to abort without changes: ").strip()
     if not raw:
@@ -414,6 +429,9 @@ def prompt_what_to_change(current: dict) -> dict:
         overrides["allow_partial_fill"] = pf_choice in ("y", "yes")
         if overrides["allow_partial_fill"]:
             overrides["min_fill"] = prompt_float("  Minimum USDC a partial fill must take")
+    if "8" in picks:
+        ae_choice = input(f"  Allow extensions? Currently {'yes' if current['allow_extend'] else 'no'} [y/N]: ").strip().lower()
+        overrides["allow_extend"] = ae_choice in ("y", "yes")
     return overrides
 
 
@@ -504,6 +522,11 @@ def main() -> None:
     partial.add_argument("--allow-partial-fill", action="store_true", help="Force partial fill on, regardless of the current setting.")
     partial.add_argument("--no-partial-fill", action="store_true", help="Force partial fill off, regardless of the current setting.")
     parser.add_argument("--min-fill", type=float, default=None, help="New minimum USDC a partial fill must take. Default: keep current.")
+    extend = parser.add_mutually_exclusive_group()
+    extend.add_argument("--allow-extend", action="store_true",
+                         help="Seed loans filled from the replacement offer as extendable. Default: keep current offer's setting.")
+    extend.add_argument("--no-allow-extend", action="store_true",
+                         help="Seed loans filled from the replacement offer as NOT extendable. Default: keep current offer's setting.")
     parser.add_argument("--topup", default="none", choices=["minimum", "full", "none"],
                          help='Escrow funding mode for the replacement offer (default "none" — see '
                               'strategy/README.md\'s "Offer funding: topup modes").')
@@ -539,6 +562,7 @@ def main() -> None:
     current_duration_secs = offer.get("duration", 0)
     current_allow_partial_fill = offer.get("allowPartialFill", True)
     current_min_fill_raw = offer.get("minFillAmount", 0)
+    current_allow_extend = offer.get("allowExtend", False)
 
     price, decimals = fetch_current_price(collateral_mint)
     if decimals is None:
@@ -562,11 +586,12 @@ def main() -> None:
     expiry_override = args.expiry_days
     allow_partial_fill_override = True if args.allow_partial_fill else (False if args.no_partial_fill else None)
     min_fill_override = args.min_fill
+    allow_extend_override = True if args.allow_extend else (False if args.no_allow_extend else None)
 
     any_cli_override = any(v is not None for v in (
         principal_override, ltv_override, collateral_amount_override, apr_override,
         duration_override, expiry_override, min_fill_override,
-    )) or allow_partial_fill_override is not None
+    )) or allow_partial_fill_override is not None or allow_extend_override is not None
 
     current = {
         "principal_usd": current_principal_usd,
@@ -577,6 +602,7 @@ def main() -> None:
         "duration_days": current_duration_secs / 86400,
         "allow_partial_fill": current_allow_partial_fill,
         "min_fill_usd": current_min_fill_raw / 10 ** USDC_DECIMALS,
+        "allow_extend": current_allow_extend,
     }
 
     if not any_cli_override:
@@ -596,6 +622,8 @@ def main() -> None:
         if "allow_partial_fill" in overrides:
             allow_partial_fill_override = overrides["allow_partial_fill"]
         min_fill_override = overrides.get("min_fill")
+        if "allow_extend" in overrides:
+            allow_extend_override = overrides["allow_extend"]
 
     # --- Resolve new terms: explicit override, else keep current ---
     new_principal_usd = principal_override if principal_override is not None else current_principal_usd
@@ -627,6 +655,7 @@ def main() -> None:
     new_allow_partial_fill = allow_partial_fill_override if allow_partial_fill_override is not None else current_allow_partial_fill
 
     new_min_fill_usd = min_fill_override if min_fill_override is not None else current_min_fill_raw / 10 ** USDC_DECIMALS
+    new_allow_extend = allow_extend_override if allow_extend_override is not None else current_allow_extend
 
     principal_raw = round(new_principal_usd * 10 ** USDC_DECIMALS)
     collateral_raw = round(new_collateral_whole * 10 ** decimals)
@@ -680,6 +709,7 @@ def main() -> None:
         f"{'allowed' if current_allow_partial_fill else 'not allowed'}, min ${current_min_fill_raw / 1e6:,.2f}",
         f"{'allowed' if new_allow_partial_fill else 'not allowed'}, min ${min_fill_raw / 1e6:,.2f}",
     ))
+    log.info(col.format("Allow extend", "yes" if current_allow_extend else "no", "yes" if new_allow_extend else "no"))
     log.info(col.format("Topup mode", "—", args.topup))
     log.info("=" * 78)
     log.info("This builds ONE transaction: cancels %s and creates its replacement atomically.", offer_pubkey)
@@ -701,6 +731,7 @@ def main() -> None:
         "expiry": expiry_secs,
         "allowPartialFill": new_allow_partial_fill,
         "minFillAmount": min_fill_raw,
+        "allowExtend": new_allow_extend,
         "topup": args.topup,
         "offerToCancel": offer_pubkey,
     }

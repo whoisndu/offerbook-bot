@@ -49,6 +49,17 @@ SW_BLIND_SIGN_REQUIRED = 0x6808
 DEFAULT_PATH = "44'/501'/0'"
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 
+MESSAGE_VERSION_PREFIX = 0x80  # wire-format tag byte for a versioned (v0) message —
+                                  # a legacy Message has no such byte at all. solders'
+                                  # MessageV0.__bytes__() returns the message body WITHOUT
+                                  # this prefix, but it's exactly what actually gets
+                                  # Ed25519-signed/verified on-chain: confirmed against a
+                                  # live escrow-deposit transaction (uses an address lookup
+                                  # table, hence MessageV0), where the real signed byte range
+                                  # sliced straight out of the raw tx is bytes(msg) with
+                                  # 0x80 prepended, one byte longer. Omitting it produces a
+                                  # signature the chain's own verification rejects.
+
 # On-chain layout of an Address Lookup Table account (Address Lookup Table
 # Program): a 56-byte fixed-size LookupTableMeta header, followed by the
 # table's addresses as a flat array of 32-byte pubkeys. Confirmed against
@@ -260,8 +271,11 @@ class LedgerSigner:
             signer_index = 0
 
         # Hardware wallets sign only the message bytes, not the full wire-format
-        # transaction (which includes empty signature placeholder slots).
-        message_bytes = bytes(tx.message)
+        # transaction (which includes empty signature placeholder slots) — and,
+        # for a MessageV0, that means the version-prefix byte too (see
+        # MESSAGE_VERSION_PREFIX above), not just bytes(tx.message) on its own.
+        message_body = bytes(tx.message)
+        message_bytes = bytes([MESSAGE_VERSION_PREFIX]) + message_body if isinstance(tx.message, MessageV0) else message_body
 
         print(_describe_transaction(tx, message_bytes, rpc_url or os.getenv("SOLANA_RPC", DEFAULT_RPC)))
 

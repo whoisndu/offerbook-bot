@@ -153,26 +153,38 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
 
 
+FRED_RAW_FETCH_LIMIT = 6  # see docstring below — padding against null placeholder rows
+
+
 def fetch_latest_two(series_id: str, units: str) -> list[dict]:
-    """[latest, previous] observations (newest first) for `series_id`,
-    already transformed by FRED itself (units=pc1/pch/pca/chg/lin — see
-    TRACKED_METRICS) so this script never reimplements YoY/MoM/annualized
-    math by hand. Fetches both the latest AND prior point in one call so
-    the prior-value comparison doesn't depend on local state having seen
-    it before (works correctly on a cold/empty state file too). Returns []
-    on any fetch failure or if FRED hasn't got 2 valid points yet."""
+    """Up to [latest, previous] valid observations (newest first) for
+    `series_id`, already transformed by FRED itself (units=pc1/pch/pca/
+    chg/lin — see TRACKED_METRICS) so this script never reimplements YoY/
+    MoM/annualized math by hand. Fetches both the latest AND prior point
+    in one call so the prior-value comparison doesn't depend on local
+    state having seen it before (works correctly on a cold/empty state
+    file too). Returns [] on any fetch failure or if FRED hasn't got 2
+    valid points at all yet.
+
+    Requests FRED_RAW_FETCH_LIMIT (6) raw rows, not just 2, before
+    filtering out nulls — confirmed live that FRED can carry a dated
+    placeholder row with value "." for a period whose data hasn't
+    actually been released yet (e.g. CPILFESL/CPIAUCSL showed an empty
+    "2026-10-01" row alongside September's real one), which would
+    otherwise leave fewer than 2 valid points after filtering even though
+    plenty of real history exists just one row further back."""
     try:
         resp = SESSION.get(
             f"{FRED_API_BASE}/series/observations",
             params={
                 "series_id": series_id, "api_key": FRED_API_KEY, "file_type": "json",
-                "units": units, "sort_order": "desc", "limit": 2,
+                "units": units, "sort_order": "desc", "limit": FRED_RAW_FETCH_LIMIT,
             },
             timeout=20,
         )
         resp.raise_for_status()
         obs = resp.json().get("observations", [])
-        return [o for o in obs if o.get("value") not in (None, ".")]
+        return [o for o in obs if o.get("value") not in (None, ".")][:2]
     except Exception as exc:
         log.warning("FRED fetch failed for %s: %s", series_id, exc)
         return []

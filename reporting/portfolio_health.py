@@ -323,6 +323,54 @@ def fetch_escrow_summary(wallet: str) -> dict | None:
         return None
 
 
+def fetch_user_yield_enabled(wallet: str) -> bool | None:
+    """Whether this wallet has opted into Offerbook's JupLend escrow-yield
+    feature (User.yieldEnabled — GET /user/{address}; toggled via POST
+    /escrow-yield/enable|disable, not something this read-only script ever
+    calls). Once on, idle escrow is swept into JupLend automatically and
+    swept back automatically whenever a fill/withdrawal needs the cash —
+    opt-in is per-wallet, not a platform default, so this is checked fresh
+    per wallet rather than assumed. Returns None (not False) on a fetch
+    failure, so a transient error can't be mistaken for "not enabled"."""
+    try:
+        resp = SESSION.get(f"{API_BASE}/user/{wallet}", timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("yieldEnabled")
+    except Exception as exc:
+        log.warning("Couldn't fetch yield-enabled status for %s: %s", wallet, exc)
+        return None
+
+
+def fetch_yield_markets() -> list[dict]:
+    """Platform-wide (not per-wallet) live JupLend rates Offerbook's escrow
+    yield can currently earn — GET /yield/markets. Each entry's
+    totalRateBps is supply + rewards APY for that market's underlying
+    (USDC, USDT once it exists); same for every wallet, so fetched once per
+    run rather than per wallet."""
+    try:
+        resp = SESSION.get(f"{API_BASE}/yield/markets", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        log.warning("Couldn't fetch JupLend yield markets: %s", exc)
+        return []
+
+
+def _yield_apy_bps_for_mint(yield_markets: list[dict], mint: str) -> float | None:
+    return next((m["totalRateBps"] for m in yield_markets if m.get("mint") == mint), None)
+
+
+def fetch_escrow_transactions(wallet: str) -> list[dict]:
+    """Every capital-movement row for this wallet's escrow, any kind —
+    GET /users/{address}/escrow-transactions. Used here for the
+    "yieldDeposited"/"yieldWithdrawn" rows specifically (see
+    compute_yield_earned); the bulk of this list is the userFunded/
+    userWithdrawn/loan-related rows fetch_escrow_summary() already
+    aggregates platform-side, re-fetched per-row here only because that's
+    the one place the actual JupLend sweep events live."""
+    return _fetch_all_pages(f"/users/{wallet}/escrow-transactions")
+
+
 def fetch_mint_decimals_onchain(mint: str) -> int | None:
     """Last-resort decimals lookup straight from the mint account, for a
     token neither Jupiter's price response nor KNOWN_DECIMALS covers —
@@ -511,6 +559,88 @@ def compute_realized_pnl(
         "default_rate": default_rate,
         "extension_count": len(extension_events),
         "extension_interest_usd": extension_interest_usd,
+    }
+
+
+def compute_yield_earned(escrow_txs: list[dict], usdc_apy_bps: float | None, now: datetime, since: datetime | None = None) -> dict:
+    """Estimated USD earned from Offerbook's JupLend escrow-yield opt-in
+    (see fetch_user_yield_enabled / POST /escrow-yield/enable) — a
+    SEPARATE income stream from lending PNL above: interest on idle
+    escrow cash sitting in JupLend between fills, not interest from an
+    active loan.
+
+    NOT computed as Σwithdrawn − Σdeposited (that was tried first and is
+    wrong): idle escrow is swept into JupLend continuously as a side
+    effect of NORMAL operation ("yieldDeposited") and swept straight back
+    out the moment ANY fill/offer/withdrawal needs the cash
+    ("yieldWithdrawn") — this isn't one deposit-then-withdraw cycle, it's
+    dozens of overlapping ones. That delta is dominated by PRINCIPAL
+    moving back and forth (thousands of dollars), not yield (actually
+    tens of dollars at these APYs/durations), and swings wildly positive
+    or negative purely depending on whether more happens to be parked
+    than withdrawn at the moment you happen to look — not a meaningful
+    profit figure at all.
+
+    Instead: replay every yieldDeposited/yieldWithdrawn row in
+    chronological order to reconstruct the actual JupLend-parked balance
+    over time (+amountUsd on deposit into JupLend, -amountUsd on
+    withdrawal back to escrow), then integrate balance x elapsed-time x
+    APY across every interval the position was actually sitting parked —
+    real interest, not principal float. Uses TODAY's live APY
+    (usdc_apy_bps, from GET /yield/markets) applied across the whole
+    history, since JupLend rates float with utilisation and historical
+    rate snapshots aren't in this log — an ESTIMATE, not an exact
+    reconciliation, but not swamped by principal churn the way the naive
+    delta was.
+
+    If `since` is given, only the portion of each parked interval on/after
+    that time is counted — same trailing-window convention
+    compute_realized_pnl's `since` uses — but the running balance itself
+    is still reconstructed from the FULL history (a window can't tell how
+    much was parked at its own start otherwise)."""
+    if usdc_apy_bps is None:
+        return {"estimated_earned_usd": None, "currently_parked_usd": 0.0, "sweep_count": 0}
+
+    events = []
+    for t in escrow_txs:
+        kind = t.get("kind")
+        if kind not in ("yieldDeposited", "yieldWithdrawn"):
+            continue
+        at = t.get("at")
+        try:
+            ts = datetime.fromisoformat(at.replace("Z", "+00:00")) if at else None
+        except ValueError:
+            ts = None
+        if ts is None:
+            continue
+        delta = (t.get("amountUsd") or 0.0) * (1 if kind == "yieldDeposited" else -1)
+        events.append((ts, delta))
+    events.sort(key=lambda e: e[0])
+
+    apy = usdc_apy_bps / 10000
+    year_secs = 365 * 86400
+    balance = 0.0
+    earned = 0.0
+    sweep_count = 0
+    prev_ts = None
+    for ts, delta in events:
+        if prev_ts is not None and balance > 0:
+            interval_start = max(prev_ts, since) if since else prev_ts
+            if ts > interval_start:
+                earned += balance * apy * (ts - interval_start).total_seconds() / year_secs
+        if since is None or ts >= since:
+            sweep_count += 1
+        balance += delta
+        prev_ts = ts
+    if prev_ts is not None and balance > 0:
+        interval_start = max(prev_ts, since) if since else prev_ts
+        if now > interval_start:
+            earned += balance * apy * (now - interval_start).total_seconds() / year_secs
+
+    return {
+        "estimated_earned_usd": earned,
+        "currently_parked_usd": max(0.0, balance),
+        "sweep_count": sweep_count,
     }
 
 
@@ -1023,6 +1153,8 @@ def print_wallet_report(
     active_rows: list[dict], pnl: dict, risk_ltv: float, underwater_ltv: float, expiry_hours: float,
     volume_week_usd: float, volume_all_time_usd: float,
     pnl_24h: dict, pnl_7d: dict, pnl_14d: dict, pnl_ytd: dict,
+    yield_enabled: bool | None, yield_markets: list[dict],
+    yield_all: dict, yield_24h: dict, yield_7d: dict, yield_14d: dict, yield_ytd: dict,
 ) -> None:
     log.info("")
     log.info("=" * 100)
@@ -1119,6 +1251,35 @@ def print_wallet_report(
         f"{pnl_ytd['net_pnl_usd']:,.2f}", pnl_ytd["repaid_count"] + pnl_ytd["defaulted_count"], pnl_ytd["extension_count"],
     )
 
+    log.info("")
+    if yield_enabled is None:
+        log.info("JupLend escrow yield: status unknown (couldn't fetch GET /user/%s).", wallet)
+    elif not yield_enabled:
+        log.info("JupLend escrow yield: NOT enabled for this wallet — idle escrow earns nothing. Enable via POST /escrow-yield/enable.")
+    else:
+        rates = ", ".join(
+            f"{symbol_for(m['mint'])} {m['totalRateBps'] / 100:.2f}%" for m in yield_markets
+        ) or "n/a"
+        log.info("JupLend escrow yield: enabled  (live rates — %s)", rates)
+        if yield_all["estimated_earned_usd"] is None:
+            log.info("  Estimated interest earned: n/a (no USDC yield-market rate available)")
+        else:
+            log.info(
+                "  Estimated interest earned (time-weighted parked balance x today's APY) — "
+                "last 24h: $%s (%d sweeps)   last 7d: $%s (%d sweeps)   "
+                "last 14d: $%s (%d sweeps)   YTD: $%s (%d sweeps)   all-time: $%s (%d sweeps)",
+                f"{yield_24h['estimated_earned_usd']:,.2f}", yield_24h["sweep_count"],
+                f"{yield_7d['estimated_earned_usd']:,.2f}", yield_7d["sweep_count"],
+                f"{yield_14d['estimated_earned_usd']:,.2f}", yield_14d["sweep_count"],
+                f"{yield_ytd['estimated_earned_usd']:,.2f}", yield_ytd["sweep_count"],
+                f"{yield_all['estimated_earned_usd']:,.2f}", yield_all["sweep_count"],
+            )
+        if yield_all["currently_parked_usd"] > 0.01:
+            log.info(
+                "  Currently parked in JupLend right now: $%s",
+                f"{yield_all['currently_parked_usd']:,.2f}",
+            )
+
 
 def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info("")
@@ -1185,6 +1346,28 @@ def print_portfolio_summary(per_wallet: list[dict]) -> None:
     log.info(
         "TOTAL realized earnings — last 24h: $%s   last 7d: $%s   last 14d: $%s   YTD: $%s",
         f"{total_pnl_24h:,.2f}", f"{total_pnl_7d:,.2f}", f"{total_pnl_14d:,.2f}", f"{total_pnl_ytd:,.2f}",
+    )
+
+    yield_enabled_wallets = [w["wallet"] for w in per_wallet if w.get("yield_enabled")]
+    yield_disabled_wallets = [w["wallet"] for w in per_wallet if w.get("yield_enabled") is False]
+    total_yield_all = sum(w["yield_all"]["estimated_earned_usd"] or 0.0 for w in per_wallet if w.get("yield_enabled"))
+    total_yield_ytd = sum(w["yield_ytd"]["estimated_earned_usd"] or 0.0 for w in per_wallet if w.get("yield_enabled"))
+    total_yield_parked = sum(w["yield_all"]["currently_parked_usd"] for w in per_wallet if w.get("yield_enabled"))
+    if yield_enabled_wallets:
+        log.info(
+            "TOTAL JupLend yield earned (estimated) — all-time: $%s   YTD: $%s   (%d/%d wallet(s) opted in)",
+            f"{total_yield_all:,.2f}", f"{total_yield_ytd:,.2f}", len(yield_enabled_wallets), len(per_wallet),
+        )
+        if total_yield_parked > 0.01:
+            log.info("  Currently parked in JupLend across those wallets: $%s", f"{total_yield_parked:,.2f}")
+    if yield_disabled_wallets:
+        log.info(
+            "  %d wallet(s) have JupLend yield OFF — idle escrow there earns nothing: %s",
+            len(yield_disabled_wallets), ", ".join(yield_disabled_wallets),
+        )
+    log.info(
+        "ALL-IN REALIZED INCOME (lending PNL + estimated JupLend yield), all-time: $%s",
+        f"{total_net_pnl + total_yield_all:,.2f}",
     )
     log.info("=" * 100)
 
@@ -1294,6 +1477,8 @@ def main() -> None:
     repaid = _fetch_all_pages("/loans/status/repaid")
     log.info("  → active=%d  defaulted=%d  repaid=%d (platform-wide)", len(active), len(defaulted), len(repaid))
 
+    yield_markets = fetch_yield_markets()
+
     wallet_set = set(wallets)
     my_active = [l for l in active if l.get("lender") in wallet_set]
     collateral_mints = {
@@ -1385,12 +1570,22 @@ def main() -> None:
         volume_week_usd = compute_volume(all_loans, wallet, volume_since)
         volume_all_time_usd = compute_volume(all_loans, wallet, None)
 
+        yield_enabled = fetch_user_yield_enabled(wallet)
+        escrow_txs = fetch_escrow_transactions(wallet) if yield_enabled else []
+        usdc_apy_bps = _yield_apy_bps_for_mint(yield_markets, USDC_MINT)
+        yield_all = compute_yield_earned(escrow_txs, usdc_apy_bps, now)
+        yield_24h = compute_yield_earned(escrow_txs, usdc_apy_bps, now, since=now - timedelta(hours=24))
+        yield_7d = compute_yield_earned(escrow_txs, usdc_apy_bps, now, since=now - timedelta(days=7))
+        yield_14d = compute_yield_earned(escrow_txs, usdc_apy_bps, now, since=now - timedelta(days=14))
+        yield_ytd = compute_yield_earned(escrow_txs, usdc_apy_bps, now, since=since_ytd)
+
         print_wallet_report(
             wallet, sol_balance, sol_escrow, usdc_wallet, usdc_escrow, other_holdings, idle_balance_usd,
             active_rows, pnl,
             args.risk_ltv, args.underwater_ltv, args.expiry_hours,
             volume_week_usd, volume_all_time_usd,
             pnl_24h, pnl_7d, pnl_14d, pnl_ytd,
+            yield_enabled, yield_markets, yield_all, yield_24h, yield_7d, yield_14d, yield_ytd,
         )
 
         escrow_summary = fetch_escrow_summary(wallet)
@@ -1411,6 +1606,7 @@ def main() -> None:
             "pnl_24h": pnl_24h, "pnl_7d": pnl_7d, "pnl_14d": pnl_14d, "pnl_ytd": pnl_ytd,
             "capital_base_usd": capital_base_usd, "has_baseline": has_baseline,
             "unpriced_movement_count": unpriced_movement_count,
+            "yield_enabled": yield_enabled, "yield_all": yield_all, "yield_ytd": yield_ytd,
         })
 
     if capital_baseline_advanced:

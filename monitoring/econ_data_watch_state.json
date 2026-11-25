@@ -1,0 +1,37 @@
+{
+  "series": {
+    "PCEPILFE": {
+      "last_date": "2026-10-01",
+      "last_value": 3.26112
+    },
+    "PCEPI": {
+      "last_date": "2026-10-01",
+      "last_value": 3.84459
+    },
+    "PAYEMS": {
+      "last_date": "2026-10-01",
+      "last_value": 165.0
+    },
+    "UNRATE": {
+      "last_date": "2026-10-01",
+      "last_value": 4.1
+    },
+    "GDPC1": {
+      "last_date": "2026-07-01",
+      "last_value": 3.36962
+    },
+    "PPIACO": {
+      "last_date": "2026-10-01",
+      "last_value": 12.79016
+    },
+    "RSAFS": {
+      "last_date": "2026-10-01",
+      "last_value": 0.21202
+    },
+    "DFEDTARU": {
+      "last_date": "2026-11-25",
+      "last_value": 4.0
+    }
+  },
+  "last_digest_date": "2026-11-25"
+}

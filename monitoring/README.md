@@ -98,6 +98,22 @@ python monitoring/borrow_offer_watch.py --no-email              # console output
 
 Required env vars for email (GitHub Actions secrets, shared with `loan_watch_notify.py`): `SMTP_FROM_EMAIL`, `SMTP_APP_PASSWORD`, `NOTIFY_EMAIL_TO`. `OFFERBOOK_WALLET` is used to exclude our own borrow requests, if any — a warning is logged (not skipped) if unset, same as the other scan scripts.
 
+## US economic data watch (`econ_data_watch.py`)
+
+Not Offerbook-specific — macro context for lending decisions. Two things in one script: emails an INSTANT alert the moment any tracked US economic release prints a new reading (PCE/Core PCE, CPI/Core CPI, nonfarm payrolls, unemployment rate, real GDP growth, PPI, retail sales, the Fed funds rate target), with the new value, the prior value, and a short directional read on what it might mean; and, once per UTC calendar day, a DIGEST email of every tracked metric's latest known reading regardless of whether anything updated that day.
+
+Data comes from the St. Louis Fed's FRED API — free, official, no scraping, no separate release-calendar to drift out of sync: each run just asks FRED for each series' latest two observations and compares the latest's date (or, for the Fed funds rate specifically, its *value* — it republishes the same unchanged rate every business day between FOMC meetings, so a new date alone isn't news there) against what was seen last run. US-only: most non-US releases (ECB, China PMI, etc.) aren't on FRED. ISM Manufacturing/Services PMI isn't covered either — ISM licenses that data and FRED doesn't carry it.
+
+```bash
+python monitoring/econ_data_watch.py                  # normal run — alert on new prints, digest once/day
+python monitoring/econ_data_watch.py --force-digest   # also send the daily digest even if already sent today
+python monitoring/econ_data_watch.py --no-email       # console output only, skip email + state
+```
+
+Runs every 15 minutes via `.github/workflows/econ_data_watch.yml` (same cadence as `borrow_offer_watch.py`) — "instant" is bounded by that interval plus FRED's own latency mirroring BEA/BLS releases (typically minutes), not true real-time. State (`econ_data_watch_state.json`, committed back to the repo — public macro data, no privacy concern) tracks each series' last-seen date/value (to detect a fresh print) and the last UTC date a digest was sent (to send that at most once/day regardless of how often the 15-minute schedule fires).
+
+Required env vars (GitHub Actions secrets): `FRED_API_KEY` (free — sign up at https://fred.stlouisfed.org/docs/api/api_key.html), plus the same `SMTP_FROM_EMAIL`/`SMTP_APP_PASSWORD`/`NOTIFY_EMAIL_TO` every other email-sending script here already uses.
+
 ## Wallet transaction watch (`wallet_tx_watch.py`)
 
 Polls a watchlist of arbitrary Solana addresses via `.github/workflows/wallet_watch.yml` (every ~15 min) and sends a Telegram alert on **any** new transaction for a watched wallet — not just token transfers, unlike `tg_deposit_watch.py` below, and unattended, unlike it too.

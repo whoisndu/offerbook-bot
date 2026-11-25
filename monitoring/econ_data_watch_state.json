@@ -18,7 +18,7 @@
     },
     "GDPC1": {
       "last_date": "2026-07-01",
-      "last_value": 3.36962
+      "last_value": 4.28193
     },
     "PPIACO": {
       "last_date": "2026-10-01",
@@ -31,6 +31,14 @@
     "DFEDTARU": {
       "last_date": "2026-11-25",
       "last_value": 4.0
+    },
+    "CPILFESL": {
+      "last_date": "2026-09-01",
+      "last_value": 2.56584
+    },
+    "CPIAUCSL": {
+      "last_date": "2026-09-01",
+      "last_value": 3.71725
     }
   },
   "last_digest_date": "2026-11-25"

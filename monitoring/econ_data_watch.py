@@ -235,15 +235,22 @@ def fmt_value(metric: dict, value: float) -> str:
     return f"{value:+,.1f}" if signed else f"{value:,.1f}"
 
 
-def check_metric(metric: dict, state: dict) -> dict | None:
-    """Fetches `metric`'s latest two observations and, if its trigger
-    condition fires (see TRACKED_METRICS docstring), returns an alert dict
-    and updates `state["series"][series_id]` in place. Returns None (no
-    alert) otherwise — including on a fetch failure or a cold-start first
-    run, where there's nothing to compare against yet."""
+def check_metric(metric: dict, obs: list[dict], state: dict) -> dict | None:
+    """Given `metric`'s already-fetched latest-two observations (see
+    main() — fetched ONCE per metric and shared with the digest/display
+    path, not re-fetched here; an earlier version called
+    fetch_latest_two() a second time inside this function, which silently
+    dropped a series from state entirely whenever that second, redundant
+    call happened to fail transiently while the first succeeded), checks
+    whether its trigger condition fires (see TRACKED_METRICS docstring)
+    and, if so, returns an alert dict and updates
+    `state["series"][series_id]` in place. Returns None (no alert)
+    otherwise — including when `obs` is incomplete (fetch failure
+    upstream) or on a cold-start first run, where there's nothing to
+    compare against yet."""
     series_id = metric["series_id"]
-    obs = fetch_latest_two(series_id, metric["units"])
     if len(obs) < 2:
+        log.warning("  %s: incomplete FRED data this run — not updating state for it.", series_id)
         return None
     latest, prev = obs[0], obs[1]
     latest_date, latest_value = latest["date"], float(latest["value"])
@@ -308,7 +315,7 @@ def main() -> None:
         log.info("Checking %s …", metric["label"])
         obs = fetch_latest_two(metric["series_id"], metric["units"])
         all_latest.append((metric, obs[0] if obs else None))
-        alert = check_metric(metric, state)
+        alert = check_metric(metric, obs, state)
         if alert:
             alerts.append(alert)
             log.info("  -> NEW: %s", format_alert(alert).splitlines()[0])

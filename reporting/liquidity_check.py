@@ -30,7 +30,9 @@ It also answers a different question — not "how much liquidity is
 available" but "what do borrowers on this pair actually take, and at what
 price" — from that pair's full loan history (active + repaid + defaulted,
 platform-wide, any lender):
-  - Biggest loans EVER taken against this collateral (top 10).
+  - Biggest loans EVER taken against this collateral (top 10), and —
+    standalone, not mixed in — the biggest loans EVER that DEFAULTED, so
+    the worst outcomes aren't buried among same-size repaid loans.
   - The single biggest calendar day EVER, by total USD originated.
   - Size vs. APY over a recent window (quartiles by loan size, --days-back):
     are the biggest loans paying MORE than the smallest ones right now (a
@@ -230,6 +232,50 @@ def biggest_loans_ever(loans: list[dict], top_n: int = 20) -> list[dict]:
             "apy_bps": l.get("apy", 0),
             "duration_days": (l.get("duration") or 0) / 86400,
             "status": l.get("_status", ""),
+        })
+    rows.sort(key=lambda r: -r["principal_usd"])
+    return rows[:top_n]
+
+
+def biggest_defaulted_loans(loans: list[dict], top_n: int = 20) -> list[dict]:
+    """Same shape as biggest_loans_ever(), filtered to status="defaulted"
+    only — a standalone view of the worst outcomes on this pair, since
+    mixing them into the all-status "biggest loans ever" table buries them
+    among repaid loans of similar size. Also carries delta_usd: collateral
+    kept (valued AT DEFAULT TIME, i.e. metadata.endCollateralAmountUsd —
+    falling back to startCollateralAmountUsd if that's missing, same
+    convention portfolio_health.py's compute_realized_pnl uses) minus the
+    principal lost. Negative means the seized collateral was worth less
+    than what was lent (a real loss); positive means collateral had
+    actually risen enough by default time to more than cover it (a "loss"
+    in name only — collateral kept was worth more than the principal).
+
+    Also carries origination_ltv (startPrincipalAmountUsd /
+    startCollateralAmountUsd — the LTV the loan actually started at, None
+    if either side's missing), lender, and rollover_count (length of
+    metadata.extensions[] — how many times this exact loan was extended in
+    place, same pubkey, before finally defaulting on whichever term it was
+    on by then; 0 means it defaulted on its original term, never rolled)."""
+    rows = []
+    for l in loans:
+        if l.get("_status") != "defaulted":
+            continue
+        meta = l.get("metadata") or {}
+        start_principal_usd = meta.get("startPrincipalAmountUsd") or 0.0
+        start_collateral_usd = meta.get("startCollateralAmountUsd")
+        end_collateral_usd = meta.get("endCollateralAmountUsd")
+        if end_collateral_usd is None:
+            end_collateral_usd = start_collateral_usd or 0.0
+        rows.append({
+            "created_at": (l.get("createdAt") or "")[:10],
+            "borrower": l.get("borrower", ""),
+            "lender": l.get("lender", ""),
+            "principal_usd": start_principal_usd,
+            "apy_bps": l.get("apy", 0),
+            "duration_days": (l.get("duration") or 0) / 86400,
+            "origination_ltv": (start_principal_usd / start_collateral_usd) if start_collateral_usd else None,
+            "rollover_count": len(meta.get("extensions") or []),
+            "delta_usd": end_collateral_usd - start_principal_usd,
         })
     rows.sort(key=lambda r: -r["principal_usd"])
     return rows[:top_n]
@@ -584,6 +630,27 @@ def print_loan_history_report(loans: list[dict], principal_mint: str, collateral
             r["created_at"], r["borrower"], f"{r['principal_usd']:,.2f}",
             f"{r['apy_bps'] / 100:.2f}%", f"{r['duration_days']:.0f}d", r["status"],
         ))
+
+    top_defaulted = biggest_defaulted_loans(loans)
+    log.info("")
+    log.info("Biggest DEFAULTED loans (top %d):", len(top_defaulted))
+    if not top_defaulted:
+        log.info("  None — nothing's ever defaulted on this pair.")
+    else:
+        col_def = "{:<12}{:<46}{:<46}{:>16}{:>10}{:>10}{:>10}{:>11}{:>18}"
+        log.info(col_def.format(
+            "date", "borrower", "lender", f"principal {sym}", "APY", "duration",
+            "orig LTV", "rollovers", "delta $",
+        ))
+        for r in top_defaulted:
+            sign = "-" if r["delta_usd"] < 0 else "+"
+            orig_ltv = f"{r['origination_ltv'] * 100:.1f}%" if r["origination_ltv"] is not None else "n/a"
+            log.info(col_def.format(
+                r["created_at"], r["borrower"], r["lender"], f"{r['principal_usd']:,.2f}",
+                f"{r['apy_bps'] / 100:.2f}%", f"{r['duration_days']:.0f}d",
+                orig_ltv, r["rollover_count"],
+                f"{sign}{abs(r['delta_usd']):,.2f}",
+            ))
 
     day = biggest_day_ever(loans)
     log.info("")
